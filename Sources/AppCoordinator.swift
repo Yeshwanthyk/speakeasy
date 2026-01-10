@@ -71,7 +71,7 @@ final class AppCoordinator {
 
     private func stopAndTranscribe() {
         let samples = audioCapture.stop()
-        if samples.isEmpty {
+        guard !samples.isEmpty else {
             stateLock.withLock { state = .idle }
             DispatchQueue.main.async { [hud] in
                 hud.show(message: "No speech")
@@ -84,28 +84,36 @@ final class AppCoordinator {
                 return
             }
 
-            do {
-                let text = try self.transcriber.transcribe(samples: samples)
-                if !text.isEmpty {
-                    DispatchQueue.main.async {
-                        if Permissions.ensureAccessibilityPrompted() {
-                            self.paster.paste(text)
-                            self.hud.show(message: "Pasted")
-                        } else {
-                            self.hud.show(message: "Enable Accessibility")
-                            self.logger.error("Accessibility permission missing")
-                        }
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.hud.show(message: "No speech")
-                    }
-                }
-            } catch {
-                self.logger.error("Transcription failed: \(String(describing: error))")
+            defer {
+                self.stateLock.withLock { self.state = .idle }
             }
 
-            self.stateLock.withLock { self.state = .idle }
+            let text: String
+            do {
+                text = try self.transcriber.transcribe(samples: samples)
+            } catch {
+                self.logger.error("Transcription failed: \(String(describing: error))")
+                return
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else {
+                    return
+                }
+
+                guard !text.isEmpty else {
+                    self.hud.show(message: "No speech")
+                    return
+                }
+
+                if Permissions.ensureAccessibilityPrompted() {
+                    self.paster.paste(text)
+                    self.hud.show(message: "Pasted")
+                } else {
+                    self.hud.show(message: "Enable Accessibility")
+                    self.logger.error("Accessibility permission missing")
+                }
+            }
         }
     }
 }

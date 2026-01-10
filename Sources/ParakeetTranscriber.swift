@@ -53,17 +53,18 @@ final class ParakeetTranscriber {
     }
 
     func transcribe(samples: [Float]) throws -> String {
-        if samples.isEmpty {
+        guard !samples.isEmpty else {
             return ""
         }
 
         return try samples.withUnsafeBufferPointer { buffer in
             let result = parakeet_transcribe(handle, buffer.baseAddress, buffer.count)
-            defer { parakeet_result_free(result) }
+            defer {
+                parakeet_result_free(result)
+            }
 
             if let errorPointer = result.error {
-                let message = String(cString: errorPointer)
-                throw ParakeetError.transcriptionFailed(message)
+                throw ParakeetError.transcriptionFailed(String(cString: errorPointer))
             }
 
             guard let textPointer = result.text else {
