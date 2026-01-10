@@ -9,15 +9,22 @@ enum AudioCaptureError: Error {
 }
 
 final class AudioCapture {
+    private static let tapBufferSize: AVAudioFrameCount = 1024
+    private static let maxRecordingSamples = 16_000 * 30
+
     private let engine = AVAudioEngine()
     private let logger = Logger(subsystem: "com.wisp.app", category: "audio")
     private let inputFormat: AVAudioFormat
     private let targetFormat: AVAudioFormat
     private let converter: AVAudioConverter
+    private let sampleRateRatio: Double
+
     private let bufferLock = UnfairLock()
     private let stateLock = UnfairLock()
+
     private var buffer = ContiguousArray<Float>()
     private var isRecording = false
+    private var conversionBuffer: AVAudioPCMBuffer?
 
     init() throws {
         let inputNode = engine.inputNode
@@ -39,8 +46,13 @@ final class AudioCapture {
         self.inputFormat = inputFormat
         self.targetFormat = targetFormat
         self.converter = converter
+        self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
 
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] pcmBuffer, _ in
+        inputNode.installTap(
+            onBus: 0,
+            bufferSize: Self.tapBufferSize,
+            format: inputFormat
+        ) { [weak self] pcmBuffer, _ in
             self?.handle(buffer: pcmBuffer)
         }
 
@@ -61,7 +73,7 @@ final class AudioCapture {
 
         bufferLock.withLock {
             buffer.removeAll(keepingCapacity: true)
-            buffer.reserveCapacity(16000 * 30)
+            buffer.reserveCapacity(Self.maxRecordingSamples)
         }
 
         logger.debug("Recording started")
@@ -73,9 +85,9 @@ final class AudioCapture {
         }
 
         let samples = bufferLock.withLock { () -> [Float] in
-            let data = Array(buffer)
+            let samples = Array(buffer)
             buffer.removeAll(keepingCapacity: true)
-            return data
+            return samples
         }
 
         logger.debug("Recording stopped with \(samples.count) samples")
@@ -84,19 +96,19 @@ final class AudioCapture {
 
     private func handle(buffer pcmBuffer: AVAudioPCMBuffer) {
         let shouldRecord = stateLock.withLock { isRecording }
-        if !shouldRecord {
+        guard shouldRecord else {
             return
         }
 
-        let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-        let targetCapacity = AVAudioFrameCount((Double(pcmBuffer.frameLength) * ratio).rounded(.up)) + 1
+        let requiredCapacity = AVAudioFrameCount(
+            (Double(pcmBuffer.frameLength) * sampleRateRatio).rounded(.up)
+        ) + 1
 
-        guard let convertedBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: targetCapacity
-        ) else {
+        let outputBuffer = ensureConversionBuffer(requiredCapacity: requiredCapacity)
+        guard let outputBuffer else {
             return
         }
+        outputBuffer.frameLength = 0
 
         var error: NSError?
         let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
@@ -104,24 +116,42 @@ final class AudioCapture {
             return pcmBuffer
         }
 
-        converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
+        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
         if let error {
             logger.error("Audio conversion failed: \(String(describing: error))")
             return
         }
 
-        guard let channelData = convertedBuffer.floatChannelData else {
+        guard
+            let channelData = outputBuffer.floatChannelData,
+            outputBuffer.frameLength > 0
+        else {
             return
         }
 
         let channel = channelData[0]
-        let count = Int(convertedBuffer.frameLength)
-        guard count > 0 else {
-            return
-        }
+        let count = Int(outputBuffer.frameLength)
 
         bufferLock.withLock {
             buffer.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
         }
+    }
+
+    private func ensureConversionBuffer(
+        requiredCapacity: AVAudioFrameCount
+    ) -> AVAudioPCMBuffer? {
+        if let conversionBuffer, conversionBuffer.frameCapacity >= requiredCapacity {
+            return conversionBuffer
+        }
+
+        guard let conversionBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: requiredCapacity
+        ) else {
+            return nil
+        }
+
+        self.conversionBuffer = conversionBuffer
+        return conversionBuffer
     }
 }
