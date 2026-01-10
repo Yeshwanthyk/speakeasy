@@ -1,0 +1,10 @@
+[package]
+name = "parakeet_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+transcribe-rs = { version = "0.2", features = ["parakeet"] }
