@@ -23,7 +23,7 @@ final class AppCoordinator {
     private let stateLock = UnfairLock()
     private var state: State = .idle
     private let transcriptionQueue = DispatchQueue(label: "com.wisp.app.transcription", qos: .userInitiated)
-    private let soundPlayer = SoundPlayer()
+    private let hud = HUDPresenter()
     private var keyMonitor: KeyComboMonitor?
 
     init() throws {
@@ -61,10 +61,8 @@ final class AppCoordinator {
 
         switch transition {
         case .start:
-            soundPlayer.playStart()
             audioCapture.start()
         case .stop:
-            soundPlayer.playStop()
             stopAndTranscribe()
         case .ignore:
             logger.debug("Ignoring hotkey while transcribing")
@@ -75,6 +73,9 @@ final class AppCoordinator {
         let samples = audioCapture.stop()
         if samples.isEmpty {
             stateLock.withLock { state = .idle }
+            DispatchQueue.main.async { [hud] in
+                hud.show(message: "No speech")
+            }
             return
         }
 
@@ -89,9 +90,15 @@ final class AppCoordinator {
                     DispatchQueue.main.async {
                         if Permissions.ensureAccessibilityPrompted() {
                             self.paster.paste(text)
+                            self.hud.show(message: "Pasted")
                         } else {
+                            self.hud.show(message: "Enable Accessibility")
                             self.logger.error("Accessibility permission missing")
                         }
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self.hud.show(message: "No speech")
                     }
                 }
             } catch {
