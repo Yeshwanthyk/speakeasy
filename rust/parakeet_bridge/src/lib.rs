@@ -2,10 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
 
-use transcribe_rs::engines::parakeet::{
-    ParakeetEngine, ParakeetInferenceParams, ParakeetModelParams, TimestampGranularity,
-};
-use transcribe_rs::TranscriptionEngine;
+use transcribe_rs::engines::parakeet::ParakeetModel;
 
 #[repr(C)]
 pub struct ParakeetResult {
@@ -14,7 +11,7 @@ pub struct ParakeetResult {
 }
 
 pub struct ParakeetHandle {
-    engine: ParakeetEngine,
+    model: ParakeetModel,
 }
 
 fn to_c_string(value: &str) -> *mut c_char {
@@ -50,15 +47,12 @@ pub extern "C" fn parakeet_create(model_path: *const c_char) -> *mut ParakeetHan
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let mut engine = ParakeetEngine::new();
-    if engine
-        .load_model_with_params(Path::new(path_str), ParakeetModelParams::int8())
-        .is_err()
-    {
-        return std::ptr::null_mut();
-    }
+    let model = match ParakeetModel::new(Path::new(path_str), true) {
+        Ok(model) => model,
+        Err(_) => return std::ptr::null_mut(),
+    };
 
-    Box::into_raw(Box::new(ParakeetHandle { engine }))
+    Box::into_raw(Box::new(ParakeetHandle { model }))
 }
 
 #[no_mangle]
@@ -91,15 +85,10 @@ pub extern "C" fn parakeet_transcribe(
         return result_ok(String::new());
     }
 
-    let params = ParakeetInferenceParams {
-        timestamp_granularity: TimestampGranularity::Segment,
-        ..Default::default()
-    };
-
-    let engine = unsafe { &mut (*handle).engine };
-    match engine.transcribe_samples(slice.to_vec(), Some(params)) {
+    let model = unsafe { &mut (*handle).model };
+    match model.transcribe_samples(slice.to_vec()) {
         Ok(result) => result_ok(result.text),
-        Err(err) => result_err(&format!("Parakeet transcription failed: {}", err)),
+        Err(err) => result_err(&format!("Parakeet transcription failed: {err}")),
     }
 }
 
