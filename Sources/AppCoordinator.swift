@@ -88,13 +88,16 @@ final class AppCoordinator {
                 self.stateLock.withLock { self.state = .idle }
             }
 
-            let text: String
+            var text: String
             do {
                 text = try self.transcriber.transcribe(samples: samples)
             } catch {
                 self.logger.error("Transcription failed: \(String(describing: error))")
                 return
             }
+
+            // Apply user dictionary corrections
+            text = WordCorrector.shared.correct(text)
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else {
