@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
-        _ = Permissions.ensureAccessibilityPrompted()
 
         Task { [weak self] in
             do {
