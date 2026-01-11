@@ -3,8 +3,13 @@ import Carbon
 import Foundation
 import os
 
-final class PasteboardPaster {
+final class PasteboardPaster: Pasting {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "paste")
+    private let feedback: UserFeedback
+
+    init(feedback: UserFeedback) {
+        self.feedback = feedback
+    }
 
     func paste(_ text: String) {
         let pasteboard = NSPasteboard.general
@@ -17,6 +22,7 @@ final class PasteboardPaster {
     private func sendCommandV() {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             logger.error("Failed to create CGEventSource")
+            feedback.error("Paste failed")
             return
         }
 
@@ -26,6 +32,7 @@ final class PasteboardPaster {
             keyDown: true
         ) else {
             logger.error("Failed to create keyDown event")
+            feedback.error("Paste failed")
             return
         }
 
@@ -35,6 +42,7 @@ final class PasteboardPaster {
             keyDown: false
         ) else {
             logger.error("Failed to create keyUp event")
+            feedback.error("Paste failed")
             return
         }
 

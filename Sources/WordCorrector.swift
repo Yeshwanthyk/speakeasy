@@ -6,8 +6,14 @@ import os
 ///   - "word" (valid word, won't be changed)
 ///   - "wrong -> right" (replacement rule)
 final class WordCorrector: @unchecked Sendable {
+    private struct ReplacementRule {
+        let regex: NSRegularExpression
+        let replacement: String
+    }
+
     private var validWords: Set<String> = []
     private var replacements: [String: String] = [:]
+    private var replacementRules: [ReplacementRule] = []
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "corrector")
     
     static let shared: WordCorrector = {
@@ -17,6 +23,10 @@ final class WordCorrector: @unchecked Sendable {
     }()
     
     private init() {}
+
+    init(dictionaryContents: String) {
+        parse(dictionaryContents)
+    }
     
     private func loadUserDictionary() {
         let supportDir = FileManager.default.urls(
@@ -40,6 +50,10 @@ final class WordCorrector: @unchecked Sendable {
     }
     
     private func parse(_ content: String) {
+        validWords.removeAll(keepingCapacity: true)
+        replacements.removeAll(keepingCapacity: true)
+        replacementRules.removeAll(keepingCapacity: true)
+
         for line in content.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             
@@ -60,26 +74,51 @@ final class WordCorrector: @unchecked Sendable {
                 validWords.insert(trimmed.lowercased())
             }
         }
+
+        buildReplacementRules()
+    }
+
+    private func buildReplacementRules() {
+        let keys = replacements.keys.sorted()
+        replacementRules = keys.compactMap { wrong in
+            guard let right = replacements[wrong] else {
+                return nil
+            }
+
+            let escaped = NSRegularExpression.escapedPattern(for: wrong)
+            let pattern = "\\b\(escaped)\\b"
+            do {
+                let regex = try NSRegularExpression(
+                    pattern: pattern,
+                    options: [.caseInsensitive]
+                )
+                return ReplacementRule(regex: regex, replacement: right)
+            } catch {
+                logger.error("Failed to compile regex for '\(wrong)': \(error.localizedDescription)")
+                return nil
+            }
+        }
     }
     
     /// Correct text using the user dictionary.
     /// Returns the corrected text.
     func correct(_ text: String) -> String {
-        guard !replacements.isEmpty else {
+        guard !replacementRules.isEmpty else {
             return text
         }
-        
+
         var result = text
-        
+
         // Apply replacements (case-insensitive matching, preserve case in output)
-        for (wrong, right) in replacements {
-            result = result.replacingOccurrences(
-                of: "\\b\(NSRegularExpression.escapedPattern(for: wrong))\\b",
-                with: right,
-                options: [.regularExpression, .caseInsensitive]
+        for rule in replacementRules {
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = rule.regex.stringByReplacingMatches(
+                in: result,
+                range: range,
+                withTemplate: rule.replacement
             )
         }
-        
+
         return result
     }
 }

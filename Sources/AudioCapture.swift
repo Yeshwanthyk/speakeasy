@@ -10,7 +10,7 @@ enum AudioCaptureError: Error {
 
 final class AudioCapture {
     private static let tapBufferSize: AVAudioFrameCount = 1024
-    private static let maxRecordingSamples = 16_000 * 30
+    private static let defaultMaxRecordingSamples = 16_000 * 60 * 6
 
     private let engine = AVAudioEngine()
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
@@ -18,6 +18,8 @@ final class AudioCapture {
     private let targetFormat: AVAudioFormat
     private let converter: AVAudioConverter
     private let sampleRateRatio: Double
+    private let maxRecordingSamples: Int
+    private let onLimitReached: (() -> Void)?
 
     private let bufferLock = UnfairLock()
     private let stateLock = UnfairLock()
@@ -25,8 +27,15 @@ final class AudioCapture {
     private var buffer = ContiguousArray<Float>()
     private var isRecording = false
     private var conversionBuffer: AVAudioPCMBuffer?
+    private var didReachLimit = false
 
-    init() throws {
+    init(
+        maxRecordingSamples: Int = AudioCapture.defaultMaxRecordingSamples,
+        onLimitReached: (() -> Void)? = nil
+    ) throws {
+        self.maxRecordingSamples = maxRecordingSamples
+        self.onLimitReached = onLimitReached
+
         let inputNode = engine.inputNode
         let inputFormat = inputNode.inputFormat(forBus: 0)
 
@@ -69,11 +78,12 @@ final class AudioCapture {
     func start() {
         stateLock.withLock {
             isRecording = true
+            didReachLimit = false
         }
 
         bufferLock.withLock {
             buffer.removeAll(keepingCapacity: true)
-            buffer.reserveCapacity(Self.maxRecordingSamples)
+            buffer.reserveCapacity(maxRecordingSamples)
         }
 
         logger.debug("Recording started")
@@ -131,9 +141,30 @@ final class AudioCapture {
 
         let channel = channelData[0]
         let count = Int(outputBuffer.frameLength)
+        var reachedLimit = false
 
         bufferLock.withLock {
-            buffer.append(contentsOf: UnsafeBufferPointer(start: channel, count: count))
+            let samples = UnsafeBufferPointer(start: channel, count: count)
+            reachedLimit = Self.appendSamples(
+                buffer: &buffer,
+                newSamples: samples,
+                maxSamples: maxRecordingSamples
+            )
+        }
+
+        if reachedLimit {
+            let shouldNotify = stateLock.withLock { () -> Bool in
+                if didReachLimit {
+                    return false
+                }
+                didReachLimit = true
+                isRecording = false
+                return true
+            }
+
+            if shouldNotify {
+                onLimitReached?()
+            }
         }
     }
 
@@ -153,5 +184,28 @@ final class AudioCapture {
 
         self.conversionBuffer = conversionBuffer
         return conversionBuffer
+    }
+
+    @discardableResult
+    static func appendSamples(
+        buffer: inout ContiguousArray<Float>,
+        newSamples: UnsafeBufferPointer<Float>,
+        maxSamples: Int
+    ) -> Bool {
+        guard maxSamples > 0 else {
+            return true
+        }
+
+        let remaining = maxSamples - buffer.count
+        if remaining <= 0 {
+            return true
+        }
+
+        let appendCount = min(remaining, newSamples.count)
+        if appendCount > 0, let base = newSamples.baseAddress {
+            buffer.append(contentsOf: UnsafeBufferPointer(start: base, count: appendCount))
+        }
+
+        return appendCount < newSamples.count
     }
 }

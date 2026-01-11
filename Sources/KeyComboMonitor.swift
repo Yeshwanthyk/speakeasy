@@ -63,6 +63,7 @@ final class KeyComboMonitor {
         }
 
         if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
             CFMachPortInvalidate(eventTap)
         }
     }
