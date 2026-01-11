@@ -5,11 +5,8 @@ import os
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private var coordinator: AppCoordinator?
-    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupStatusItem()
-
         Task { [weak self] in
             do {
                 try await Permissions.requestMicrophoneAccess()
@@ -25,27 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
         }
-    }
-
-    private func setupStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "S"
-
-        let menu = NSMenu()
-        let quitItem = NSMenuItem(
-            title: "Quit",
-            action: #selector(quitApp),
-            keyEquivalent: "q"
-        )
-        quitItem.target = self
-        menu.addItem(quitItem)
-        item.menu = menu
-
-        statusItem = item
-    }
-
-    @objc private func quitApp() {
-        NSApplication.shared.terminate(nil)
     }
 
     @MainActor private func presentError(_ message: String) {
