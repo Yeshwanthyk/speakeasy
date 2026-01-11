@@ -8,7 +8,7 @@ enum HotKeyError: Error {
 }
 
 final class HotKeyManager {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "hotkey")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "hotkey")
     private let hotKeyID: EventHotKeyID
     private let callback: () -> Void
     private var hotKeyRef: EventHotKeyRef?

@@ -13,7 +13,7 @@ final class AudioCapture {
     private static let maxRecordingSamples = 16_000 * 30
 
     private let engine = AVAudioEngine()
-    private let logger = Logger(subsystem: "com.wisp.app", category: "audio")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
     private let inputFormat: AVAudioFormat
     private let targetFormat: AVAudioFormat
     private let converter: AVAudioConverter

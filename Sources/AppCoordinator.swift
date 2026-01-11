@@ -16,13 +16,13 @@ final class AppCoordinator {
         case ignore
     }
 
-    private let logger = Logger(subsystem: "com.wisp.app", category: "app")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapture
     private let transcriber: ParakeetTranscriber
     private let paster = PasteboardPaster()
     private let stateLock = UnfairLock()
     private var state: State = .idle
-    private let transcriptionQueue = DispatchQueue(label: "com.wisp.app.transcription", qos: .userInitiated)
+    private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInitiated)
     private let hud = HUDPresenter()
     private var keyMonitor: KeyComboMonitor?
 

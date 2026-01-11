@@ -3,7 +3,7 @@ import Foundation
 import os
 
 final class HUDPresenter {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "hud")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "hud")
     private var window: NSPanel?
     private var label: NSTextField?
     private var hideToken: UUID?

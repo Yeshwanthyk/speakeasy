@@ -4,7 +4,7 @@ import Foundation
 import os
 
 final class RightCommandMonitor {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "hotkey")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "hotkey")
     private let callback: () -> Void
     private let stateLock = UnfairLock()
     private var isPressed = false

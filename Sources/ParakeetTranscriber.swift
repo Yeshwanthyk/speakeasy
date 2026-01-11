@@ -30,7 +30,7 @@ enum ParakeetError: Error {
 
 final class ParakeetTranscriber {
     private let handle: UnsafeMutableRawPointer
-    private let logger = Logger(subsystem: "com.wisp.app", category: "parakeet")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "parakeet")
 
     init(modelPath: URL) throws {
         let handle = modelPath.withUnsafeFileSystemRepresentation { pointer -> UnsafeMutableRawPointer? in

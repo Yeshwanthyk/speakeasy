@@ -3,7 +3,7 @@ import Foundation
 import os
 
 final class KeyComboMonitor {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "hotkey")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "hotkey")
     private let keyCode: CGKeyCode
     private let requiredFlags: CGEventFlags
     private let forbiddenFlags: CGEventFlags

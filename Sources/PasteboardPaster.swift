@@ -4,7 +4,7 @@ import Foundation
 import os
 
 final class PasteboardPaster {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "paste")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "paste")
 
     func paste(_ text: String) {
         let pasteboard = NSPasteboard.general
