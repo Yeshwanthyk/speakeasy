@@ -8,6 +8,8 @@
   <string>com.wisp.app</string>
   <key>CFBundleExecutable</key>
   <string>Wisp</string>
+  <key>CFBundleIconFile</key>
+  <string>speakeasy</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
