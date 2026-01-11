@@ -23,7 +23,6 @@ final class AppCoordinator {
     private let stateLock = UnfairLock()
     private var state: State = .idle
     private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInitiated)
-    private let hud = HUDPresenter()
     private var keyMonitor: KeyComboMonitor?
 
     init() throws {
@@ -73,9 +72,6 @@ final class AppCoordinator {
         let samples = audioCapture.stop()
         guard !samples.isEmpty else {
             stateLock.withLock { state = .idle }
-            DispatchQueue.main.async { [hud] in
-                hud.show(message: "No speech")
-            }
             return
         }
 
@@ -102,15 +98,12 @@ final class AppCoordinator {
                 }
 
                 guard !text.isEmpty else {
-                    self.hud.show(message: "No speech")
                     return
                 }
 
                 if Permissions.ensureAccessibilityPrompted() {
                     self.paster.paste(text)
-                    self.hud.show(message: "Pasted")
                 } else {
-                    self.hud.show(message: "Enable Accessibility")
                     self.logger.error("Accessibility permission missing")
                 }
             }
