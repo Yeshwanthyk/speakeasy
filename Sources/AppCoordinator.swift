@@ -23,6 +23,7 @@ final class AppCoordinator {
     private let stateLock = UnfairLock()
     private var state: State = .idle
     private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInitiated)
+    private let flash = ScreenEdgeFlash()
     private var keyMonitor: KeyComboMonitor?
 
     init() throws {
@@ -62,6 +63,9 @@ final class AppCoordinator {
         case .start:
             audioCapture.start()
         case .stop:
+            DispatchQueue.main.async { [flash] in
+                flash.flash()
+            }
             stopAndTranscribe()
         case .ignore:
             logger.debug("Ignoring hotkey while transcribing")
