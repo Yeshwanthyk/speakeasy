@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
 
+use ndarray::{aview1, ArrayView2};
 use transcribe_rs::engines::parakeet::ParakeetModel;
 
 #[repr(C)]
@@ -86,8 +87,21 @@ pub extern "C" fn parakeet_transcribe(
     }
 
     let model = unsafe { &mut (*handle).model };
-    match model.transcribe_samples(slice.to_vec()) {
-        Ok(result) => result_ok(result.text),
+
+    let waveforms = match ArrayView2::from_shape((1, len), slice) {
+        Ok(view) => view.into_dyn(),
+        Err(err) => {
+            return result_err(&format!("Invalid waveform shape: {err}"));
+        }
+    };
+    let lens = [len as i64];
+    let waveforms_len = aview1(&lens).into_dyn();
+
+    match model.recognize_batch(&waveforms, &waveforms_len) {
+        Ok(mut results) => match results.pop() {
+            Some(result) => result_ok(result.text),
+            None => result_err("Parakeet transcription returned no result"),
+        },
         Err(err) => result_err(&format!("Parakeet transcription failed: {err}")),
     }
 }

@@ -79,14 +79,14 @@ final class AudioCapture {
         logger.debug("Recording started")
     }
 
-    func stop() -> [Float] {
+    func stop() -> ContiguousArray<Float> {
         stateLock.withLock {
             isRecording = false
         }
 
-        let samples = bufferLock.withLock { () -> [Float] in
-            let samples = Array(buffer)
-            buffer.removeAll(keepingCapacity: true)
+        let samples = bufferLock.withLock { () -> ContiguousArray<Float> in
+            var samples = ContiguousArray<Float>()
+            swap(&samples, &buffer)
             return samples
         }
 

@@ -3,7 +3,7 @@ Wisp
 Minimal macOS transcription app using Parakeet V3 only.
 
 Defaults
-- Hotkey toggle: Option+D
+- Hotkey toggle: Hyper+S (Cmd+Ctrl+Opt+Shift+S)
 - Model path: ~/Library/Application Support/com.wisp.app/models/parakeet-tdt-0.6b-v3-int8
 - Override model path with PARAKEET_MODEL_DIR
 

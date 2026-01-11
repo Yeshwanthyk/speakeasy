@@ -52,7 +52,7 @@ final class ParakeetTranscriber {
         parakeet_destroy(handle)
     }
 
-    func transcribe(samples: [Float]) throws -> String {
+    func transcribe(samples: ContiguousArray<Float>) throws -> String {
         guard !samples.isEmpty else {
             return ""
         }

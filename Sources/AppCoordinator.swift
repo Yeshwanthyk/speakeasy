@@ -31,9 +31,9 @@ final class AppCoordinator {
         self.transcriber = try ParakeetTranscriber(modelPath: modelPath)
         self.audioCapture = try AudioCapture()
 
-        let keyCode = CGKeyCode(kVK_ANSI_D)
-        let requiredFlags: CGEventFlags = .maskAlternate
-        let forbiddenFlags: CGEventFlags = [.maskCommand, .maskControl, .maskShift]
+        let keyCode = CGKeyCode(kVK_ANSI_S)
+        let requiredFlags: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        let forbiddenFlags: CGEventFlags = []
         keyMonitor = KeyComboMonitor(
             keyCode: keyCode,
             requiredFlags: requiredFlags,

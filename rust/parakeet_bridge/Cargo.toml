@@ -7,4 +7,5 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+ndarray = "0.16.1"
 transcribe-rs = { version = "0.2", features = ["parakeet"] }
