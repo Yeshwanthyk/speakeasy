@@ -22,15 +22,26 @@ enum ModelPathResolver {
             throw ModelPathError.appSupportUnavailable
         }
 
-        let modelURL = appSupport
-            .appendingPathComponent("com.wisp.app")
-            .appendingPathComponent("models")
-            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
+        let bundleId = Bundle.main.bundleIdentifier ?? "com.speakeasy.app"
+        let candidateIds = bundleId == "com.wisp.app"
+            ? [bundleId]
+            : [bundleId, "com.wisp.app"]
 
-        if FileManager.default.fileExists(atPath: modelURL.path) {
-            return modelURL
+        func modelURL(for candidateId: String) -> URL {
+            appSupport
+                .appendingPathComponent(candidateId)
+                .appendingPathComponent("models")
+                .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
         }
 
-        throw ModelPathError.modelNotFound(modelURL.path)
+        for candidateId in candidateIds {
+            let candidateURL = modelURL(for: candidateId)
+            if FileManager.default.fileExists(atPath: candidateURL.path) {
+                return candidateURL
+            }
+        }
+
+        let defaultURL = modelURL(for: candidateIds[0])
+        throw ModelPathError.modelNotFound(defaultURL.path)
     }
 }

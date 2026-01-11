@@ -3,7 +3,7 @@ import Foundation
 import os
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let logger = Logger(subsystem: "com.wisp.app", category: "app")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private var coordinator: AppCoordinator?
     private var statusItem: NSStatusItem?
 
@@ -30,7 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = "W"
+        item.button?.title = "S"
 
         let menu = NSMenu()
         let quitItem = NSMenuItem(
@@ -53,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logger.error("\(message)")
 
         let alert = NSAlert()
-        alert.messageText = "Wisp"
+        alert.messageText = "Speakeasy"
         alert.informativeText = message
         alert.addButton(withTitle: "Quit")
         alert.alertStyle = .critical

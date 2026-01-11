@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
-APP_NAME="Wisp"
+APP_NAME="Speakeasy"
 BUILD_DIR="$ROOT_DIR/build"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 BIN_DIR="$APP_DIR/Contents/MacOS"
