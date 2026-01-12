@@ -16,7 +16,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
             do {
-                self?.coordinator = try AppCoordinator()
+                let coordinator = try AppCoordinator()
+                self?.coordinator = coordinator
+
+                // Warm up model in background for faster first transcription
+                Task.detached(priority: .utility) {
+                    coordinator.warmUpModel()
+                }
             } catch {
                 await MainActor.run { self?.presentError("Failed to start: \(String(describing: error))") }
                 return

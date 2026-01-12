@@ -10,6 +10,7 @@ protocol AudioCapturing {
 
 protocol Transcribing {
     func transcribe(samples: ContiguousArray<Float>) throws -> String
+    func warmUp()
 }
 
 protocol Pasting {
@@ -68,7 +69,7 @@ final class AppCoordinator {
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
-    private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInitiated)
+    private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
     private let flash: Flashing
     private var keyMonitor: KeyComboMonitor?
 
@@ -95,6 +96,11 @@ final class AppCoordinator {
         }
 
         logger.debug("AppCoordinator ready")
+    }
+
+    /// Warm up the transcription model for faster first inference.
+    func warmUpModel() {
+        transcriber.warmUp()
     }
 
     #if !SWIFT_PACKAGE
@@ -152,11 +158,13 @@ final class AppCoordinator {
 
         switch transition {
         case .start:
-            audioCapture.start()
+            // Show visual feedback immediately before any other work
             DispatchQueue.main.async { [flash] in
                 flash.show(lineWidth: Self.flashLineWidth)
             }
+            audioCapture.start()
         case .stop(let token):
+            // Hide flash immediately
             DispatchQueue.main.async { [flash] in
                 flash.hide(completion: nil)
             }
