@@ -7,17 +7,39 @@ final class ScreenEdgeFlash {
     private var window: NSPanel?
     private var borderView: NSView?
     private var hideToken: UUID?
+    private var isVisible = false
 
-    func flash(duration: TimeInterval = 0.18, lineWidth: CGFloat = 3) {
+    func show(lineWidth: CGFloat = 3) {
         let (window, borderView) = ensureWindow()
         updateFrame(window: window, borderView: borderView, lineWidth: lineWidth)
 
         window.alphaValue = 0
         window.orderFront(nil)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.06
+            context.duration = 0.12
             window.animator().alphaValue = 1
         }
+        isVisible = true
+    }
+
+    func hide(completion: (() -> Void)? = nil) {
+        guard let window else {
+            completion?()
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            window.animator().alphaValue = 0
+        } completionHandler: {
+            window.orderOut(nil)
+            completion?()
+        }
+        isVisible = false
+    }
+
+    func flash(duration: TimeInterval = 0.18, lineWidth: CGFloat = 3) {
+        show(lineWidth: lineWidth)
 
         let token = UUID()
         hideToken = token
@@ -25,7 +47,7 @@ final class ScreenEdgeFlash {
             guard let self, self.hideToken == token else {
                 return
             }
-            self.hide(window: window)
+            self.hide()
         }
     }
 
