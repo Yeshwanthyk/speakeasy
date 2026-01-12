@@ -9,7 +9,6 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let flash = FlashStub()
         let feedback = FeedbackStub()
-        let corrector = PassthroughCorrector()
         let accessibility = AccessibilityStub(allowed: true)
 
         let pasted = expectation(description: "paste")
@@ -21,7 +20,6 @@ final class AppCoordinatorTests: XCTestCase {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: corrector,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 1.0 },
             keyMonitorFactory: { _ in nil }
@@ -34,7 +32,8 @@ final class AppCoordinatorTests: XCTestCase {
         wait(for: [pasted], timeout: 1.0)
 
         XCTAssertEqual(paster.pastedTexts, ["Hello"])
-        XCTAssertEqual(flash.flashCount, 1)
+        XCTAssertEqual(flash.showCount, 1)
+        XCTAssertEqual(flash.hideCount, 1)
         XCTAssertTrue(feedback.errors.isEmpty)
     }
 
@@ -44,7 +43,6 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let flash = FlashStub()
         let feedback = FeedbackStub()
-        let corrector = PassthroughCorrector()
         let accessibility = AccessibilityStub(allowed: true)
 
         let notified = expectation(description: "error")
@@ -56,7 +54,6 @@ final class AppCoordinatorTests: XCTestCase {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: corrector,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 1.0 },
             keyMonitorFactory: { _ in nil }
@@ -75,7 +72,6 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let flash = FlashStub()
         let feedback = FeedbackStub()
-        let corrector = PassthroughCorrector()
         let accessibility = AccessibilityStub(allowed: true)
 
         let timedOut = expectation(description: "timeout")
@@ -91,7 +87,6 @@ final class AppCoordinatorTests: XCTestCase {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: corrector,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 0.05 },
             keyMonitorFactory: { _ in nil }
@@ -111,7 +106,6 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let flash = FlashStub()
         let feedback = FeedbackStub()
-        let corrector = PassthroughCorrector()
         let accessibility = AccessibilityStub(allowed: true)
 
         let coordinator = AppCoordinator(
@@ -120,7 +114,6 @@ final class AppCoordinatorTests: XCTestCase {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: corrector,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 1.0 },
             keyMonitorFactory: { _ in nil }
@@ -140,7 +133,6 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let flash = FlashStub()
         let feedback = FeedbackStub()
-        let corrector = PassthroughCorrector()
         let accessibility = AccessibilityStub(allowed: true)
 
         let notified = expectation(description: "no speech")
@@ -156,7 +148,6 @@ final class AppCoordinatorTests: XCTestCase {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: corrector,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 1.0 },
             keyMonitorFactory: { _ in nil }
@@ -225,7 +216,18 @@ private final class PasterStub: Pasting {
 }
 
 private final class FlashStub: Flashing {
+    private(set) var showCount = 0
+    private(set) var hideCount = 0
     private(set) var flashCount = 0
+
+    func show(lineWidth: CGFloat) {
+        showCount += 1
+    }
+
+    func hide(completion: (() -> Void)?) {
+        hideCount += 1
+        completion?()
+    }
 
     func flash(duration: TimeInterval, lineWidth: CGFloat) {
         flashCount += 1
@@ -239,12 +241,6 @@ private final class FeedbackStub: UserFeedback {
     func error(_ message: String) {
         errors.append(message)
         onError?(message)
-    }
-}
-
-private final class PassthroughCorrector: TextCorrecting {
-    func correct(_ text: String) -> String {
-        text
     }
 }
 

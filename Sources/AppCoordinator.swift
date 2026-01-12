@@ -17,11 +17,9 @@ protocol Pasting {
 }
 
 protocol Flashing {
+    func show(lineWidth: CGFloat)
+    func hide(completion: (() -> Void)?)
     func flash(duration: TimeInterval, lineWidth: CGFloat)
-}
-
-protocol TextCorrecting {
-    func correct(_ text: String) -> String
 }
 
 protocol AccessibilityChecking {
@@ -32,7 +30,6 @@ typealias KeyMonitorFactory = (_ callback: @escaping () -> Void) -> KeyComboMoni
 
 extension AudioCapture: AudioCapturing {}
 extension ScreenEdgeFlash: Flashing {}
-extension WordCorrector: TextCorrecting {}
 
 #if !SWIFT_PACKAGE
 extension ParakeetTranscriber: Transcribing {}
@@ -57,7 +54,6 @@ final class AppCoordinator {
         case ignore
     }
 
-    private static let flashDuration: TimeInterval = 0.18
     private static let flashLineWidth: CGFloat = 3
     private static let transcriptionSampleRate: Double = 16_000
     private static let minTranscriptionTimeout: TimeInterval = 30
@@ -68,7 +64,6 @@ final class AppCoordinator {
     private let transcriber: Transcribing
     private let paster: Pasting
     private let feedback: UserFeedback
-    private let textCorrector: TextCorrecting
     private let accessibilityChecker: AccessibilityChecking
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
@@ -83,7 +78,6 @@ final class AppCoordinator {
         paster: Pasting,
         flash: Flashing,
         feedback: UserFeedback,
-        textCorrector: TextCorrecting,
         accessibilityChecker: AccessibilityChecking,
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?
@@ -93,7 +87,6 @@ final class AppCoordinator {
         self.paster = paster
         self.flash = flash
         self.feedback = feedback
-        self.textCorrector = textCorrector
         self.accessibilityChecker = accessibilityChecker
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
 
@@ -135,7 +128,6 @@ final class AppCoordinator {
             paster: paster,
             flash: flash,
             feedback: feedback,
-            textCorrector: WordCorrector.shared,
             accessibilityChecker: SystemAccessibilityChecker(),
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory
@@ -161,9 +153,12 @@ final class AppCoordinator {
         switch transition {
         case .start:
             audioCapture.start()
+            DispatchQueue.main.async { [flash] in
+                flash.show(lineWidth: Self.flashLineWidth)
+            }
         case .stop(let token):
             DispatchQueue.main.async { [flash] in
-                flash.flash(duration: Self.flashDuration, lineWidth: Self.flashLineWidth)
+                flash.hide(completion: nil)
             }
             stopAndTranscribe(token: token)
         case .ignore:
@@ -225,8 +220,7 @@ final class AppCoordinator {
     }
 
     private func handleTranscriptionResult(_ text: String) {
-        let corrected = textCorrector.correct(text)
-        let trimmed = corrected.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             feedback.error("No speech detected")
             return
