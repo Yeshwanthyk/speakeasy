@@ -184,6 +184,7 @@ private final class TranscriberStub: Transcribing {
     private let result: Result<String, Error>
     private let delay: TimeInterval
     private(set) var callCount = 0
+    private(set) var warmUpCount = 0
 
     init(result: Result<String, Error>, delay: TimeInterval = 0) {
         self.result = result
@@ -202,6 +203,10 @@ private final class TranscriberStub: Transcribing {
         case .failure(let error):
             throw error
         }
+    }
+
+    func warmUp() {
+        warmUpCount += 1
     }
 }
 
