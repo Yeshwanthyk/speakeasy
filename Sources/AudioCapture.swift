@@ -11,6 +11,7 @@ enum AudioCaptureError: Error {
 final class AudioCapture {
     private static let tapBufferSize: AVAudioFrameCount = 1024
     private static let defaultMaxRecordingSamples = 16_000 * 60 * 6
+    private static let flushThreshold = 8_000  // Flush back buffer every ~0.5s at 16kHz
 
     private let engine = AVAudioEngine()
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
@@ -21,10 +22,14 @@ final class AudioCapture {
     private let maxRecordingSamples: Int
     private let onLimitReached: (() -> Void)?
 
-    private let bufferLock = UnfairLock()
+    // Double-buffering: back buffer accumulates samples from audio thread,
+    // front buffer holds committed samples. Reduces lock contention.
+    private let frontLock = UnfairLock()
+    private let backLock = UnfairLock()
     private let stateLock = UnfairLock()
 
-    private var buffer = ContiguousArray<Float>()
+    private var frontBuffer = ContiguousArray<Float>()
+    private var backBuffer = ContiguousArray<Float>()
     private var isRecording = false
     private var conversionBuffer: AVAudioPCMBuffer?
     private var didReachLimit = false
@@ -81,9 +86,14 @@ final class AudioCapture {
             didReachLimit = false
         }
 
-        bufferLock.withLock {
-            buffer.removeAll(keepingCapacity: true)
-            buffer.reserveCapacity(maxRecordingSamples)
+        frontLock.withLock {
+            frontBuffer.removeAll(keepingCapacity: true)
+            frontBuffer.reserveCapacity(maxRecordingSamples)
+        }
+
+        backLock.withLock {
+            backBuffer.removeAll(keepingCapacity: true)
+            backBuffer.reserveCapacity(Self.flushThreshold * 2)
         }
 
         logger.debug("Recording started")
@@ -94,14 +104,34 @@ final class AudioCapture {
             isRecording = false
         }
 
-        let samples = bufferLock.withLock { () -> ContiguousArray<Float> in
+        // Flush any remaining samples from back buffer to front
+        flushBackBuffer()
+
+        let samples = frontLock.withLock { () -> ContiguousArray<Float> in
             var samples = ContiguousArray<Float>()
-            swap(&samples, &buffer)
+            swap(&samples, &frontBuffer)
             return samples
         }
 
         logger.debug("Recording stopped with \(samples.count) samples")
         return samples
+    }
+
+    /// Move accumulated samples from back buffer to front buffer.
+    /// Called periodically from audio thread and on stop.
+    private func flushBackBuffer() {
+        let pending = backLock.withLock { () -> ContiguousArray<Float> in
+            guard !backBuffer.isEmpty else { return ContiguousArray() }
+            var temp = ContiguousArray<Float>()
+            swap(&temp, &backBuffer)
+            return temp
+        }
+
+        guard !pending.isEmpty else { return }
+
+        frontLock.withLock {
+            frontBuffer.append(contentsOf: pending)
+        }
     }
 
     private func handle(buffer pcmBuffer: AVAudioPCMBuffer) {
@@ -141,15 +171,23 @@ final class AudioCapture {
 
         let channel = channelData[0]
         let count = Int(outputBuffer.frameLength)
-        var reachedLimit = false
+        var shouldFlush = false
+        var backCount = 0
 
-        bufferLock.withLock {
+        // Append to back buffer (fast path - minimal lock contention with stop())
+        backLock.withLock {
             let samples = UnsafeBufferPointer(start: channel, count: count)
-            reachedLimit = Self.appendSamples(
-                buffer: &buffer,
-                newSamples: samples,
-                maxSamples: maxRecordingSamples
-            )
+            backBuffer.append(contentsOf: samples)
+            backCount = backBuffer.count
+            shouldFlush = backCount >= Self.flushThreshold
+        }
+
+        // Periodically flush back buffer to front buffer and check limit
+        var reachedLimit = false
+        if shouldFlush {
+            flushBackBuffer()
+            let frontCount = frontLock.withLock { frontBuffer.count }
+            reachedLimit = frontCount >= maxRecordingSamples
         }
 
         if reachedLimit {
@@ -184,28 +222,5 @@ final class AudioCapture {
 
         self.conversionBuffer = conversionBuffer
         return conversionBuffer
-    }
-
-    @discardableResult
-    static func appendSamples(
-        buffer: inout ContiguousArray<Float>,
-        newSamples: UnsafeBufferPointer<Float>,
-        maxSamples: Int
-    ) -> Bool {
-        guard maxSamples > 0 else {
-            return true
-        }
-
-        let remaining = maxSamples - buffer.count
-        if remaining <= 0 {
-            return true
-        }
-
-        let appendCount = min(remaining, newSamples.count)
-        if appendCount > 0, let base = newSamples.baseAddress {
-            buffer.append(contentsOf: UnsafeBufferPointer(start: base, count: appendCount))
-        }
-
-        return appendCount < newSamples.count
     }
 }
