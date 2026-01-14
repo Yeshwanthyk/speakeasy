@@ -62,25 +62,13 @@ final class AudioCapture {
         self.converter = converter
         self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
 
-        inputNode.installTap(
-            onBus: 0,
-            bufferSize: Self.tapBufferSize,
-            format: inputFormat
-        ) { [weak self] pcmBuffer, _ in
-            self?.handle(buffer: pcmBuffer)
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            throw AudioCaptureError.engineStartFailed(error)
-        }
-
-        logger.debug("Audio engine started")
+        // Don't install tap or start engine here - do it on-demand in start()
+        logger.debug("AudioCapture initialized (engine idle)")
     }
 
     func start() {
+        let startTime = CFAbsoluteTimeGetCurrent()
+
         stateLock.withLock {
             isRecording = true
             didReachLimit = false
@@ -96,13 +84,35 @@ final class AudioCapture {
             backBuffer.reserveCapacity(Self.flushThreshold * 2)
         }
 
-        logger.debug("Recording started")
+        // Install tap and start engine on-demand
+        let inputNode = engine.inputNode
+        inputNode.installTap(
+            onBus: 0,
+            bufferSize: Self.tapBufferSize,
+            format: inputFormat
+        ) { [weak self] pcmBuffer, _ in
+            self?.handle(buffer: pcmBuffer)
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            logger.error("Failed to start engine: \(error.localizedDescription)")
+        }
+
+        let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+        logger.info("Recording started (engine startup: \(String(format: "%.1f", elapsed))ms)")
     }
 
     func stop() -> ContiguousArray<Float> {
         stateLock.withLock {
             isRecording = false
         }
+
+        // Stop engine and remove tap
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
 
         // Flush any remaining samples from back buffer to front
         flushBackBuffer()
