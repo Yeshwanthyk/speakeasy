@@ -5,7 +5,7 @@
       "id": "1",
       "subject": "Implement Phase 0-1 telemetry and warmup readiness gate",
       "description": "Implement the plan's Phase 0 baseline telemetry + measurement harness and Phase 1 warmup readiness gate in the Wisp codebase. Add correlated utterance timing, structured logs, debug summary path, explicit warmup state management, distinct warmup completion/failure logging, and tests for warmup transitions/hotkey behavior.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Implementing Phase 0-1",
       "metadata": {
         "agentType": "general-purpose"
@@ -16,14 +16,14 @@
       ],
       "blockedBy": [],
       "createdAt": 1774465816400,
-      "updatedAt": 1774465850934,
+      "updatedAt": 1774466435735,
       "owner": "main"
     },
     {
       "id": "2",
       "subject": "Implement Phase 2 hot capture engine lifecycle",
       "description": "Refactor AudioCapture and coordinator lifecycle per the STT latency plan so engine lifecycle is separated from recording lifecycle. Keep AVAudioEngine/tap/converter armed while idle, add prepare/arm/begin/end/shutdown style APIs, handle startup/teardown cleanly, and add/update tests for the revised capture flow.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Implementing Phase 2",
       "metadata": {
         "agentType": "general-purpose"
@@ -36,7 +36,8 @@
         "1"
       ],
       "createdAt": 1774465823098,
-      "updatedAt": 1774465841835
+      "updatedAt": 1774466435736,
+      "owner": "main"
     },
     {
       "id": "3",

@@ -16,7 +16,7 @@ struct TranscriptionTrace {
 
     let id: UUID
     let hotkeyPressedAt: UInt64
-    var captureStartEnteredAt: UInt64
+    var captureStartAt: UInt64?
     var hotkeyReleasedAt: UInt64?
     var stopReturnedAt: UInt64?
     var transcriptionStartedAt: UInt64?
@@ -27,7 +27,6 @@ struct TranscriptionTrace {
     init(id: UUID = UUID(), hotkeyPressedAt: UInt64 = Self.timestamp()) {
         self.id = id
         self.hotkeyPressedAt = hotkeyPressedAt
-        self.captureStartEnteredAt = hotkeyPressedAt
         self.sampleCount = 0
     }
 
@@ -40,7 +39,7 @@ struct TranscriptionTrace {
     }
 
     var hotkeyPressToCaptureStartMs: Double? {
-        Self.durationMs(from: hotkeyPressedAt, to: captureStartEnteredAt)
+        Self.durationMs(from: hotkeyPressedAt, to: captureStartAt)
     }
 
     var hotkeyReleaseToStopReturnMs: Double? {
@@ -61,6 +60,10 @@ struct TranscriptionTrace {
 
     var hotkeyReleaseToPasteRequestMs: Double? {
         Self.durationMs(from: hotkeyReleasedAt, to: pasteRequestedAt)
+    }
+
+    mutating func markCaptureStarted(at: UInt64 = Self.timestamp()) {
+        captureStartAt = at
     }
 
     mutating func markHotkeyReleased(at: UInt64 = Self.timestamp()) {
@@ -122,7 +125,7 @@ struct TranscriptionTrace {
             parts.append(extra)
         }
 
-        logger.info("utterance_metrics \(parts.joined(separator: " "))")
+        logger.info("\(parts.joined(separator: " "), privacy: .public)")
     }
 
     private static func durationMs(from start: UInt64?, to end: UInt64?) -> Double? {
@@ -174,11 +177,9 @@ final class TranscriptionDebugSummary {
         }
 
         let sorted = values.sorted()
-        let index = min(
-            sorted.count - 1,
-            max(0, Int((Double(sorted.count - 1) * percentile).rounded()))
-        )
-        return sorted[index]
+        let rawIndex = Int((Double(sorted.count - 1) * percentile).rounded())
+        let boundedIndex = min(sorted.count - 1, max(0, rawIndex))
+        return sorted[boundedIndex]
     }
 }
 #endif

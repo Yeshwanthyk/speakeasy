@@ -4,8 +4,14 @@ import Foundation
 import os
 
 protocol AudioCapturing {
-    func start()
-    func stop() -> ContiguousArray<Float>
+    /// Arm the engine at startup. Must be called before `beginRecording()`.
+    func prepare() throws
+    /// Begin accumulating audio into buffers.
+    func beginRecording()
+    /// Stop accumulating; flush and return all captured samples. Engine stays hot.
+    func endRecording() -> ContiguousArray<Float>
+    /// Stop the engine entirely. Call at app termination.
+    func shutdown()
 }
 
 protocol Transcribing {
@@ -124,6 +130,16 @@ final class AppCoordinator {
         logger.debug("AppCoordinator ready")
     }
 
+    /// Arm the audio engine so it's hot before the first hotkey press.
+    /// Called once at startup, in parallel with or before `warmUpModel()`.
+    func prepareCapture() {
+        do {
+            try audioCapture.prepare()
+        } catch {
+            logger.error("Audio engine prepare failed: \(error) — will retry on first recording")
+        }
+    }
+
     /// Warm up the transcription model; blocks hotkey until complete.
     /// Must be called once at startup. Safe to `await` from any context.
     func warmUpModel() async {
@@ -139,6 +155,11 @@ final class AppCoordinator {
             // Distinct failure log — model may still handle real transcriptions
             logger.error("Model warmup failed (will still attempt transcription): \(error)")
         }
+    }
+
+    /// Shut down the audio engine. Call from `applicationWillTerminate`.
+    func shutdown() {
+        audioCapture.shutdown()
     }
 
     /// Mark the model ready without running warmup. Used in tests and SWIFT_PACKAGE builds
@@ -216,10 +237,10 @@ final class AppCoordinator {
             DispatchQueue.main.async { [flash] in
                 flash.show(lineWidth: Self.flashLineWidth)
             }
-            audioCapture.start()
-            // Record actual engine-start return time
+            audioCapture.beginRecording()
+            // Record actual beginRecording return time
             let captureStarted = TranscriptionTrace.timestamp()
-            stateLock.withLock { activeTrace?.captureStartEnteredAt = captureStarted }
+            stateLock.withLock { activeTrace?.markCaptureStarted(at: captureStarted) }
 
         case .stop(let token, let trace):
             DispatchQueue.main.async { [flash] in
@@ -242,7 +263,7 @@ final class AppCoordinator {
     }
 
     private func stopAndTranscribe(token: UUID, trace: TranscriptionTrace) {
-        let samples = audioCapture.stop()
+        let samples = audioCapture.endRecording()
 
         var trace = trace
         trace.markStopReturned(sampleCount: samples.count)

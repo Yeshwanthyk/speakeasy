@@ -6,6 +6,7 @@ enum AudioCaptureError: Error {
     case formatUnavailable
     case converterUnavailable
     case engineStartFailed(Error)
+    case notPrepared
 }
 
 final class AudioCapture {
@@ -31,6 +32,7 @@ final class AudioCapture {
     private var frontBuffer = ContiguousArray<Float>()
     private var backBuffer = ContiguousArray<Float>()
     private var isRecording = false
+    private var isPrepared = false
     private var conversionBuffer: AVAudioPCMBuffer?
     private var didReachLimit = false
 
@@ -62,13 +64,47 @@ final class AudioCapture {
         self.converter = converter
         self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
 
-        // Don't install tap or start engine here - do it on-demand in start()
         logger.debug("AudioCapture initialized (engine idle)")
     }
 
-    func start() {
-        let startTime = CFAbsoluteTimeGetCurrent()
+    /// Arm the engine: install tap and start AVAudioEngine. Audio is discarded
+    /// until `beginRecording()` is called. Call once at app startup.
+    func prepare() throws {
+        let alreadyPrepared = stateLock.withLock { () -> Bool in
+            if isPrepared { return true }
+            isPrepared = true
+            return false
+        }
+        guard !alreadyPrepared else {
+            logger.debug("AudioCapture.prepare() called again — no-op")
+            return
+        }
 
+        let inputNode = engine.inputNode
+        inputNode.installTap(
+            onBus: 0,
+            bufferSize: Self.tapBufferSize,
+            format: inputFormat
+        ) { [weak self] pcmBuffer, _ in
+            self?.handle(buffer: pcmBuffer)
+        }
+
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            // Roll back prepared flag so caller can retry
+            stateLock.withLock { isPrepared = false }
+            inputNode.removeTap(onBus: 0)
+            logger.error("Failed to start engine: \(error.localizedDescription)")
+            throw AudioCaptureError.engineStartFailed(error)
+        }
+
+        logger.info("AudioCapture engine armed and running (idle)")
+    }
+
+    /// Begin capturing audio into buffers. Engine must already be prepared.
+    func beginRecording() {
         stateLock.withLock {
             isRecording = true
             didReachLimit = false
@@ -84,35 +120,14 @@ final class AudioCapture {
             backBuffer.reserveCapacity(Self.flushThreshold * 2)
         }
 
-        // Install tap and start engine on-demand
-        let inputNode = engine.inputNode
-        inputNode.installTap(
-            onBus: 0,
-            bufferSize: Self.tapBufferSize,
-            format: inputFormat
-        ) { [weak self] pcmBuffer, _ in
-            self?.handle(buffer: pcmBuffer)
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            logger.error("Failed to start engine: \(error.localizedDescription)")
-        }
-
-        let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-        logger.info("Recording started (engine startup: \(String(format: "%.1f", elapsed))ms)")
+        logger.info("Recording started")
     }
 
-    func stop() -> ContiguousArray<Float> {
+    /// Stop capturing; flush and return all accumulated samples. Engine keeps running.
+    func endRecording() -> ContiguousArray<Float> {
         stateLock.withLock {
             isRecording = false
         }
-
-        // Stop engine and remove tap
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
 
         // Flush any remaining samples from back buffer to front
         flushBackBuffer()
@@ -127,8 +142,23 @@ final class AudioCapture {
         return samples
     }
 
+    /// Stop the engine and remove the tap. Call at app termination.
+    func shutdown() {
+        let wasPrepared = stateLock.withLock { () -> Bool in
+            let was = isPrepared
+            isPrepared = false
+            isRecording = false
+            return was
+        }
+        guard wasPrepared else { return }
+
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        logger.info("AudioCapture engine shut down")
+    }
+
     /// Move accumulated samples from back buffer to front buffer.
-    /// Called periodically from audio thread and on stop.
+    /// Called periodically from audio thread and on endRecording.
     private func flushBackBuffer() {
         let pending = backLock.withLock { () -> ContiguousArray<Float> in
             guard !backBuffer.isEmpty else { return ContiguousArray() }
@@ -146,18 +176,15 @@ final class AudioCapture {
 
     private func handle(buffer pcmBuffer: AVAudioPCMBuffer) {
         let shouldRecord = stateLock.withLock { isRecording }
-        guard shouldRecord else {
-            return
-        }
+        // When idle, drop incoming audio to prevent unbounded accumulation
+        guard shouldRecord else { return }
 
         let requiredCapacity = AVAudioFrameCount(
             (Double(pcmBuffer.frameLength) * sampleRateRatio).rounded(.up)
         ) + 1
 
         let outputBuffer = ensureConversionBuffer(requiredCapacity: requiredCapacity)
-        guard let outputBuffer else {
-            return
-        }
+        guard let outputBuffer else { return }
         outputBuffer.frameLength = 0
 
         var error: NSError?
@@ -175,24 +202,18 @@ final class AudioCapture {
         guard
             let channelData = outputBuffer.floatChannelData,
             outputBuffer.frameLength > 0
-        else {
-            return
-        }
+        else { return }
 
         let channel = channelData[0]
         let count = Int(outputBuffer.frameLength)
         var shouldFlush = false
-        var backCount = 0
 
-        // Append to back buffer (fast path - minimal lock contention with stop())
         backLock.withLock {
             let samples = UnsafeBufferPointer(start: channel, count: count)
             backBuffer.append(contentsOf: samples)
-            backCount = backBuffer.count
-            shouldFlush = backCount >= Self.flushThreshold
+            shouldFlush = backBuffer.count >= Self.flushThreshold
         }
 
-        // Periodically flush back buffer to front buffer and check limit
         var reachedLimit = false
         if shouldFlush {
             flushBackBuffer()
@@ -202,9 +223,7 @@ final class AudioCapture {
 
         if reachedLimit {
             let shouldNotify = stateLock.withLock { () -> Bool in
-                if didReachLimit {
-                    return false
-                }
+                if didReachLimit { return false }
                 didReachLimit = true
                 isRecording = false
                 return true
@@ -226,9 +245,7 @@ final class AudioCapture {
         guard let conversionBuffer = AVAudioPCMBuffer(
             pcmFormat: targetFormat,
             frameCapacity: requiredCapacity
-        ) else {
-            return nil
-        }
+        ) else { return nil }
 
         self.conversionBuffer = conversionBuffer
         return conversionBuffer
