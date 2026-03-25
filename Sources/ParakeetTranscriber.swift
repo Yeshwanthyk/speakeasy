@@ -77,9 +77,9 @@ final class ParakeetTranscriber {
 
     /// Warm up the model by running a short silent transcription.
     /// This pre-compiles any lazy-loaded CoreML/Metal shaders.
-    func warmUp() {
+    func warmUp() async throws {
         let silentSamples = ContiguousArray<Float>(repeating: 0, count: 16_000)
-        _ = try? transcribe(samples: silentSamples)
-        logger.debug("Model warmed up")
+        _ = try transcribe(samples: silentSamples)
+        logger.info("Model warmup inference completed")
     }
 }

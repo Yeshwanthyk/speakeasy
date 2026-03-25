@@ -1,0 +1,41 @@
+{
+  "nextId": 4,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "Map STT pipeline architecture",
+      "description": "Inspect key files (AudioCapture.swift, ParakeetTranscriber.swift, AppCoordinator.swift, rust/parakeet_bridge, model warmup/loading paths) and trace end-to-end speech-to-text flow with timing-relevant steps.",
+      "status": "completed",
+      "activeForm": "Mapping STT pipeline",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1774461154221,
+      "updatedAt": 1774461401714
+    },
+    {
+      "id": "2",
+      "subject": "Identify and rank latency contributors",
+      "description": "Collect concrete code evidence for likely latency bottlenecks, with file paths and line references; rank by likely impact.",
+      "status": "completed",
+      "activeForm": "Ranking latency contributors",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1774461158770,
+      "updatedAt": 1774461631664
+    },
+    {
+      "id": "3",
+      "subject": "Write artifact report",
+      "description": "Write findings to artifact context/wisp-stt-latency.md including current architecture, ranked bottlenecks, evidence, and highest-leverage change candidates to compare against Ghost Pepper/Hex.",
+      "status": "completed",
+      "activeForm": "Writing latency report",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1774461167614,
+      "updatedAt": 1774461732296
+    }
+  ]
+}

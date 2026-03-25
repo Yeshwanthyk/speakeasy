@@ -1,0 +1,17 @@
+{
+  "nextId": 6,
+  "tasks": [
+    {
+      "id": "5",
+      "subject": "Draft STT improvement subtasks in /plans",
+      "description": "Create a plan document under /plans that breaks the recommended Wisp latency improvements into actionable subtasks with scope, dependencies, and verification guidance.",
+      "status": "completed",
+      "activeForm": "Drafting STT improvement subtasks",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1774465616054,
+      "updatedAt": 1774465685603
+    }
+  ]
+}

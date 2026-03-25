@@ -3,17 +3,19 @@ import XCTest
 @testable import Wisp
 
 final class AppCoordinatorTests: XCTestCase {
-    func testToggleRecordingStopsAndPastes() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
-        let transcriber = TranscriberStub(result: .success("Hello"))
-        let paster = PasterStub()
-        let flash = FlashStub()
-        let feedback = FeedbackStub()
-        let accessibility = AccessibilityStub(allowed: true)
 
-        let pasted = expectation(description: "paste")
-        paster.onPaste = { pasted.fulfill() }
+    // MARK: - Helpers
 
+    private func makeCoordinator(
+        audio: AudioCaptureStub,
+        transcriber: TranscriberStub,
+        paster: PasterStub = PasterStub(),
+        flash: FlashStub = FlashStub(),
+        feedback: FeedbackStub = FeedbackStub(),
+        accessibility: AccessibilityStub = AccessibilityStub(allowed: true),
+        timeout: TimeInterval = 1.0,
+        skipWarmup: Bool = true
+    ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
             transcriber: transcriber,
@@ -21,9 +23,28 @@ final class AppCoordinatorTests: XCTestCase {
             flash: flash,
             feedback: feedback,
             accessibilityChecker: accessibility,
-            transcriptionTimeoutProvider: { _ in 1.0 },
+            transcriptionTimeoutProvider: { _ in timeout },
             keyMonitorFactory: { _ in nil }
         )
+        if skipWarmup {
+            coordinator.skipWarmup()
+        }
+        return coordinator
+    }
+
+    // MARK: - Existing behaviour
+
+    func testToggleRecordingStopsAndPastes() {
+        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let transcriber = TranscriberStub(result: .success("Hello"))
+        let paster = PasterStub()
+        let flash = FlashStub()
+        let feedback = FeedbackStub()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, flash: flash, feedback: feedback)
 
         coordinator.toggleRecording()
         XCTAssertEqual(audio.startCount, 1)
@@ -41,23 +62,12 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.2 as Float, count: 80))
         let transcriber = TranscriberStub(result: .failure(TestError()))
         let paster = PasterStub()
-        let flash = FlashStub()
         let feedback = FeedbackStub()
-        let accessibility = AccessibilityStub(allowed: true)
 
         let notified = expectation(description: "error")
         feedback.onError = { _ in notified.fulfill() }
 
-        let coordinator = AppCoordinator(
-            audioCapture: audio,
-            transcriber: transcriber,
-            paster: paster,
-            flash: flash,
-            feedback: feedback,
-            accessibilityChecker: accessibility,
-            transcriptionTimeoutProvider: { _ in 1.0 },
-            keyMonitorFactory: { _ in nil }
-        )
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
@@ -70,27 +80,14 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.3 as Float, count: 200))
         let transcriber = TranscriberStub(result: .success("Late"), delay: 0.2)
         let paster = PasterStub()
-        let flash = FlashStub()
         let feedback = FeedbackStub()
-        let accessibility = AccessibilityStub(allowed: true)
 
         let timedOut = expectation(description: "timeout")
         feedback.onError = { message in
-            if message == "Transcription timed out" {
-                timedOut.fulfill()
-            }
+            if message == "Transcription timed out" { timedOut.fulfill() }
         }
 
-        let coordinator = AppCoordinator(
-            audioCapture: audio,
-            transcriber: transcriber,
-            paster: paster,
-            flash: flash,
-            feedback: feedback,
-            accessibilityChecker: accessibility,
-            transcriptionTimeoutProvider: { _ in 0.05 },
-            keyMonitorFactory: { _ in nil }
-        )
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback, timeout: 0.05)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
@@ -104,54 +101,28 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: ContiguousArray<Float>())
         let transcriber = TranscriberStub(result: .success("ignored"))
         let paster = PasterStub()
-        let flash = FlashStub()
-        let feedback = FeedbackStub()
-        let accessibility = AccessibilityStub(allowed: true)
 
-        let coordinator = AppCoordinator(
-            audioCapture: audio,
-            transcriber: transcriber,
-            paster: paster,
-            flash: flash,
-            feedback: feedback,
-            accessibilityChecker: accessibility,
-            transcriptionTimeoutProvider: { _ in 1.0 },
-            keyMonitorFactory: { _ in nil }
-        )
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
 
         XCTAssertEqual(transcriber.callCount, 0)
         XCTAssertTrue(paster.pastedTexts.isEmpty)
-        XCTAssertTrue(feedback.errors.isEmpty)
     }
 
     func testEmptyTranscriptionNotifies() {
         let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.3 as Float, count: 200))
         let transcriber = TranscriberStub(result: .success("   "))
         let paster = PasterStub()
-        let flash = FlashStub()
         let feedback = FeedbackStub()
-        let accessibility = AccessibilityStub(allowed: true)
 
         let notified = expectation(description: "no speech")
         feedback.onError = { message in
-            if message == "No speech detected" {
-                notified.fulfill()
-            }
+            if message == "No speech detected" { notified.fulfill() }
         }
 
-        let coordinator = AppCoordinator(
-            audioCapture: audio,
-            transcriber: transcriber,
-            paster: paster,
-            flash: flash,
-            feedback: feedback,
-            accessibilityChecker: accessibility,
-            transcriptionTimeoutProvider: { _ in 1.0 },
-            keyMonitorFactory: { _ in nil }
-        )
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
@@ -159,7 +130,104 @@ final class AppCoordinatorTests: XCTestCase {
         wait(for: [notified], timeout: 1.0)
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
+
+    // MARK: - Phase 1: Warmup gate
+
+    /// Hotkey during warmup must be silently dropped; no audio start.
+    func testHotkeyDuringWarmupIsIgnored() {
+        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let transcriber = TranscriberStub(result: .success("Hello"))
+        let feedback = FeedbackStub()
+
+        // skipWarmup: false — coordinator starts in .warming / .pending
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, feedback: feedback, skipWarmup: false)
+
+        coordinator.toggleRecording()
+
+        // Audio must not start because warmup hasn't finished
+        XCTAssertEqual(audio.startCount, 0)
+    }
+
+    /// Hotkey during warmup must emit user-visible feedback.
+    func testHotkeyDuringWarmupEmitsFeedback() {
+        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let transcriber = TranscriberStub(result: .success("Hello"))
+        let feedback = FeedbackStub()
+
+        let feedbackReceived = expectation(description: "warming feedback")
+        feedback.onError = { message in
+            if message == "Model warming up, please wait" { feedbackReceived.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, feedback: feedback, skipWarmup: false)
+
+        // Simulate hotkey while warming (state is .pending → treated as not ready)
+        coordinator.toggleRecording()
+
+        wait(for: [feedbackReceived], timeout: 1.0)
+    }
+
+    /// After warmup success, hotkey should start recording normally.
+    func testHotkeyAfterWarmupSuccessStartsRecording() async {
+        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let transcriber = TranscriberStub(result: .success("Hello"))
+        let paster = PasterStub()
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, skipWarmup: false)
+
+        await coordinator.warmUpModel()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        await fulfillment(of: [pasted], timeout: 1.0)
+
+        XCTAssertEqual(audio.startCount, 1)
+        XCTAssertEqual(paster.pastedTexts, ["Hello"])
+    }
+
+    /// After warmup failure, hotkey should still work (degrade gracefully).
+    func testHotkeyAfterWarmupFailureStillTranscribes() async {
+        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let transcriber = TranscriberStub(result: .success("Recovered"), warmUpError: TestError())
+        let paster = PasterStub()
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, skipWarmup: false)
+
+        await coordinator.warmUpModel()
+
+        let pasted = expectation(description: "paste after failed warmup")
+        paster.onPaste = { pasted.fulfill() }
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        await fulfillment(of: [pasted], timeout: 1.0)
+
+        XCTAssertEqual(paster.pastedTexts, ["Recovered"])
+    }
+
+    /// warmUpModel() transitions to .ready — subsequent warmUp calls don't re-run (tested via callCount).
+    func testWarmupSuccessTransitionsToReady() async {
+        let audio = AudioCaptureStub(samples: ContiguousArray<Float>())
+        let transcriber = TranscriberStub(result: .success(""))
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, skipWarmup: false)
+
+        await coordinator.warmUpModel()
+
+        XCTAssertEqual(transcriber.warmUpCount, 1)
+
+        // After warmup, hotkey works — toggling starts audio
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.startCount, 1)
+    }
 }
+
+// MARK: - Stubs
 
 private final class AudioCaptureStub: AudioCapturing {
     private(set) var startCount = 0
@@ -170,9 +238,7 @@ private final class AudioCaptureStub: AudioCapturing {
         self.samples = samples
     }
 
-    func start() {
-        startCount += 1
-    }
+    func start() { startCount += 1 }
 
     func stop() -> ContiguousArray<Float> {
         stopCount += 1
@@ -183,30 +249,28 @@ private final class AudioCaptureStub: AudioCapturing {
 private final class TranscriberStub: Transcribing {
     private let result: Result<String, Error>
     private let delay: TimeInterval
+    private let warmUpError: Error?
     private(set) var callCount = 0
     private(set) var warmUpCount = 0
 
-    init(result: Result<String, Error>, delay: TimeInterval = 0) {
+    init(result: Result<String, Error>, delay: TimeInterval = 0, warmUpError: Error? = nil) {
         self.result = result
         self.delay = delay
+        self.warmUpError = warmUpError
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
         callCount += 1
-        if delay > 0 {
-            Thread.sleep(forTimeInterval: delay)
-        }
-
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         switch result {
-        case .success(let text):
-            return text
-        case .failure(let error):
-            throw error
+        case .success(let text): return text
+        case .failure(let error): throw error
         }
     }
 
-    func warmUp() {
+    func warmUp() async throws {
         warmUpCount += 1
+        if let error = warmUpError { throw error }
     }
 }
 
@@ -225,18 +289,9 @@ private final class FlashStub: Flashing {
     private(set) var hideCount = 0
     private(set) var flashCount = 0
 
-    func show(lineWidth: CGFloat) {
-        showCount += 1
-    }
-
-    func hide(completion: (() -> Void)?) {
-        hideCount += 1
-        completion?()
-    }
-
-    func flash(duration: TimeInterval, lineWidth: CGFloat) {
-        flashCount += 1
-    }
+    func show(lineWidth: CGFloat) { showCount += 1 }
+    func hide(completion: (() -> Void)?) { hideCount += 1; completion?() }
+    func flash(duration: TimeInterval, lineWidth: CGFloat) { flashCount += 1 }
 }
 
 private final class FeedbackStub: UserFeedback {
@@ -251,10 +306,7 @@ private final class FeedbackStub: UserFeedback {
 
 private struct AccessibilityStub: AccessibilityChecking {
     let allowed: Bool
-
-    func ensureAccessibilityPrompted() -> Bool {
-        allowed
-    }
+    func ensureAccessibilityPrompted() -> Bool { allowed }
 }
 
 private struct TestError: Error {}

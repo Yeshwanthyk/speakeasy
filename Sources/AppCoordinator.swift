@@ -10,7 +10,7 @@ protocol AudioCapturing {
 
 protocol Transcribing {
     func transcribe(samples: ContiguousArray<Float>) throws -> String
-    func warmUp()
+    func warmUp() async throws
 }
 
 protocol Pasting {
@@ -49,9 +49,28 @@ final class AppCoordinator {
         case transcribing(UUID)
     }
 
+    /// Readiness of the transcription model.
+    private enum WarmupState {
+        /// Warmup has not started yet.
+        case pending
+        /// Warmup is in progress.
+        case warming
+        /// Model ready — warmup succeeded.
+        case ready
+        /// Warmup threw; model may still be usable for real transcriptions.
+        case failed(Error)
+
+        var isReady: Bool {
+            switch self {
+            case .ready, .failed: return true
+            case .pending, .warming: return false
+            }
+        }
+    }
+
     private enum Transition {
         case start
-        case stop(UUID)
+        case stop(UUID, TranscriptionTrace)
         case ignore
     }
 
@@ -69,9 +88,16 @@ final class AppCoordinator {
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
+    private var warmupState: WarmupState = .pending
+    /// Partial trace built during a recording session; nil when idle or transcribing.
+    private var activeTrace: TranscriptionTrace?
     private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
     private let flash: Flashing
     private var keyMonitor: KeyComboMonitor?
+
+    #if DEBUG
+    private let debugSummary = TranscriptionDebugSummary()
+    #endif
 
     init(
         audioCapture: AudioCapturing,
@@ -98,9 +124,27 @@ final class AppCoordinator {
         logger.debug("AppCoordinator ready")
     }
 
-    /// Warm up the transcription model for faster first inference.
-    func warmUpModel() {
-        transcriber.warmUp()
+    /// Warm up the transcription model; blocks hotkey until complete.
+    /// Must be called once at startup. Safe to `await` from any context.
+    func warmUpModel() async {
+        stateLock.withLock { warmupState = .warming }
+        logger.info("Model warmup started")
+
+        do {
+            try await transcriber.warmUp()
+            stateLock.withLock { warmupState = .ready }
+            logger.info("Model warmup completed successfully")
+        } catch {
+            stateLock.withLock { warmupState = .failed(error) }
+            // Distinct failure log — model may still handle real transcriptions
+            logger.error("Model warmup failed (will still attempt transcription): \(error)")
+        }
+    }
+
+    /// Mark the model ready without running warmup. Used in tests and SWIFT_PACKAGE builds
+    /// where warmup is not needed or not available.
+    func skipWarmup() {
+        stateLock.withLock { warmupState = .ready }
     }
 
     #if !SWIFT_PACKAGE
@@ -142,60 +186,84 @@ final class AppCoordinator {
     #endif
 
     func toggleRecording() {
+        let now = TranscriptionTrace.timestamp()
+
         let transition = stateLock.withLock { () -> Transition in
+            // Block hotkey until model warmup finishes
+            guard warmupState.isReady else {
+                return .ignore
+            }
+
             switch state {
             case .idle:
                 state = .recording
+                activeTrace = TranscriptionTrace(hotkeyPressedAt: now)
                 return .start
             case .recording:
                 let token = UUID()
                 state = .transcribing(token)
-                return .stop(token)
-            case .transcribing(_):
+                var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
+                trace.markHotkeyReleased(at: now)
+                activeTrace = nil
+                return .stop(token, trace)
+            case .transcribing:
                 return .ignore
             }
         }
 
         switch transition {
         case .start:
-            // Show visual feedback immediately before any other work
             DispatchQueue.main.async { [flash] in
                 flash.show(lineWidth: Self.flashLineWidth)
             }
             audioCapture.start()
-        case .stop(let token):
-            // Hide flash immediately
+            // Record actual engine-start return time
+            let captureStarted = TranscriptionTrace.timestamp()
+            stateLock.withLock { activeTrace?.captureStartEnteredAt = captureStarted }
+
+        case .stop(let token, let trace):
             DispatchQueue.main.async { [flash] in
                 flash.hide(completion: nil)
             }
-            stopAndTranscribe(token: token)
+            stopAndTranscribe(token: token, trace: trace)
+
         case .ignore:
-            logger.debug("Ignoring hotkey while transcribing")
+            let ws = stateLock.withLock { warmupState }
+            switch ws {
+            case .pending, .warming:
+                logger.info("Ignoring hotkey: model warmup in progress")
+                DispatchQueue.main.async { [feedback] in
+                    feedback.error("Model warming up, please wait")
+                }
+            default:
+                logger.debug("Ignoring hotkey while transcribing")
+            }
         }
     }
 
-    private func stopAndTranscribe(token: UUID) {
+    private func stopAndTranscribe(token: UUID, trace: TranscriptionTrace) {
         let samples = audioCapture.stop()
+
+        var trace = trace
+        trace.markStopReturned(sampleCount: samples.count)
+
         guard !samples.isEmpty else {
+            trace.log(logger: logger, outcome: .emptyAudio)
             finishTranscription(token: token)
             return
         }
 
         let timeout = transcriptionTimeoutProvider(samples)
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
-            self?.handleTranscriptionTimeout(token: token, timeout: timeout)
+            self?.handleTranscriptionTimeout(token: token, timeout: timeout, trace: trace)
         }
 
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + timeout,
-            execute: timeoutWorkItem
-        )
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
 
         transcriptionQueue.async { [weak self] in
-            guard let self else {
-                return
-            }
+            guard let self else { return }
 
+            trace.markTranscriptionStarted()
             let result: Result<String, Error>
             do {
                 let text = try self.transcriber.transcribe(samples: samples)
@@ -203,23 +271,20 @@ final class AppCoordinator {
             } catch {
                 result = .failure(error)
             }
+            trace.markTranscriptionEnded()
 
             DispatchQueue.main.async { [weak self] in
-                guard let self else {
-                    return
-                }
-
-                guard self.isCurrentTranscription(token: token) else {
-                    return
-                }
+                guard let self else { return }
+                guard self.isCurrentTranscription(token: token) else { return }
 
                 timeoutWorkItem.cancel()
                 self.finishTranscription(token: token)
 
                 switch result {
                 case .success(let text):
-                    self.handleTranscriptionResult(text)
+                    self.handleTranscriptionResult(text, trace: trace)
                 case .failure(let error):
+                    trace.log(logger: self.logger, outcome: .transcriptionFailed)
                     self.logger.error("Transcription failed: \(String(describing: error))")
                     self.feedback.error("Transcription failed")
                 }
@@ -227,19 +292,32 @@ final class AppCoordinator {
         }
     }
 
-    private func handleTranscriptionResult(_ text: String) {
+    private func handleTranscriptionResult(_ text: String, trace: TranscriptionTrace) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
+            trace.log(logger: logger, outcome: .noSpeech)
             feedback.error("No speech detected")
             return
         }
 
-        if accessibilityChecker.ensureAccessibilityPrompted() {
-            paster.paste(trimmed)
-        } else {
+        guard accessibilityChecker.ensureAccessibilityPrompted() else {
+            trace.log(logger: logger, outcome: .accessibilityDenied)
             logger.error("Accessibility permission missing")
             feedback.error("Accessibility permission required")
+            return
         }
+
+        var trace = trace
+        trace.markPasteRequested()
+        trace.log(logger: logger, outcome: .pasted, textLength: trimmed.count)
+
+        #if DEBUG
+        if let summary = debugSummary.record(trace: trace) {
+            logger.debug("\(summary)")
+        }
+        #endif
+
+        paster.paste(trimmed)
     }
 
     private func isCurrentTranscription(token: UUID) -> Bool {
@@ -259,7 +337,7 @@ final class AppCoordinator {
         }
     }
 
-    private func handleTranscriptionTimeout(token: UUID, timeout: TimeInterval) {
+    private func handleTranscriptionTimeout(token: UUID, timeout: TimeInterval, trace: TranscriptionTrace) {
         let shouldNotify = stateLock.withLock { () -> Bool in
             if case let .transcribing(current) = state, current == token {
                 state = .idle
@@ -268,10 +346,9 @@ final class AppCoordinator {
             return false
         }
 
-        guard shouldNotify else {
-            return
-        }
+        guard shouldNotify else { return }
 
+        trace.log(logger: logger, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.error("Transcription timed out")
     }

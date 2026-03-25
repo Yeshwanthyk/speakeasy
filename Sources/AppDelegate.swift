@@ -19,9 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let coordinator = try AppCoordinator()
                 self?.coordinator = coordinator
 
-                // Warm up model in background for faster first transcription
+                // Warm up model in background; blocks hotkey until complete
                 Task.detached(priority: .utility) {
-                    coordinator.warmUpModel()
+                    await coordinator.warmUpModel()
                 }
             } catch {
                 await MainActor.run { self?.presentError("Failed to start: \(String(describing: error))") }

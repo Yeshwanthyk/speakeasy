@@ -1,0 +1,76 @@
+{
+  "nextId": 5,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "Implement Phase 0-1 telemetry and warmup readiness gate",
+      "description": "Implement the plan's Phase 0 baseline telemetry + measurement harness and Phase 1 warmup readiness gate in the Wisp codebase. Add correlated utterance timing, structured logs, debug summary path, explicit warmup state management, distinct warmup completion/failure logging, and tests for warmup transitions/hotkey behavior.",
+      "status": "in_progress",
+      "activeForm": "Implementing Phase 0-1",
+      "metadata": {
+        "agentType": "general-purpose"
+      },
+      "blocks": [
+        "2",
+        "4"
+      ],
+      "blockedBy": [],
+      "createdAt": 1774465816400,
+      "updatedAt": 1774465850934,
+      "owner": "main"
+    },
+    {
+      "id": "2",
+      "subject": "Implement Phase 2 hot capture engine lifecycle",
+      "description": "Refactor AudioCapture and coordinator lifecycle per the STT latency plan so engine lifecycle is separated from recording lifecycle. Keep AVAudioEngine/tap/converter armed while idle, add prepare/arm/begin/end/shutdown style APIs, handle startup/teardown cleanly, and add/update tests for the revised capture flow.",
+      "status": "pending",
+      "activeForm": "Implementing Phase 2",
+      "metadata": {
+        "agentType": "general-purpose"
+      },
+      "blocks": [
+        "3",
+        "4"
+      ],
+      "blockedBy": [
+        "1"
+      ],
+      "createdAt": 1774465823098,
+      "updatedAt": 1774465841835
+    },
+    {
+      "id": "3",
+      "subject": "Implement Phase 3-4 ring buffer, pre-roll, and adaptive stop grace",
+      "description": "Build the bounded float ring buffer + pre-roll path and adaptive stop grace logic from the STT latency plan. Ensure pre-roll is prepended once per utterance, telemetry includes prepended duration, stop grace is deterministic/testable, and add unit tests for ring buffer and grace calculations.",
+      "status": "pending",
+      "activeForm": "Implementing Phase 3-4",
+      "metadata": {
+        "agentType": "general-purpose"
+      },
+      "blocks": [
+        "4"
+      ],
+      "blockedBy": [
+        "2"
+      ],
+      "createdAt": 1774465828953,
+      "updatedAt": 1774465841835
+    },
+    {
+      "id": "4",
+      "subject": "Harden telemetry docs and update the implementation plan",
+      "description": "Update the plan document with benchmark script refinements, acceptance thresholds, and results placeholders/notes based on implemented telemetry. Do not fabricate measurements; add the markdown structure needed to record before/after numbers and ship criteria decisions.",
+      "status": "pending",
+      "activeForm": "Updating telemetry docs",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [
+        "1",
+        "2",
+        "3"
+      ],
+      "createdAt": 1774465835556,
+      "updatedAt": 1774465841835
+    }
+  ]
+}
