@@ -8,8 +8,8 @@ protocol AudioCapturing {
     func prepare() throws
     /// Begin accumulating audio into buffers.
     func beginRecording()
-    /// Stop accumulating; flush and return all captured samples. Engine stays hot.
-    func endRecording() -> ContiguousArray<Float>
+    /// Stop accumulating; flush and return all captured samples plus capture metadata.
+    func endRecording() -> AudioCaptureResult
     /// Stop the engine entirely. Call at app termination.
     func shutdown()
 }
@@ -132,12 +132,9 @@ final class AppCoordinator {
 
     /// Arm the audio engine so it's hot before the first hotkey press.
     /// Called once at startup, in parallel with or before `warmUpModel()`.
-    func prepareCapture() {
-        do {
-            try audioCapture.prepare()
-        } catch {
-            logger.error("Audio engine prepare failed: \(error) — will retry on first recording")
-        }
+    func prepareCapture() throws {
+        try audioCapture.prepare()
+        logger.info("Audio capture prepared")
     }
 
     /// Warm up the transcription model; blocks hotkey until complete.
@@ -263,10 +260,15 @@ final class AppCoordinator {
     }
 
     private func stopAndTranscribe(token: UUID, trace: TranscriptionTrace) {
-        let samples = audioCapture.endRecording()
+        let captureResult = audioCapture.endRecording()
+        let samples = captureResult.samples
 
         var trace = trace
-        trace.markStopReturned(sampleCount: samples.count)
+        trace.markStopReturned(
+            sampleCount: samples.count,
+            prependedSampleCount: captureResult.prependedSampleCount,
+            graceDurationMs: captureResult.graceDurationMs
+        )
 
         guard !samples.isEmpty else {
             trace.log(logger: logger, outcome: .emptyAudio)

@@ -23,11 +23,14 @@ struct TranscriptionTrace {
     var transcriptionEndedAt: UInt64?
     var pasteRequestedAt: UInt64?
     var sampleCount: Int
+    var prependedSampleCount: Int
+    var graceDurationMs: Double?
 
     init(id: UUID = UUID(), hotkeyPressedAt: UInt64 = Self.timestamp()) {
         self.id = id
         self.hotkeyPressedAt = hotkeyPressedAt
         self.sampleCount = 0
+        self.prependedSampleCount = 0
     }
 
     static func timestamp() -> UInt64 {
@@ -36,6 +39,10 @@ struct TranscriptionTrace {
 
     var utteranceDurationMs: Double {
         Double(sampleCount) / Self.transcriptionSampleRate * 1000
+    }
+
+    var prependedDurationMs: Double {
+        Double(prependedSampleCount) / Self.transcriptionSampleRate * 1000
     }
 
     var hotkeyPressToCaptureStartMs: Double? {
@@ -70,8 +77,15 @@ struct TranscriptionTrace {
         hotkeyReleasedAt = at
     }
 
-    mutating func markStopReturned(sampleCount: Int, at: UInt64 = Self.timestamp()) {
+    mutating func markStopReturned(
+        sampleCount: Int,
+        prependedSampleCount: Int = 0,
+        graceDurationMs: Double? = nil,
+        at: UInt64 = Self.timestamp()
+    ) {
         self.sampleCount = sampleCount
+        self.prependedSampleCount = prependedSampleCount
+        self.graceDurationMs = graceDurationMs
         stopReturnedAt = at
     }
 
@@ -100,6 +114,13 @@ struct TranscriptionTrace {
             String(format: "utterance_ms=%.1f", utteranceDurationMs)
         ]
 
+        if prependedSampleCount > 0 {
+            parts.append("preroll_samples=\(prependedSampleCount)")
+            parts.append(String(format: "preroll_ms=%.1f", prependedDurationMs))
+        }
+        if let graceDurationMs {
+            parts.append(String(format: "grace_ms=%.1f", graceDurationMs))
+        }
         if let value = hotkeyPressToCaptureStartMs {
             parts.append(String(format: "press_to_capture_start_ms=%.1f", value))
         }

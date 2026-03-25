@@ -17,13 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             do {
                 let coordinator = try AppCoordinator()
+                try coordinator.prepareCapture()
                 self?.coordinator = coordinator
 
-                // Arm audio engine immediately so it's hot before first hotkey
-                coordinator.prepareCapture()
-
-                // Warm up model in background; blocks hotkey until complete
-                Task.detached(priority: .utility) {
+                Task(priority: .utility) {
                     await coordinator.warmUpModel()
                 }
             } catch {

@@ -6,13 +6,21 @@ enum AudioCaptureError: Error {
     case formatUnavailable
     case converterUnavailable
     case engineStartFailed(Error)
-    case notPrepared
+}
+
+struct AudioCaptureResult {
+    let samples: ContiguousArray<Float>
+    let prependedSampleCount: Int
+    let graceDurationMs: Double
 }
 
 final class AudioCapture {
     private static let tapBufferSize: AVAudioFrameCount = 1024
     private static let defaultMaxRecordingSamples = 16_000 * 60 * 6
-    private static let flushThreshold = 8_000  // Flush back buffer every ~0.5s at 16kHz
+    private static let flushThreshold = 8_000
+    private static let ringBufferCapacity = 16_000
+    private static let preRollSampleCount = 6_400
+    private static let graceTimeoutPadding: TimeInterval = 0.020
 
     private let engine = AVAudioEngine()
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
@@ -22,12 +30,13 @@ final class AudioCapture {
     private let sampleRateRatio: Double
     private let maxRecordingSamples: Int
     private let onLimitReached: (() -> Void)?
+    private let ringBuffer = FloatRingBuffer(capacity: AudioCapture.ringBufferCapacity)
+    private let graceSemaphore = DispatchSemaphore(value: 0)
 
-    // Double-buffering: back buffer accumulates samples from audio thread,
-    // front buffer holds committed samples. Reduces lock contention.
     private let frontLock = UnfairLock()
     private let backLock = UnfairLock()
     private let stateLock = UnfairLock()
+    private let stopTimingLock = UnfairLock()
 
     private var frontBuffer = ContiguousArray<Float>()
     private var backBuffer = ContiguousArray<Float>()
@@ -35,6 +44,10 @@ final class AudioCapture {
     private var isPrepared = false
     private var conversionBuffer: AVAudioPCMBuffer?
     private var didReachLimit = false
+    private var stopTiming = CaptureStopTiming()
+    private var graceDeadlineNs: UInt64?
+    private var awaitingGraceSignal = false
+    private var prependedSampleCount = 0
 
     init(
         maxRecordingSamples: Int = AudioCapture.defaultMaxRecordingSamples,
@@ -67,11 +80,11 @@ final class AudioCapture {
         logger.debug("AudioCapture initialized (engine idle)")
     }
 
-    /// Arm the engine: install tap and start AVAudioEngine. Audio is discarded
-    /// until `beginRecording()` is called. Call once at app startup.
     func prepare() throws {
         let alreadyPrepared = stateLock.withLock { () -> Bool in
-            if isPrepared { return true }
+            if isPrepared {
+                return true
+            }
             isPrepared = true
             return false
         }
@@ -93,7 +106,6 @@ final class AudioCapture {
         do {
             try engine.start()
         } catch {
-            // Roll back prepared flag so caller can retry
             stateLock.withLock { isPrepared = false }
             inputNode.removeTap(onBus: 0)
             logger.error("Failed to start engine: \(error.localizedDescription)")
@@ -103,16 +115,25 @@ final class AudioCapture {
         logger.info("AudioCapture engine armed and running (idle)")
     }
 
-    /// Begin capturing audio into buffers. Engine must already be prepared.
     func beginRecording() {
+        drainGraceSignal()
+
+        let preRoll = ringBuffer.readLast(Self.preRollSampleCount)
+
         stateLock.withLock {
             isRecording = true
             didReachLimit = false
+            graceDeadlineNs = nil
+            awaitingGraceSignal = false
+            prependedSampleCount = preRoll.count
         }
 
         frontLock.withLock {
             frontBuffer.removeAll(keepingCapacity: true)
             frontBuffer.reserveCapacity(maxRecordingSamples)
+            if !preRoll.isEmpty {
+                frontBuffer.append(contentsOf: preRoll)
+            }
         }
 
         backLock.withLock {
@@ -120,54 +141,88 @@ final class AudioCapture {
             backBuffer.reserveCapacity(Self.flushThreshold * 2)
         }
 
-        logger.info("Recording started")
+        logger.info("Recording started with \(preRoll.count) preroll samples")
     }
 
-    /// Stop capturing; flush and return all accumulated samples. Engine keeps running.
-    func endRecording() -> ContiguousArray<Float> {
+    func endRecording() -> AudioCaptureResult {
+        let grace = stopTimingLock.withLock { stopTiming.graceInterval() }
+        let waitStartedAtNs = TranscriptionTrace.timestamp()
+        let deadlineNs = waitStartedAtNs + UInt64(grace * 1_000_000_000)
+
         stateLock.withLock {
             isRecording = false
+            graceDeadlineNs = deadlineNs
+            awaitingGraceSignal = true
         }
 
-        // Flush any remaining samples from back buffer to front
+        _ = graceSemaphore.wait(timeout: .now() + grace + Self.graceTimeoutPadding)
+
+        let waitEndedAtNs = TranscriptionTrace.timestamp()
+        let graceDurationMs = Double(waitEndedAtNs - waitStartedAtNs) / 1_000_000
+
+        stateLock.withLock {
+            graceDeadlineNs = nil
+            awaitingGraceSignal = false
+        }
+
         flushBackBuffer()
 
         let samples = frontLock.withLock { () -> ContiguousArray<Float> in
-            var samples = ContiguousArray<Float>()
-            swap(&samples, &frontBuffer)
-            return samples
+            var result = ContiguousArray<Float>()
+            swap(&result, &frontBuffer)
+            return result
         }
 
-        logger.debug("Recording stopped with \(samples.count) samples")
-        return samples
+        let prependedCount = stateLock.withLock { () -> Int in
+            let count = prependedSampleCount
+            prependedSampleCount = 0
+            return count
+        }
+
+        logger.debug(
+            "Recording stopped with \(samples.count) samples (preroll=\(prependedCount), grace=\(graceDurationMs, format: .fixed(precision: 1))ms)"
+        )
+
+        return AudioCaptureResult(
+            samples: samples,
+            prependedSampleCount: prependedCount,
+            graceDurationMs: graceDurationMs
+        )
     }
 
-    /// Stop the engine and remove the tap. Call at app termination.
     func shutdown() {
         let wasPrepared = stateLock.withLock { () -> Bool in
-            let was = isPrepared
+            let wasPrepared = isPrepared
             isPrepared = false
             isRecording = false
-            return was
+            graceDeadlineNs = nil
+            awaitingGraceSignal = false
+            prependedSampleCount = 0
+            return wasPrepared
         }
-        guard wasPrepared else { return }
+        guard wasPrepared else {
+            return
+        }
 
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        ringBuffer.clear()
         logger.info("AudioCapture engine shut down")
     }
 
-    /// Move accumulated samples from back buffer to front buffer.
-    /// Called periodically from audio thread and on endRecording.
     private func flushBackBuffer() {
         let pending = backLock.withLock { () -> ContiguousArray<Float> in
-            guard !backBuffer.isEmpty else { return ContiguousArray() }
+            guard !backBuffer.isEmpty else {
+                return ContiguousArray()
+            }
             var temp = ContiguousArray<Float>()
             swap(&temp, &backBuffer)
             return temp
         }
 
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty else {
+            return
+        }
 
         frontLock.withLock {
             frontBuffer.append(contentsOf: pending)
@@ -175,16 +230,17 @@ final class AudioCapture {
     }
 
     private func handle(buffer pcmBuffer: AVAudioPCMBuffer) {
-        let shouldRecord = stateLock.withLock { isRecording }
-        // When idle, drop incoming audio to prevent unbounded accumulation
-        guard shouldRecord else { return }
+        stopTimingLock.withLock {
+            stopTiming.recordCallback()
+        }
 
         let requiredCapacity = AVAudioFrameCount(
             (Double(pcmBuffer.frameLength) * sampleRateRatio).rounded(.up)
         ) + 1
 
-        let outputBuffer = ensureConversionBuffer(requiredCapacity: requiredCapacity)
-        guard let outputBuffer else { return }
+        guard let outputBuffer = ensureConversionBuffer(requiredCapacity: requiredCapacity) else {
+            return
+        }
         outputBuffer.frameLength = 0
 
         var error: NSError?
@@ -202,14 +258,46 @@ final class AudioCapture {
         guard
             let channelData = outputBuffer.floatChannelData,
             outputBuffer.frameLength > 0
-        else { return }
+        else {
+            return
+        }
 
         let channel = channelData[0]
         let count = Int(outputBuffer.frameLength)
-        var shouldFlush = false
+        let samples = UnsafeBufferPointer(start: channel, count: count)
+        ringBuffer.write(samples)
 
+        let now = TranscriptionTrace.timestamp()
+        var shouldAppend = false
+        var shouldSignalGrace = false
+
+        stateLock.withLock {
+            if isRecording {
+                shouldAppend = true
+                return
+            }
+
+            if let graceDeadlineNs, awaitingGraceSignal {
+                if now < graceDeadlineNs {
+                    shouldAppend = true
+                } else {
+                    awaitingGraceSignal = false
+                    self.graceDeadlineNs = nil
+                    shouldSignalGrace = true
+                }
+            }
+        }
+
+        if shouldSignalGrace {
+            graceSemaphore.signal()
+        }
+
+        guard shouldAppend else {
+            return
+        }
+
+        var shouldFlush = false
         backLock.withLock {
-            let samples = UnsafeBufferPointer(start: channel, count: count)
             backBuffer.append(contentsOf: samples)
             shouldFlush = backBuffer.count >= Self.flushThreshold
         }
@@ -223,21 +311,24 @@ final class AudioCapture {
 
         if reachedLimit {
             let shouldNotify = stateLock.withLock { () -> Bool in
-                if didReachLimit { return false }
+                if didReachLimit {
+                    return false
+                }
                 didReachLimit = true
                 isRecording = false
+                awaitingGraceSignal = false
+                graceDeadlineNs = nil
                 return true
             }
 
             if shouldNotify {
+                graceSemaphore.signal()
                 onLimitReached?()
             }
         }
     }
 
-    private func ensureConversionBuffer(
-        requiredCapacity: AVAudioFrameCount
-    ) -> AVAudioPCMBuffer? {
+    private func ensureConversionBuffer(requiredCapacity: AVAudioFrameCount) -> AVAudioPCMBuffer? {
         if let conversionBuffer, conversionBuffer.frameCapacity >= requiredCapacity {
             return conversionBuffer
         }
@@ -245,9 +336,15 @@ final class AudioCapture {
         guard let conversionBuffer = AVAudioPCMBuffer(
             pcmFormat: targetFormat,
             frameCapacity: requiredCapacity
-        ) else { return nil }
+        ) else {
+            return nil
+        }
 
         self.conversionBuffer = conversionBuffer
         return conversionBuffer
+    }
+
+    private func drainGraceSignal() {
+        while graceSemaphore.wait(timeout: .now()) == .success {}
     }
 }

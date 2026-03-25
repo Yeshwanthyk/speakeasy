@@ -252,46 +252,35 @@ final class AudioCaptureLifecycleTests: XCTestCase {
     }
 
     /// prepareCapture() delegates to audioCapture.prepare() exactly once.
-    func testPrepareCaptureCallsPrepare() {
+    func testPrepareCaptureCallsPrepare() throws {
         let audio = AudioCaptureStub(samples: ContiguousArray<Float>())
         let transcriber = TranscriberStub(result: .success(""))
         let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
 
-        coordinator.prepareCapture()
+        try coordinator.prepareCapture()
 
         XCTAssertEqual(audio.prepareCount, 1)
     }
 
     /// prepareCapture() is idempotent from the coordinator side — no crash on double call.
-    func testPrepareCaptureIsIdempotent() {
+    func testPrepareCaptureIsIdempotent() throws {
         let audio = AudioCaptureStub(samples: ContiguousArray<Float>())
         let transcriber = TranscriberStub(result: .success(""))
         let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
 
-        coordinator.prepareCapture()
-        coordinator.prepareCapture()
+        try coordinator.prepareCapture()
+        try coordinator.prepareCapture()
 
-        // Both calls reach the stub; the stub itself handles idempotency
         XCTAssertEqual(audio.prepareCount, 2)
     }
 
-    /// prepareCapture() failure is non-fatal — coordinator does not crash, hotkey still works.
-    func testPrepareCaptureFailureIsNonFatal() {
+    func testPrepareCapturePropagatesFailure() {
         let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160), prepareError: TestError())
         let transcriber = TranscriberStub(result: .success("Hello"))
-        let paster = PasterStub()
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
 
-        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
-        coordinator.prepareCapture()  // should not throw / crash
-
-        let pasted = expectation(description: "paste after prepare failure")
-        paster.onPaste = { pasted.fulfill() }
-
-        coordinator.toggleRecording()
-        coordinator.toggleRecording()
-
-        wait(for: [pasted], timeout: 1.0)
-        XCTAssertEqual(paster.pastedTexts, ["Hello"])
+        XCTAssertThrowsError(try coordinator.prepareCapture())
+        XCTAssertEqual(audio.prepareCount, 1)
     }
 
     /// shutdown() delegates to audioCapture.shutdown().
@@ -334,14 +323,23 @@ private final class AudioCaptureStub: AudioCapturing {
     private(set) var shutdownCount = 0
     private(set) var prepareError: Error?
     private let samples: ContiguousArray<Float>
+    private let prependedSampleCount: Int
+    private let graceDurationMs: Double
 
     /// Convenience aliases used by older tests.
     var startCount: Int { beginCount }
     var stopCount: Int { endCount }
 
-    init(samples: ContiguousArray<Float>, prepareError: Error? = nil) {
+    init(
+        samples: ContiguousArray<Float>,
+        prepareError: Error? = nil,
+        prependedSampleCount: Int = 0,
+        graceDurationMs: Double = 0
+    ) {
         self.samples = samples
         self.prepareError = prepareError
+        self.prependedSampleCount = prependedSampleCount
+        self.graceDurationMs = graceDurationMs
     }
 
     func prepare() throws {
@@ -351,9 +349,13 @@ private final class AudioCaptureStub: AudioCapturing {
 
     func beginRecording() { beginCount += 1 }
 
-    func endRecording() -> ContiguousArray<Float> {
+    func endRecording() -> AudioCaptureResult {
         endCount += 1
-        return samples
+        return AudioCaptureResult(
+            samples: samples,
+            prependedSampleCount: prependedSampleCount,
+            graceDurationMs: graceDurationMs
+        )
     }
 
     func shutdown() { shutdownCount += 1 }
