@@ -14,7 +14,7 @@ final class ScreenEdgeFlash {
         updateFrame(window: window, borderView: borderView, lineWidth: lineWidth)
 
         window.alphaValue = 0
-        window.orderFront(nil)
+        window.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             window.animator().alphaValue = 1
@@ -65,8 +65,9 @@ final class ScreenEdgeFlash {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.level = .screenSaver
-        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
         panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
 
         let borderView = NSView(frame: .zero)
         borderView.wantsLayer = true
@@ -83,8 +84,8 @@ final class ScreenEdgeFlash {
     }
 
     private func updateFrame(window: NSPanel, borderView: NSView, lineWidth: CGFloat) {
-        guard let screen = NSScreen.main else {
-            logger.error("Missing main screen")
+        guard let screen = targetScreen(currentWindow: window) else {
+            logger.error("Missing target screen")
             return
         }
 
@@ -93,6 +94,15 @@ final class ScreenEdgeFlash {
         borderView.frame = CGRect(origin: .zero, size: frame.size)
         borderView.layer?.borderWidth = lineWidth
         borderView.layer?.cornerRadius = 18
+    }
+
+    private func targetScreen(currentWindow: NSPanel) -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+
+        return NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) })
+            ?? currentWindow.screen
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
     }
 
     private func hide(window: NSPanel) {

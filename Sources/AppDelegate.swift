@@ -7,25 +7,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: AppCoordinator?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
             do {
                 try await Permissions.requestMicrophoneAccess()
             } catch {
-                await MainActor.run { self?.presentError("Microphone access is required") }
+                presentError("Microphone access is required")
                 return
             }
 
             do {
                 let coordinator = try AppCoordinator()
                 try coordinator.prepareCapture()
-                self?.coordinator = coordinator
+                self.coordinator = coordinator
 
                 Task(priority: .utility) {
                     await coordinator.warmUpModel()
                 }
             } catch {
-                await MainActor.run { self?.presentError("Failed to start: \(String(describing: error))") }
-                return
+                presentError("Failed to start: \(String(describing: error))")
             }
         }
     }
@@ -36,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor private func presentError(_ message: String) {
         logger.error("\(message)")
+        NSApplication.shared.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
         alert.messageText = "Speakeasy"

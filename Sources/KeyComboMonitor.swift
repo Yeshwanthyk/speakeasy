@@ -1,15 +1,27 @@
+import Carbon
 import CoreGraphics
 import Foundation
 import os
 
 final class KeyComboMonitor {
+    private static let signature: OSType = 0x53504B59
+    private static var nextIdentifier: UInt32 = 1
+    private static let eventHandler: EventHandlerUPP = { _, event, userData in
+        guard let userData else {
+            return noErr
+        }
+
+        let monitor = Unmanaged<KeyComboMonitor>
+            .fromOpaque(userData)
+            .takeUnretainedValue()
+        return monitor.handle(event: event)
+    }
+
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "hotkey")
-    private let keyCode: CGKeyCode
-    private let requiredFlags: CGEventFlags
-    private let forbiddenFlags: CGEventFlags
     private let callback: () -> Void
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let hotKeyID: EventHotKeyID
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
 
     init(
         keyCode: CGKeyCode,
@@ -17,87 +29,118 @@ final class KeyComboMonitor {
         forbiddenFlags: CGEventFlags = [],
         callback: @escaping () -> Void
     ) {
-        self.keyCode = keyCode
-        self.requiredFlags = requiredFlags
-        self.forbiddenFlags = forbiddenFlags
         self.callback = callback
 
-        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let identifier = Self.nextIdentifier
+        Self.nextIdentifier += 1
+        hotKeyID = EventHotKeyID(signature: Self.signature, id: identifier)
+
+        if !forbiddenFlags.isEmpty {
+            logger.info("Ignoring forbiddenFlags; Carbon hotkeys match only required modifiers")
+        }
+
         let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-
-        eventTap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: { _, type, event, refcon in
-                guard let refcon else {
-                    return Unmanaged.passUnretained(event)
-                }
-
-                let monitor = Unmanaged<KeyComboMonitor>
-                    .fromOpaque(refcon)
-                    .takeUnretainedValue()
-                return monitor.handle(type: type, event: event)
-            },
-            userInfo: selfPointer
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
         )
 
-        if let eventTap {
-            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
-            if let runLoopSource {
-                CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-                logger.debug("Key combo monitor active")
-            } else {
-                logger.error("Failed to create event tap run loop source")
-            }
-        } else {
-            logger.error("Failed to create event tap; check Accessibility permissions")
+        let installStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            Self.eventHandler,
+            1,
+            &eventType,
+            selfPointer,
+            &eventHandlerRef
+        )
+
+        guard installStatus == noErr else {
+            logger.error("Failed to install hotkey handler: \(installStatus)")
+            return
         }
+
+        let registerStatus = RegisterEventHotKey(
+            UInt32(keyCode),
+            Self.carbonModifiers(from: requiredFlags),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+
+        guard registerStatus == noErr else {
+            logger.error("Failed to register hotkey: \(registerStatus)")
+            if let eventHandlerRef {
+                RemoveEventHandler(eventHandlerRef)
+                self.eventHandlerRef = nil
+            }
+            return
+        }
+
+        logger.debug("Key combo monitor active")
     }
 
     deinit {
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
         }
-
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            CFMachPortInvalidate(eventTap)
+        if let eventHandlerRef {
+            RemoveEventHandler(eventHandlerRef)
         }
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let eventTap {
-                CGEvent.tapEnable(tap: eventTap, enable: true)
-            }
-            return Unmanaged.passUnretained(event)
+    private func handle(event: EventRef?) -> OSStatus {
+        guard let event else {
+            return noErr
         }
 
-        guard type == .keyDown else {
-            return Unmanaged.passUnretained(event)
+        var eventHotKeyID = EventHotKeyID()
+        let status = withUnsafeMutablePointer(to: &eventHotKeyID) { pointer in
+            GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                pointer
+            )
         }
 
-        let eventKeyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard eventKeyCode == keyCode else {
-            return Unmanaged.passUnretained(event)
+        guard status == noErr else {
+            logger.error("Failed to inspect hotkey event: \(status)")
+            return status
         }
 
-        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-        if isRepeat {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let flags = event.flags
-        if !flags.contains(requiredFlags) || !flags.intersection(forbiddenFlags).isEmpty {
-            return Unmanaged.passUnretained(event)
+        guard
+            eventHotKeyID.signature == hotKeyID.signature,
+            eventHotKeyID.id == hotKeyID.id
+        else {
+            return noErr
         }
 
         DispatchQueue.main.async { [callback] in
             callback()
         }
-        return nil
+        return noErr
+    }
+
+    private static func carbonModifiers(from flags: CGEventFlags) -> UInt32 {
+        var modifiers: UInt32 = 0
+
+        if flags.contains(.maskCommand) {
+            modifiers |= UInt32(cmdKey)
+        }
+        if flags.contains(.maskControl) {
+            modifiers |= UInt32(controlKey)
+        }
+        if flags.contains(.maskAlternate) {
+            modifiers |= UInt32(optionKey)
+        }
+        if flags.contains(.maskShift) {
+            modifiers |= UInt32(shiftKey)
+        }
+
+        return modifiers
     }
 }
