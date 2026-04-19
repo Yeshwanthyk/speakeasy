@@ -14,11 +14,6 @@ protocol AudioCapturing {
     func shutdown()
 }
 
-protocol Transcribing {
-    func transcribe(samples: ContiguousArray<Float>) throws -> String
-    func warmUp() async throws
-}
-
 protocol Pasting {
     func paste(_ text: String)
 }
@@ -38,10 +33,6 @@ typealias KeyMonitorFactory = (_ callback: @escaping () -> Void) -> KeyComboMoni
 
 extension AudioCapture: AudioCapturing {}
 extension ScreenEdgeFlash: Flashing {}
-
-#if !SWIFT_PACKAGE
-extension ParakeetTranscriber: Transcribing {}
-#endif
 
 struct SystemAccessibilityChecker: AccessibilityChecking {
     func ensureAccessibilityPrompted() -> Bool {
@@ -99,7 +90,7 @@ final class AppCoordinator {
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing
-    private let transcriber: Transcribing
+    private let transcriber: Transcriber
     let paster: Pasting
     let transcriptStore: TranscriptStore?
     private let feedback: UserFeedback
@@ -120,7 +111,7 @@ final class AppCoordinator {
 
     init(
         audioCapture: AudioCapturing,
-        transcriber: Transcribing,
+        transcriber: Transcriber,
         paster: Pasting,
         flash: Flashing,
         feedback: UserFeedback,

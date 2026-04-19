@@ -106,3 +106,5 @@ final class ParakeetTranscriber {
         logger.info("Model warmup inference completed")
     }
 }
+
+extension ParakeetTranscriber: Transcriber {}

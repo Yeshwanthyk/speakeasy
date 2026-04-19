@@ -26,10 +26,10 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 3 — P2 Transcriber protocol seam
 
-- [ ] Extract `Transcriber` protocol into `Sources/Transcriber.swift` (inside library target).
-- [ ] `ParakeetTranscriber` conforms; file stays excluded from SPM target.
-- [ ] `AppCoordinator` depends on `Transcriber` (already does via protocol; verify & tighten).
-- [ ] Rewire tests to use a `FakeTranscriber` that lives in the test target (if not already).
+- [x] Extract `Transcriber` protocol into `Sources/Transcriber.swift` (inside library target).
+- [x] `ParakeetTranscriber` conforms; file stays excluded from SPM target.
+- [x] `AppCoordinator` depends on `Transcriber` (already does via protocol; verify & tighten).
+- [x] Rewire tests to use a `FakeTranscriber` that lives in the test target (if not already).
 
 ## Phase 4 — P1 Quick-win tests (batch)
 
