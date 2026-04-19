@@ -42,4 +42,22 @@ final class CaptureStopTimingTests: XCTestCase {
 
         XCTAssertEqual(timing.graceInterval(), 0.04, accuracy: 0.000_1)
     }
+
+    func testGraceIntervalUsesEmaAtMinimumCallbackCount() {
+        var timing = CaptureStopTiming()
+        for index in 0..<4 {
+            timing.recordCallback(timestampNs: UInt64(index) * 100_000_000)
+        }
+
+        XCTAssertEqual(timing.graceInterval(), 0.15, accuracy: 0.000_1)
+    }
+
+    func testGraceIntervalUsesEmaForChangingCadence() {
+        var timing = CaptureStopTiming()
+        for timestamp in [0, 50_000_000, 100_000_000, 200_000_000] {
+            timing.recordCallback(timestampNs: UInt64(timestamp))
+        }
+
+        XCTAssertEqual(timing.graceInterval(), 0.09, accuracy: 0.000_1)
+    }
 }

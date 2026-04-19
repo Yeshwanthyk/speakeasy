@@ -47,3 +47,6 @@
 - **Phase 2 — XCTest callbacks must not cross actor boundaries.** The
   off-main `endRecording` regression test records thread state inside the
   stub under a lock, then asserts from the main-actor test body.
+- **Phase 4 — process environment tests need serialization.** Tests that
+  mutate `PARAKEET_MODEL_DIR` save/restore the prior value while holding a
+  process-wide lock so parallel Swift test runs do not leak state.

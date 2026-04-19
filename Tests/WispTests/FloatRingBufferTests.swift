@@ -33,4 +33,41 @@ final class FloatRingBufferTests: XCTestCase {
 
         XCTAssertEqual(Array(buffer.readLast(4)), [6, 7, 8, 9])
     }
+
+    func testCapacityRoundsUpToPowerOfTwo() {
+        let buffer = FloatRingBuffer(capacity: 9)
+
+        XCTAssertEqual(buffer.capacity, 16)
+    }
+
+    func testWritingEmptyBufferDoesNotChangeCount() {
+        let buffer = FloatRingBuffer(capacity: 4)
+        let samples: [Float] = [1, 2]
+        samples.withUnsafeBufferPointer { buffer.write($0) }
+
+        ContiguousArray<Float>().withUnsafeBufferPointer { buffer.write($0) }
+
+        XCTAssertEqual(buffer.count, 2)
+        XCTAssertEqual(Array(buffer.readLast(4)), [1, 2])
+    }
+
+    func testReadLastZeroReturnsEmpty() {
+        let buffer = FloatRingBuffer(capacity: 4)
+        let samples: [Float] = [1, 2, 3]
+        samples.withUnsafeBufferPointer { buffer.write($0) }
+
+        XCTAssertTrue(buffer.readLast(0).isEmpty)
+        XCTAssertEqual(buffer.count, 3)
+    }
+
+    func testClearResetsCountAndAllowsReuse() {
+        let buffer = FloatRingBuffer(capacity: 4)
+        [1, 2, 3].map(Float.init).withUnsafeBufferPointer { buffer.write($0) }
+
+        buffer.clear()
+        [4, 5].map(Float.init).withUnsafeBufferPointer { buffer.write($0) }
+
+        XCTAssertEqual(buffer.count, 2)
+        XCTAssertEqual(Array(buffer.readLast(4)), [4, 5])
+    }
 }

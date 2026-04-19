@@ -22,7 +22,8 @@ final class AppCoordinatorTests: XCTestCase {
         feedback: FeedbackStub = FeedbackStub(),
         accessibility: AccessibilityStub = AccessibilityStub(allowed: true),
         timeout: TimeInterval = 1.0,
-        skipWarmup: Bool = true
+        skipWarmup: Bool = true,
+        transcriptStore: TranscriptStore? = nil
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -32,7 +33,8 @@ final class AppCoordinatorTests: XCTestCase {
             feedback: feedback,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in timeout },
-            keyMonitorFactory: { _ in nil }
+            keyMonitorFactory: { _ in nil },
+            transcriptStore: transcriptStore
         )
         if skipWarmup {
             coordinator.skipWarmup()
@@ -124,7 +126,19 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.toggleRecording()
 
         XCTAssertTrue(waitUntil { audio.endCount == 1 })
-        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
+        let restartDeadline = Date().addingTimeInterval(1.0)
+        var restarted = false
+        while !restarted, Date() < restartDeadline {
+            coordinator.toggleRecording()
+            restarted = audio.beginCount == 2
+            if !restarted {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+        }
+        XCTAssertTrue(restarted)
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { audio.endCount == 2 })
         XCTAssertEqual(transcriber.callCount, 0)
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
@@ -242,6 +256,81 @@ final class AppCoordinatorTests: XCTestCase {
 
         wait(for: [pasted], timeout: 1.0)
         XCTAssertEqual(paster.pastedTexts, ["Yeah, that sounds good."])
+    }
+
+    func testAccessibilityDeniedPreventsPaste() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let accessibility = AccessibilityStub(allowed: false)
+
+        let denied = expectation(description: "accessibility denied")
+        feedback.onError = { message in
+            if message == "Accessibility permission required" { denied.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            accessibility: accessibility
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [denied], timeout: 1.0)
+        XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
+    func testThirdToggleIsIgnoredWhileTranscribing() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Hello"), delay: 0.2)
+        let paster = PasterStub()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertEqual(audio.endCount, 1)
+        XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertEqual(paster.pastedTexts, ["Hello"])
+    }
+
+    func testSuccessfulTranscriptionIsStoredBeforePaste() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Stored text"))
+        let paster = PasterStub()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = {
+            XCTAssertEqual(store.allEntries(), ["Stored text"])
+            pasted.fulfill()
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            transcriptStore: store
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["Stored text"])
     }
 
     // MARK: - Phase 1: Warmup gate
@@ -494,11 +583,15 @@ private final class AudioCaptureStub: AudioCapturing {
 }
 
 private final class FakeTranscriber: Transcriber {
+    private let counterLock = UnfairLock()
     private let result: Result<String, Error>
     private let delay: TimeInterval
     private let warmUpError: Error?
-    private(set) var callCount = 0
-    private(set) var warmUpCount = 0
+    private var _callCount = 0
+    private var _warmUpCount = 0
+
+    var callCount: Int { counterLock.withLock { _callCount } }
+    var warmUpCount: Int { counterLock.withLock { _warmUpCount } }
 
     init(result: Result<String, Error>, delay: TimeInterval = 0, warmUpError: Error? = nil) {
         self.result = result
@@ -507,7 +600,7 @@ private final class FakeTranscriber: Transcriber {
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
-        callCount += 1
+        counterLock.withLock { _callCount += 1 }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         switch result {
         case .success(let text): return text
@@ -516,7 +609,7 @@ private final class FakeTranscriber: Transcriber {
     }
 
     func warmUp() async throws {
-        warmUpCount += 1
+        counterLock.withLock { _warmUpCount += 1 }
         if let error = warmUpError { throw error }
     }
 }

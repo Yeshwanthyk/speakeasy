@@ -33,12 +33,12 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 4 — P1 Quick-win tests (batch)
 
-- [ ] `TranscriptionTraceTests` (5 tests).
-- [ ] `TranscriptStoreTests` (5 tests: eviction, persistence, malformed JSON, truncation, clear).
-- [ ] `FloatRingBufferTests` additional edges (4 tests).
-- [ ] `CaptureStopTimingTests` additional edges (2 tests).
-- [ ] `ModelPathResolverTests` (2 tests).
-- [ ] `AppCoordinatorTests` additions: a11y-denied path, triple-toggle ignore, store integration.
+- [x] `TranscriptionTraceTests` (5 tests).
+- [x] `TranscriptStoreTests` (5 tests: eviction, persistence, malformed JSON, truncation, clear).
+- [x] `FloatRingBufferTests` additional edges (4 tests).
+- [x] `CaptureStopTimingTests` additional edges (2 tests).
+- [x] `ModelPathResolverTests` (2 tests).
+- [x] `AppCoordinatorTests` additions: a11y-denied path, triple-toggle ignore, store integration.
 
 ## Phase 5 — P2 remaining seams & visibility
 
