@@ -9,12 +9,13 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 1 — P0 Rust FFI hardening
 
-- [ ] Wrap every `#[no_mangle] extern "C"` body in `std::panic::catch_unwind`. Convert panics → error result.
-- [ ] Replace embedded-NUL sentinel with sanitised `CString` (strip or replace NULs, preserve content).
-- [ ] Surface real model-load error text via out-param string or a `parakeet_last_error()` function; Swift side forwards it.
-- [ ] Protect `ParakeetModel` with a `Mutex` (or make the Swift wrapper an actor). Ensure concurrent `transcribe()` cannot race.
-- [ ] Add `#[cfg(test)]` block in `lib.rs`: `to_c_string` NUL handling, `parakeet_result_free` idempotence, zero-sample path (no model required).
-- [ ] Pin toolchain: `rust-toolchain.toml` + `--locked` in `build.sh`.
+- [x] Wrap every `#[no_mangle] extern "C"` body in `std::panic::catch_unwind`. Convert panics → error result.
+- [x] Replace embedded-NUL sentinel with sanitised `CString` (U+FFFD replacement preserves content).
+- [x] Surface real model-load error text via a `ParakeetCreateResult { handle, error }` struct; Swift forwards it.
+- [x] Protect `ParakeetModel` with a `Mutex`; poisoned lock returns an error (model state is inconsistent after a panic).
+- [x] Add `#[cfg(test)]` block in `lib.rs`: NUL handling, Unicode, free idempotence, null-handle / null-path / missing-path error paths, compile-time Send/Sync check (13 tests).
+- [x] Pin toolchain: `rust-toolchain.toml` (1.87.0) + `--locked` in `build.sh`.
+- [x] Post-review: poison-recovery → error, doc comment tightened (Rust-only panics), tests renamed, Swift URL-rep error message fixed, toolchain pinned to specific version.
 
 ## Phase 2 — P0 Swift safety fixes
 
@@ -73,7 +74,9 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 - [ ] CI workflow (macOS runner, cached cargo, `swift test` + `cargo test`).
 - [ ] `fetch_model.sh` with checksum.
 - [ ] `WispIntegrationTests` target (opt-in, fixture WAV).
-- [ ] cbindgen FFI header generation.
+- [ ] cbindgen FFI header generation + Swift bridging header so
+      `ParakeetResult` / `ParakeetCreateResult` layouts are C-ABI-guaranteed
+      rather than a Swift-default coincidence (parked from Phase 1 review).
 - [ ] Signing / notarization pipeline; `NSAccessibilityUsageDescription`.
 
 (Phase 9 items are parked in this file only. They are NOT in scope for this mission.)

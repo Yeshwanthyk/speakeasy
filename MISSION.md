@@ -30,4 +30,13 @@
 
 (Updated as work progresses.)
 
-- _(none yet)_
+- **Phase 1 — poisoned Parakeet mutex is unrecoverable.** `ParakeetModel`
+  mutates `prev_state` and ONNX session frames during `recognize_batch`; a
+  panic mid-inference leaves the model inconsistent. `parakeet_transcribe`
+  therefore returns an error on a poisoned lock rather than silently
+  calling `into_inner()`. Caller should destroy+recreate the handle.
+- **Phase 1 — Swift-to-Rust struct layout is a latent assumption.** Swift
+  `struct { UnsafeMutableRawPointer?, UnsafeMutablePointer<CChar>? }` happens
+  to match Rust `#[repr(C)]` on arm64 for two pointer-sized fields, but this
+  is not guaranteed across Swift versions. Parked in NEXT.md Phase 9
+  (cbindgen + bridging header).

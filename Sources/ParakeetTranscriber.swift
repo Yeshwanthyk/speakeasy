@@ -6,8 +6,16 @@ struct ParakeetResult {
     var error: UnsafeMutablePointer<CChar>?
 }
 
+struct ParakeetCreateResult {
+    var handle: UnsafeMutableRawPointer?
+    var error: UnsafeMutablePointer<CChar>?
+}
+
 @_silgen_name("parakeet_create")
-private func parakeet_create(_ path: UnsafePointer<CChar>) -> UnsafeMutableRawPointer?
+private func parakeet_create(_ path: UnsafePointer<CChar>) -> ParakeetCreateResult
+
+@_silgen_name("parakeet_create_result_free")
+private func parakeet_create_result_free(_ result: ParakeetCreateResult)
 
 @_silgen_name("parakeet_destroy")
 private func parakeet_destroy(_ handle: UnsafeMutableRawPointer?)
@@ -28,20 +36,35 @@ enum ParakeetError: Error {
     case emptyResult
 }
 
+/// Swift-side wrapper around the Rust Parakeet FFI.
+///
+/// Thread-safe: the underlying Rust handle serialises concurrent calls to
+/// `transcribe` with an internal mutex. This type is therefore safe to share
+/// across tasks or dispatch queues without external synchronisation.
 final class ParakeetTranscriber {
     private let handle: UnsafeMutableRawPointer
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "parakeet")
 
     init(modelPath: URL) throws {
-        let handle = modelPath.withUnsafeFileSystemRepresentation { pointer -> UnsafeMutableRawPointer? in
+        // Pre-flight: URL must be representable as a filesystem path before
+        // we cross the FFI boundary.
+        let createResult: ParakeetCreateResult = try modelPath.withUnsafeFileSystemRepresentation { pointer in
             guard let pointer else {
-                return nil
+                throw ParakeetError.modelLoadFailed(
+                    "Cannot represent model URL as a filesystem path: \(modelPath.absoluteString)"
+                )
             }
             return parakeet_create(pointer)
         }
 
-        guard let handle else {
-            throw ParakeetError.modelLoadFailed("Failed to load Parakeet V3 model")
+        // Always free the error string on this code path. Safe if error is null.
+        defer { parakeet_create_result_free(createResult) }
+
+        if let errorPointer = createResult.error {
+            throw ParakeetError.modelLoadFailed(String(cString: errorPointer))
+        }
+        guard let handle = createResult.handle else {
+            throw ParakeetError.modelLoadFailed("Parakeet returned no handle and no error")
         }
 
         self.handle = handle

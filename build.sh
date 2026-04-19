@@ -12,7 +12,8 @@ SIGN_IDENTITY="-"
 
 RUST_DIR="$ROOT_DIR/rust/parakeet_bridge"
 
-cargo build --release --manifest-path "$RUST_DIR/Cargo.toml"
+# --locked ensures Cargo.lock is authoritative; fails if deps drift.
+cargo build --release --locked --manifest-path "$RUST_DIR/Cargo.toml"
 install_name_tool -id @rpath/libparakeet_bridge.dylib "$RUST_DIR/target/release/libparakeet_bridge.dylib"
 
 rm -rf "$APP_DIR"

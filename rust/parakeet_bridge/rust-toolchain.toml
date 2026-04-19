@@ -1,0 +1,7 @@
+[toolchain]
+# Pin a specific Rust so CI and fresh machines see identical codegen.
+# Bump deliberately; keep aligned with the `ort` / `transcribe-rs` MSRV.
+# Verified working on macOS arm64 with `ort 2.0-rc.10` + `transcribe-rs 0.2.1`.
+channel = "1.87.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
