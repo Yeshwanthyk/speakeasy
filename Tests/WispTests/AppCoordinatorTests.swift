@@ -6,6 +6,13 @@ final class AppCoordinatorTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// Enough loud samples to pass both minActiveSamples and RMS threshold.
+    static let validSamples = ContiguousArray<Float>(repeating: 0.1, count: 8_000)
+    /// Enough samples but too quiet (silence).
+    static let silentSamples = ContiguousArray<Float>(repeating: 0.0001, count: 8_000)
+    /// Too few active samples.
+    static let shortSamples = ContiguousArray<Float>(repeating: 0.1, count: 100)
+
     private func makeCoordinator(
         audio: AudioCaptureStub,
         transcriber: TranscriberStub,
@@ -35,7 +42,7 @@ final class AppCoordinatorTests: XCTestCase {
     // MARK: - Existing behaviour
 
     func testToggleRecordingStopsAndPastes() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Hello"))
         let paster = PasterStub()
         let flash = FlashStub()
@@ -59,7 +66,7 @@ final class AppCoordinatorTests: XCTestCase {
     }
 
     func testTranscriptionFailureNotifiesUser() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.2 as Float, count: 80))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .failure(TestError()))
         let paster = PasterStub()
         let feedback = FeedbackStub()
@@ -77,7 +84,7 @@ final class AppCoordinatorTests: XCTestCase {
     }
 
     func testTimeoutDropsLateResults() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.3 as Float, count: 200))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Late"), delay: 0.2)
         let paster = PasterStub()
         let feedback = FeedbackStub()
@@ -112,7 +119,7 @@ final class AppCoordinatorTests: XCTestCase {
     }
 
     func testEmptyTranscriptionNotifies() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.3 as Float, count: 200))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("   "))
         let paster = PasterStub()
         let feedback = FeedbackStub()
@@ -131,11 +138,87 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
 
+    // MARK: - Audio validation guards
+
+    func testShortRecordingIsRejected() {
+        let audio = AudioCaptureStub(samples: Self.shortSamples)
+        let transcriber = TranscriberStub(result: .success("ignored"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        // Give async dispatch a moment
+        Thread.sleep(forTimeInterval: 0.1)
+
+        XCTAssertEqual(transcriber.callCount, 0, "Short recordings should not reach the transcriber")
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertTrue(feedback.errors.contains("Recording too short"))
+    }
+
+    func testSilentAudioIsRejected() {
+        let audio = AudioCaptureStub(samples: Self.silentSamples)
+        let transcriber = TranscriberStub(result: .success("ignored"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        Thread.sleep(forTimeInterval: 0.1)
+
+        XCTAssertEqual(transcriber.callCount, 0, "Silent audio should not reach the transcriber")
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertTrue(feedback.errors.contains("No speech detected"))
+    }
+
+    func testHallucinationIsFiltered() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = TranscriberStub(result: .success("Yeah."))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+
+        let notified = expectation(description: "no speech")
+        feedback.onError = { message in
+            if message == "No speech detected" { notified.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [notified], timeout: 1.0)
+        XCTAssertTrue(paster.pastedTexts.isEmpty, "Hallucinated 'Yeah.' should not be pasted")
+    }
+
+    func testRealTranscriptionPassesHallucinationFilter() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = TranscriberStub(result: .success("Yeah, that sounds good."))
+        let paster = PasterStub()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["Yeah, that sounds good."])
+    }
+
     // MARK: - Phase 1: Warmup gate
 
     /// Hotkey during warmup must be silently dropped; no audio start.
     func testHotkeyDuringWarmupIsIgnored() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Hello"))
         let feedback = FeedbackStub()
 
@@ -150,7 +233,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     /// Hotkey during warmup must emit user-visible feedback.
     func testHotkeyDuringWarmupEmitsFeedback() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Hello"))
         let feedback = FeedbackStub()
 
@@ -169,7 +252,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     /// After warmup success, hotkey should start recording normally.
     func testHotkeyAfterWarmupSuccessStartsRecording() async {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Hello"))
         let paster = PasterStub()
 
@@ -191,7 +274,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     /// After warmup failure, hotkey should still work (degrade gracefully).
     func testHotkeyAfterWarmupFailureStillTranscribes() async {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = TranscriberStub(result: .success("Recovered"), warmUpError: TestError())
         let paster = PasterStub()
 
@@ -275,7 +358,7 @@ final class AudioCaptureLifecycleTests: XCTestCase {
     }
 
     func testPrepareCapturePropagatesFailure() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160), prepareError: TestError())
+        let audio = AudioCaptureStub(samples: AppCoordinatorTests.validSamples, prepareError: TestError())
         let transcriber = TranscriberStub(result: .success("Hello"))
         let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
 
@@ -296,7 +379,7 @@ final class AudioCaptureLifecycleTests: XCTestCase {
 
     /// Recording uses beginRecording/endRecording, not start/stop.
     func testRecordingUsesBeginEnd() {
-        let audio = AudioCaptureStub(samples: ContiguousArray(repeating: 0.1 as Float, count: 160))
+        let audio = AudioCaptureStub(samples: AppCoordinatorTests.validSamples)
         let transcriber = TranscriberStub(result: .success("Hi"))
         let paster = PasterStub()
 

@@ -5,6 +5,7 @@ import os
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private var coordinator: AppCoordinator?
+    private var menuBarController: MenuBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
@@ -21,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let coordinator = try AppCoordinator()
                 try coordinator.prepareCapture()
                 self.coordinator = coordinator
+
+                if let store = coordinator.transcriptStore {
+                    self.menuBarController = MenuBarController(store: store, paster: coordinator.paster)
+                }
 
                 Task(priority: .utility) {
                     await coordinator.warmUpModel()

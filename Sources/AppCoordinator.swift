@@ -84,11 +84,23 @@ final class AppCoordinator {
     private static let transcriptionSampleRate: Double = 16_000
     private static let minTranscriptionTimeout: TimeInterval = 30
     private static let maxTranscriptionTimeout: TimeInterval = 600
+    /// Minimum active (non-preroll) samples required. 4800 = 300ms at 16kHz.
+    private static let minActiveSamples = 4_800
+    /// RMS below this threshold is treated as silence.
+    private static let silenceRmsThreshold: Float = 0.005
+    /// Known Parakeet TDT hallucinations on silent/near-silent audio.
+    private static let hallucinationPatterns: Set<String> = [
+        "yeah", "yeah.", "yes", "yes.", "okay", "okay.", "ok", "ok.",
+        "uh-huh", "uh-huh.", "mhm", "mhm.", "hmm", "hmm.", "huh", "huh.",
+        "oh", "oh.", "ah", "ah.", "uh", "uh.", "um", "um.",
+        "bye", "bye.", "no", "no.", "so", "so.", "right", "right.",
+    ]
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing
     private let transcriber: Transcribing
-    private let paster: Pasting
+    let paster: Pasting
+    let transcriptStore: TranscriptStore?
     private let feedback: UserFeedback
     private let accessibilityChecker: AccessibilityChecking
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
@@ -113,7 +125,8 @@ final class AppCoordinator {
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
-        keyMonitorFactory: KeyMonitorFactory?
+        keyMonitorFactory: KeyMonitorFactory?,
+        transcriptStore: TranscriptStore? = nil
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -122,6 +135,7 @@ final class AppCoordinator {
         self.feedback = feedback
         self.accessibilityChecker = accessibilityChecker
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
+        self.transcriptStore = transcriptStore
 
         keyMonitor = keyMonitorFactory? { [weak self] in
             self?.toggleRecording()
@@ -198,7 +212,8 @@ final class AppCoordinator {
             feedback: feedback,
             accessibilityChecker: SystemAccessibilityChecker(),
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
-            keyMonitorFactory: keyMonitorFactory
+            keyMonitorFactory: keyMonitorFactory,
+            transcriptStore: TranscriptStore()
         )
     }
     #endif
@@ -276,6 +291,28 @@ final class AppCoordinator {
             return
         }
 
+        let activeSampleCount = samples.count - captureResult.prependedSampleCount
+        let rms = Self.rms(of: samples)
+        logger.info(
+            "Audio stats: \(samples.count) samples (\(activeSampleCount) active, \(captureResult.prependedSampleCount) preroll), RMS=\(rms, format: .fixed(precision: 4))"
+        )
+
+        guard activeSampleCount >= Self.minActiveSamples else {
+            trace.log(logger: logger, outcome: .noSpeech)
+            logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
+            feedback.error("Recording too short")
+            finishTranscription(token: token)
+            return
+        }
+
+        guard rms > Self.silenceRmsThreshold else {
+            trace.log(logger: logger, outcome: .noSpeech)
+            logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
+            feedback.error("No speech detected")
+            finishTranscription(token: token)
+            return
+        }
+
         let timeout = transcriptionTimeoutProvider(samples)
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
             self?.handleTranscriptionTimeout(token: token, timeout: timeout, trace: trace)
@@ -323,6 +360,13 @@ final class AppCoordinator {
             return
         }
 
+        if Self.hallucinationPatterns.contains(trimmed.lowercased()) {
+            trace.log(logger: logger, outcome: .noSpeech)
+            logger.debug("Filtered likely hallucination: '\(trimmed)'")
+            feedback.error("No speech detected")
+            return
+        }
+
         guard accessibilityChecker.ensureAccessibilityPrompted() else {
             trace.log(logger: logger, outcome: .accessibilityDenied)
             logger.error("Accessibility permission missing")
@@ -340,6 +384,7 @@ final class AppCoordinator {
         }
         #endif
 
+        transcriptStore?.append(trimmed)
         paster.paste(trimmed)
     }
 
@@ -382,5 +427,16 @@ final class AppCoordinator {
         let duration = Double(samples.count) / transcriptionSampleRate
         let scaled = max(duration * 2, minTranscriptionTimeout)
         return min(scaled, maxTranscriptionTimeout)
+    }
+
+    private static func rms(of samples: ContiguousArray<Float>) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sumSquares: Float = 0
+        samples.withUnsafeBufferPointer { buffer in
+            for sample in buffer {
+                sumSquares += sample * sample
+            }
+        }
+        return (sumSquares / Float(samples.count)).squareRoot()
     }
 }
