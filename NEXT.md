@@ -1,0 +1,90 @@
+# Phased Mission Checklist
+
+Each phase: implement → sub-agent review → fix findings → run `swift test` + `cargo test` → commit → continue.
+
+## Phase 0 — Baseline
+
+- [x] Commit the in-flight WIP (TranscriptStore, MenuBarController, AppCoordinator/AppDelegate diff) as the mission baseline.
+- [x] Create MISSION.md, NEXT.md.
+
+## Phase 1 — P0 Rust FFI hardening
+
+- [ ] Wrap every `#[no_mangle] extern "C"` body in `std::panic::catch_unwind`. Convert panics → error result.
+- [ ] Replace embedded-NUL sentinel with sanitised `CString` (strip or replace NULs, preserve content).
+- [ ] Surface real model-load error text via out-param string or a `parakeet_last_error()` function; Swift side forwards it.
+- [ ] Protect `ParakeetModel` with a `Mutex` (or make the Swift wrapper an actor). Ensure concurrent `transcribe()` cannot race.
+- [ ] Add `#[cfg(test)]` block in `lib.rs`: `to_c_string` NUL handling, `parakeet_result_free` idempotence, zero-sample path (no model required).
+- [ ] Pin toolchain: `rust-toolchain.toml` + `--locked` in `build.sh`.
+
+## Phase 2 — P0 Swift safety fixes
+
+- [ ] `AudioCapture.endRecording()` no longer blocks main thread (dispatch the semaphore wait off-main or make async).
+- [ ] `TranscriptStore` → `@MainActor` (enforce the documented contract).
+- [ ] `KeyComboMonitor.nextIdentifier` → atomic / `OSAtomic` / random UUID-derived value (no shared static mutable).
+- [ ] Add `@MainActor` to `ScreenEdgeFlash` (touches NS APIs).
+
+## Phase 3 — P2 Transcriber protocol seam
+
+- [ ] Extract `Transcriber` protocol into `Sources/Transcriber.swift` (inside library target).
+- [ ] `ParakeetTranscriber` conforms; file stays excluded from SPM target.
+- [ ] `AppCoordinator` depends on `Transcriber` (already does via protocol; verify & tighten).
+- [ ] Rewire tests to use a `FakeTranscriber` that lives in the test target (if not already).
+
+## Phase 4 — P1 Quick-win tests (batch)
+
+- [ ] `TranscriptionTraceTests` (5 tests).
+- [ ] `TranscriptStoreTests` (5 tests: eviction, persistence, malformed JSON, truncation, clear).
+- [ ] `FloatRingBufferTests` additional edges (4 tests).
+- [ ] `CaptureStopTimingTests` additional edges (2 tests).
+- [ ] `ModelPathResolverTests` (2 tests).
+- [ ] `AppCoordinatorTests` additions: a11y-denied path, triple-toggle ignore, store integration.
+
+## Phase 5 — P2 remaining seams & visibility
+
+- [ ] `transcriptionQueue` injectable into `AppCoordinator`.
+- [ ] `KeyComboMonitor.carbonModifiers(from:)` → internal (to enable tests).
+- [ ] Expose read-only `isRecording: Bool` from `AppCoordinator` (removes side-effect assertions).
+- [ ] Tests for carbonModifiers + queue injection determinism.
+
+## Phase 6 — P2 AudioCapture seam
+
+- [ ] Introduce `AudioEngineProtocol`; move hardware access out of `AudioCapture.init` into `prepare()`.
+- [ ] Add tests: prepare installs tap, engine-start failure surfaces, shutdown removes tap, grace semaphore signalled.
+
+## Phase 7 — P3 Agent-friendliness polish
+
+- [ ] Extract `HallucinationFilter` from `AppCoordinator` as its own named type with tests.
+- [ ] Widen `UserFeedback` protocol to `notify(event:)` enum; migrate call sites.
+- [ ] Add MARK / state-machine comment to `AppCoordinator`.
+- [ ] Delete `ScreenEdgeFlash.hide(window:)` dead code; drop unused `flash(duration:lineWidth:)` from `Flashing`.
+
+## Phase 8 — P3 docs & hygiene
+
+- [ ] Pick one canonical name (Speakeasy vs Wisp) and make it consistent; update README.
+- [ ] Expand README: prerequisites, model provisioning, test command.
+- [ ] Add ARCHITECTURE.md: data-flow, state machine, FFI contract.
+- [ ] Add top-of-file FFI contract comment to `lib.rs`.
+- [ ] Update `plans/*.md` statuses (phases 0-4 done vs open).
+- [ ] `.gitignore`: `.pi/`, `*.DS_Store`, untrack tracked `.DS_Store`.
+- [ ] Delete or document empty `resources/`.
+
+## Phase 9 — P4 parked to NEXT (not this mission)
+
+- [ ] CI workflow (macOS runner, cached cargo, `swift test` + `cargo test`).
+- [ ] `fetch_model.sh` with checksum.
+- [ ] `WispIntegrationTests` target (opt-in, fixture WAV).
+- [ ] cbindgen FFI header generation.
+- [ ] Signing / notarization pipeline; `NSAccessibilityUsageDescription`.
+
+(Phase 9 items are parked in this file only. They are NOT in scope for this mission.)
+
+## Mission Check Cadence
+
+After each phase:
+
+1. Sub-agent review (general-purpose or review-deep) on only the changed files.
+2. Fix any P0/P1 findings from the review (P2 findings deferred to NEXT.md unless trivial).
+3. `swift test` (from repo root) → green.
+4. `cargo test --manifest-path rust/parakeet_bridge/Cargo.toml` → green.
+5. `git commit` — terse message, no emoji.
+6. Update NEXT.md checkboxes, append critical learnings to MISSION.md if material.
