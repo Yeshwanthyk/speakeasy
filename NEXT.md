@@ -42,10 +42,10 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 5 — P2 remaining seams & visibility
 
-- [ ] `transcriptionQueue` injectable into `AppCoordinator`.
-- [ ] `KeyComboMonitor.carbonModifiers(from:)` → internal (to enable tests).
-- [ ] Expose read-only `isRecording: Bool` from `AppCoordinator` (removes side-effect assertions).
-- [ ] Tests for carbonModifiers + queue injection determinism.
+- [x] `transcriptionQueue` injectable into `AppCoordinator`.
+- [x] `KeyComboMonitor.carbonModifiers(from:)` → internal (to enable tests).
+- [x] Expose read-only `isRecording: Bool` from `AppCoordinator` (removes side-effect assertions).
+- [x] Tests for carbonModifiers + queue injection determinism.
 
 ## Phase 6 — P2 AudioCapture seam
 

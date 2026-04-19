@@ -101,9 +101,18 @@ final class AppCoordinator {
     private var warmupState: WarmupState = .pending
     /// Partial trace built during a recording session; nil when idle or transcribing.
     private var activeTrace: TranscriptionTrace?
-    private let transcriptionQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
+    private let transcriptionQueue: DispatchQueue
     private let flash: Flashing
     private var keyMonitor: KeyComboMonitor?
+
+    var isRecording: Bool {
+        stateLock.withLock {
+            if case .recording = state {
+                return true
+            }
+            return false
+        }
+    }
 
     #if DEBUG
     private let debugSummary = TranscriptionDebugSummary()
@@ -118,7 +127,8 @@ final class AppCoordinator {
         accessibilityChecker: AccessibilityChecking,
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
-        transcriptStore: TranscriptStore? = nil
+        transcriptStore: TranscriptStore? = nil,
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -128,6 +138,7 @@ final class AppCoordinator {
         self.accessibilityChecker = accessibilityChecker
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.transcriptStore = transcriptStore
+        self.transcriptionQueue = transcriptionQueue
 
         keyMonitor = keyMonitorFactory? { [weak self] in
             self?.toggleRecording()

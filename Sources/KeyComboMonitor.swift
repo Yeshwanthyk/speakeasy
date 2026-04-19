@@ -137,7 +137,7 @@ final class KeyComboMonitor {
         return noErr
     }
 
-    private static func carbonModifiers(from flags: CGEventFlags) -> UInt32 {
+    static func carbonModifiers(from flags: CGEventFlags) -> UInt32 {
         var modifiers: UInt32 = 0
 
         if flags.contains(.maskCommand) {

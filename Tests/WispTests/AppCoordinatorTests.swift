@@ -23,7 +23,8 @@ final class AppCoordinatorTests: XCTestCase {
         accessibility: AccessibilityStub = AccessibilityStub(allowed: true),
         timeout: TimeInterval = 1.0,
         skipWarmup: Bool = true,
-        transcriptStore: TranscriptStore? = nil
+        transcriptStore: TranscriptStore? = nil,
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription")
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -34,7 +35,8 @@ final class AppCoordinatorTests: XCTestCase {
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in timeout },
             keyMonitorFactory: { _ in nil },
-            transcriptStore: transcriptStore
+            transcriptStore: transcriptStore,
+            transcriptionQueue: transcriptionQueue
         )
         if skipWarmup {
             coordinator.skipWarmup()
@@ -221,6 +223,20 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(audio.lastEndRecordingWasMainThread, false)
     }
 
+    func testIsRecordingExposesRecordingState() {
+        let audio = AudioCaptureStub(samples: Self.shortSamples)
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
+
+        XCTAssertFalse(coordinator.isRecording)
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(coordinator.isRecording)
+
+        coordinator.toggleRecording()
+        XCTAssertFalse(coordinator.isRecording)
+    }
+
     func testHallucinationIsFiltered() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Yeah."))
@@ -331,6 +347,33 @@ final class AppCoordinatorTests: XCTestCase {
 
         wait(for: [pasted], timeout: 1.0)
         XCTAssertEqual(paster.pastedTexts, ["Stored text"])
+    }
+
+    func testInjectedTranscriptionQueueRunsStopAndTranscribeWork() {
+        let key = DispatchSpecificKey<String>()
+        let queue = DispatchQueue(label: "com.speakeasy.app.tests.injected-transcription")
+        queue.setSpecific(key: key, value: "injected")
+
+        let audio = AudioCaptureStub(samples: Self.validSamples, expectedQueue: (key, "injected"))
+        let transcriber = FakeTranscriber(result: .success("Hello"), expectedQueue: (key, "injected"))
+        let paster = PasterStub()
+
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            transcriptionQueue: queue
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(audio.endRecordingUsedExpectedQueue, true)
+        XCTAssertEqual(transcriber.transcribeUsedExpectedQueue, true)
     }
 
     // MARK: - Phase 1: Warmup gate
@@ -529,16 +572,19 @@ private final class AudioCaptureStub: AudioCapturing {
     private var _endCount = 0
     private var _shutdownCount = 0
     private var _lastEndRecordingWasMainThread: Bool?
+    private var _endRecordingUsedExpectedQueue: Bool?
     private let prepareError: Error?
     private let samples: ContiguousArray<Float>
     private let prependedSampleCount: Int
     private let graceDurationMs: Double
+    private let expectedQueue: (key: DispatchSpecificKey<String>, value: String)?
 
     var prepareCount: Int { counterLock.withLock { _prepareCount } }
     var beginCount: Int { counterLock.withLock { _beginCount } }
     var endCount: Int { counterLock.withLock { _endCount } }
     var shutdownCount: Int { counterLock.withLock { _shutdownCount } }
     var lastEndRecordingWasMainThread: Bool? { counterLock.withLock { _lastEndRecordingWasMainThread } }
+    var endRecordingUsedExpectedQueue: Bool? { counterLock.withLock { _endRecordingUsedExpectedQueue } }
 
     /// Convenience aliases used by older tests.
     var startCount: Int { beginCount }
@@ -548,12 +594,14 @@ private final class AudioCaptureStub: AudioCapturing {
         samples: ContiguousArray<Float>,
         prepareError: Error? = nil,
         prependedSampleCount: Int = 0,
-        graceDurationMs: Double = 0
+        graceDurationMs: Double = 0,
+        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil
     ) {
         self.samples = samples
         self.prepareError = prepareError
         self.prependedSampleCount = prependedSampleCount
         self.graceDurationMs = graceDurationMs
+        self.expectedQueue = expectedQueue
     }
 
     func prepare() throws {
@@ -569,6 +617,9 @@ private final class AudioCaptureStub: AudioCapturing {
         counterLock.withLock {
             _endCount += 1
             _lastEndRecordingWasMainThread = Thread.isMainThread
+            if let expectedQueue {
+                _endRecordingUsedExpectedQueue = DispatchQueue.getSpecific(key: expectedQueue.key) == expectedQueue.value
+            }
         }
         return AudioCaptureResult(
             samples: samples,
@@ -587,20 +638,34 @@ private final class FakeTranscriber: Transcriber {
     private let result: Result<String, Error>
     private let delay: TimeInterval
     private let warmUpError: Error?
+    private let expectedQueue: (key: DispatchSpecificKey<String>, value: String)?
     private var _callCount = 0
     private var _warmUpCount = 0
+    private var _transcribeUsedExpectedQueue: Bool?
 
     var callCount: Int { counterLock.withLock { _callCount } }
     var warmUpCount: Int { counterLock.withLock { _warmUpCount } }
+    var transcribeUsedExpectedQueue: Bool? { counterLock.withLock { _transcribeUsedExpectedQueue } }
 
-    init(result: Result<String, Error>, delay: TimeInterval = 0, warmUpError: Error? = nil) {
+    init(
+        result: Result<String, Error>,
+        delay: TimeInterval = 0,
+        warmUpError: Error? = nil,
+        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil
+    ) {
         self.result = result
         self.delay = delay
         self.warmUpError = warmUpError
+        self.expectedQueue = expectedQueue
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
-        counterLock.withLock { _callCount += 1 }
+        counterLock.withLock {
+            _callCount += 1
+            if let expectedQueue {
+                _transcribeUsedExpectedQueue = DispatchQueue.getSpecific(key: expectedQueue.key) == expectedQueue.value
+            }
+        }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         switch result {
         case .success(let text): return text
