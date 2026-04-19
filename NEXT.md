@@ -54,10 +54,10 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 7 — P3 Agent-friendliness polish
 
-- [ ] Extract `HallucinationFilter` from `AppCoordinator` as its own named type with tests.
-- [ ] Widen `UserFeedback` protocol to `notify(event:)` enum; migrate call sites.
-- [ ] Add MARK / state-machine comment to `AppCoordinator`.
-- [ ] Delete `ScreenEdgeFlash.hide(window:)` dead code; drop unused `flash(duration:lineWidth:)` from `Flashing`.
+- [x] Extract `HallucinationFilter` from `AppCoordinator` as its own named type with tests.
+- [x] Widen `UserFeedback` protocol to `notify(event:)` enum; migrate call sites.
+- [x] Add MARK / state-machine comment to `AppCoordinator`.
+- [x] Delete `ScreenEdgeFlash.hide(window:)` dead code; drop unused `flash(duration:lineWidth:)` from `Flashing`.
 
 ## Phase 8 — P3 docs & hygiene
 

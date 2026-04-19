@@ -1,12 +1,16 @@
 import AppKit
 import Foundation
 
+enum UserFeedbackEvent: Equatable {
+    case error(String)
+}
+
 protocol UserFeedback {
-    func error(_ message: String)
+    func notify(event: UserFeedbackEvent)
 }
 
 final class SystemFeedback: UserFeedback {
-    func error(_ message: String) {
+    func notify(event: UserFeedbackEvent) {
         DispatchQueue.main.async {
             NSSound.beep()
         }

@@ -692,20 +692,28 @@ private final class PasterStub: Pasting {
 private final class FlashStub: Flashing {
     private(set) var showCount = 0
     private(set) var hideCount = 0
-    private(set) var flashCount = 0
 
     func show(lineWidth: CGFloat) { showCount += 1 }
     func hide(completion: (() -> Void)?) { hideCount += 1; completion?() }
-    func flash(duration: TimeInterval, lineWidth: CGFloat) { flashCount += 1 }
 }
 
 private final class FeedbackStub: UserFeedback {
-    private(set) var errors: [String] = []
+    private(set) var events: [UserFeedbackEvent] = []
+    var errors: [String] {
+        events.compactMap { event in
+            if case let .error(message) = event {
+                return message
+            }
+            return nil
+        }
+    }
     var onError: ((String) -> Void)?
 
-    func error(_ message: String) {
-        errors.append(message)
-        onError?(message)
+    func notify(event: UserFeedbackEvent) {
+        events.append(event)
+        if case let .error(message) = event {
+            onError?(message)
+        }
     }
 }
 

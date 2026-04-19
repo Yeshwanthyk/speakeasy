@@ -8,7 +8,6 @@ final class ScreenEdgeFlash {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "flash")
     private var window: NSPanel?
     private var borderView: NSView?
-    private var hideToken: UUID?
     private var isVisible = false
 
     func show(lineWidth: CGFloat = 3) {
@@ -38,19 +37,6 @@ final class ScreenEdgeFlash {
             completion?()
         }
         isVisible = false
-    }
-
-    func flash(duration: TimeInterval = 0.18, lineWidth: CGFloat = 3) {
-        show(lineWidth: lineWidth)
-
-        let token = UUID()
-        hideToken = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-            guard let self, self.hideToken == token else {
-                return
-            }
-            self.hide()
-        }
     }
 
     private func ensureWindow() -> (NSPanel, NSView) {

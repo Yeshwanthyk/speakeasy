@@ -22,7 +22,7 @@ final class PasteboardPaster: Pasting {
     private func sendCommandV() {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             logger.error("Failed to create CGEventSource")
-            feedback.error("Paste failed")
+            feedback.notify(event: .error("Paste failed"))
             return
         }
 
@@ -32,7 +32,7 @@ final class PasteboardPaster: Pasting {
             keyDown: true
         ) else {
             logger.error("Failed to create keyDown event")
-            feedback.error("Paste failed")
+            feedback.notify(event: .error("Paste failed"))
             return
         }
 
@@ -42,7 +42,7 @@ final class PasteboardPaster: Pasting {
             keyDown: false
         ) else {
             logger.error("Failed to create keyUp event")
-            feedback.error("Paste failed")
+            feedback.notify(event: .error("Paste failed"))
             return
         }
 

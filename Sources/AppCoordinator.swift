@@ -22,7 +22,6 @@ protocol Pasting {
 protocol Flashing {
     func show(lineWidth: CGFloat)
     func hide(completion: (() -> Void)?)
-    func flash(duration: TimeInterval, lineWidth: CGFloat)
 }
 
 protocol AccessibilityChecking {
@@ -80,13 +79,6 @@ final class AppCoordinator {
     private static let minActiveSamples = 4_800
     /// RMS below this threshold is treated as silence.
     private static let silenceRmsThreshold: Float = 0.005
-    /// Known Parakeet TDT hallucinations on silent/near-silent audio.
-    private static let hallucinationPatterns: Set<String> = [
-        "yeah", "yeah.", "yes", "yes.", "okay", "okay.", "ok", "ok.",
-        "uh-huh", "uh-huh.", "mhm", "mhm.", "hmm", "hmm.", "huh", "huh.",
-        "oh", "oh.", "ah", "ah.", "uh", "uh.", "um", "um.",
-        "bye", "bye.", "no", "no.", "so", "so.", "right", "right.",
-    ]
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing
@@ -95,6 +87,7 @@ final class AppCoordinator {
     let transcriptStore: TranscriptStore?
     private let feedback: UserFeedback
     private let accessibilityChecker: AccessibilityChecking
+    private let hallucinationFilter: HallucinationFilter
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
@@ -125,6 +118,7 @@ final class AppCoordinator {
         flash: Flashing,
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
+        hallucinationFilter: HallucinationFilter = HallucinationFilter(),
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
@@ -136,6 +130,7 @@ final class AppCoordinator {
         self.flash = flash
         self.feedback = feedback
         self.accessibilityChecker = accessibilityChecker
+        self.hallucinationFilter = hallucinationFilter
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.transcriptStore = transcriptStore
         self.transcriptionQueue = transcriptionQueue
@@ -189,7 +184,7 @@ final class AppCoordinator {
         let feedback = SystemFeedback()
         let audioCapture = try AudioCapture(
             onLimitReached: { [feedback] in
-                feedback.error("Recording limit reached (6 minutes)")
+                feedback.notify(event: .error("Recording limit reached (6 minutes)"))
             }
         )
         let transcriber = try ParakeetTranscriber(modelPath: modelPath)
@@ -221,6 +216,13 @@ final class AppCoordinator {
         )
     }
     #endif
+
+    // MARK: - State Machine
+    //
+    // Hotkey input advances the coordinator through a single linear recording
+    // session: idle -> recording -> transcribing(token) -> idle. The token
+    // prevents timeout and transcription callbacks from completing stale work
+    // after a later session has already moved the state forward.
 
     func toggleRecording() {
         let now = TranscriptionTrace.timestamp()
@@ -270,7 +272,7 @@ final class AppCoordinator {
             case .pending, .warming:
                 logger.info("Ignoring hotkey: model warmup in progress")
                 DispatchQueue.main.async { [feedback] in
-                    feedback.error("Model warming up, please wait")
+                    feedback.notify(event: .error("Model warming up, please wait"))
                 }
             default:
                 logger.debug("Ignoring hotkey while transcribing")
@@ -325,7 +327,7 @@ final class AppCoordinator {
         guard activeSampleCount >= Self.minActiveSamples else {
             trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
-            feedback.error("Recording too short")
+            feedback.notify(event: .error("Recording too short"))
             finishTranscription(token: token)
             return
         }
@@ -333,7 +335,7 @@ final class AppCoordinator {
         guard rms > Self.silenceRmsThreshold else {
             trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
-            feedback.error("No speech detected")
+            feedback.notify(event: .error("No speech detected"))
             finishTranscription(token: token)
             return
         }
@@ -371,7 +373,7 @@ final class AppCoordinator {
                 case .failure(let error):
                     trace.log(logger: self.logger, outcome: .transcriptionFailed)
                     self.logger.error("Transcription failed: \(String(describing: error))")
-                    self.feedback.error("Transcription failed")
+                    self.feedback.notify(event: .error("Transcription failed"))
                 }
             }
         }
@@ -381,21 +383,21 @@ final class AppCoordinator {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             trace.log(logger: logger, outcome: .noSpeech)
-            feedback.error("No speech detected")
+            feedback.notify(event: .error("No speech detected"))
             return
         }
 
-        if Self.hallucinationPatterns.contains(trimmed.lowercased()) {
+        if hallucinationFilter.isLikelyHallucination(trimmed) {
             trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Filtered likely hallucination: '\(trimmed)'")
-            feedback.error("No speech detected")
+            feedback.notify(event: .error("No speech detected"))
             return
         }
 
         guard accessibilityChecker.ensureAccessibilityPrompted() else {
             trace.log(logger: logger, outcome: .accessibilityDenied)
             logger.error("Accessibility permission missing")
-            feedback.error("Accessibility permission required")
+            feedback.notify(event: .error("Accessibility permission required"))
             return
         }
 
@@ -445,7 +447,7 @@ final class AppCoordinator {
 
         trace.log(logger: logger, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
-        feedback.error("Transcription timed out")
+        feedback.notify(event: .error("Transcription timed out"))
     }
 
     private static func defaultTranscriptionTimeout(
