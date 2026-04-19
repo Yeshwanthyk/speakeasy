@@ -2,7 +2,7 @@
 
 ## Plan Metadata
 - Created: 2026-03-25
-- Status: draft
+- Status: phases 0-4 implemented; phase 5+ open
 - Owner: yesh
 - Scope: break Wisp latency recommendations into implementable subtasks
 - Priority order:
@@ -18,9 +18,10 @@ Reduce perceived and actual voice-to-text latency in Wisp without regressing tra
 
 ## Current State
 - Wisp records a full utterance, stops capture, then runs one full-buffer Parakeet transcription (`Sources/AppCoordinator.swift`, `Sources/AudioCapture.swift`, `Sources/ParakeetTranscriber.swift`, `rust/parakeet_bridge/src/lib.rs`).
-- Model warmup exists, but launches detached at utility priority and is not readiness-gated (`Sources/AppDelegate.swift:19-24`).
-- Capture engine and tap are started/stopped for every utterance (`Sources/AudioCapture.swift:69-127`).
-- No stage timing telemetry exists beyond engine startup ms logging (`Sources/AudioCapture.swift:104-105`).
+- Model warmup is readiness-gated; hotkeys are ignored with feedback until warmup has completed or failed.
+- Capture engine preparation is separated from per-utterance recording. The engine/tap stay prepared while idle, and `beginRecording()` / `endRecording()` only control sample accumulation.
+- Capture includes bounded pre-roll via `FloatRingBuffer` and adaptive stop grace via `CaptureStopTiming`.
+- Stage timing telemetry is captured by `TranscriptionTrace` and summarized in debug builds.
 
 ## Out of Scope
 - Cloud/off-device STT
@@ -29,11 +30,11 @@ Reduce perceived and actual voice-to-text latency in Wisp without regressing tra
 - Multi-language feature expansion unrelated to latency
 
 ## Progress Tracking
-- [ ] Phase 0: Baseline telemetry + measurement harness
-- [ ] Phase 1: Warmup readiness gate
-- [ ] Phase 2: Hot capture engine lifecycle
-- [ ] Phase 3: Ring buffer + pre-roll
-- [ ] Phase 4: Adaptive stop grace
+- [x] Phase 0: Baseline telemetry + measurement harness
+- [x] Phase 1: Warmup readiness gate
+- [x] Phase 2: Hot capture engine lifecycle
+- [x] Phase 3: Ring buffer + pre-roll
+- [x] Phase 4: Adaptive stop grace
 - [ ] Phase 5: Telemetry hardening + acceptance thresholds
 - [ ] Phase 6: Conditional follow-ups (short-clip path, runtime/model experiments, streaming spike)
 
@@ -270,15 +271,15 @@ Largest upside, largest scope.
 ## Suggested implementation grouping
 
 ### PR / change set 1
-- [ ] Phase 0
-- [ ] Phase 1
+- [x] Phase 0
+- [x] Phase 1
 
 ### PR / change set 2
-- [ ] Phase 2
+- [x] Phase 2
 
 ### PR / change set 3
-- [ ] Phase 3
-- [ ] Phase 4
+- [x] Phase 3
+- [x] Phase 4
 
 ### PR / change set 4
 - [ ] Phase 5 summary

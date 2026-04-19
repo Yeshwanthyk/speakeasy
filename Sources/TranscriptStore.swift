@@ -11,9 +11,9 @@ import os
 final class TranscriptStore {
     static let capacity = 50
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcripts")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "transcripts")
     private let fileURL: URL
-    private let writeQueue = DispatchQueue(label: "com.speakeasy.app.transcripts.write", qos: .utility)
+    private let writeQueue = DispatchQueue(label: "com.wisp.app.transcripts.write", qos: .utility)
     private var entries: [String]
 
     /// Entries in insertion order (oldest first). Must be called on the main queue.

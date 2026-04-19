@@ -4,12 +4,12 @@
 
 ## Done Criteria
 
-- [ ] All P0 safety bugs fixed (panic-across-FFI, transcriber thread-safety, main-thread blocking, TranscriptStore isolation, KeyComboMonitor static var, FFI error propagation, NUL-safe result strings).
-- [ ] All P1 quick-win tests landed (TranscriptionTrace, TranscriptStore, FloatRingBuffer edges, CaptureStopTiming edges, ModelPathResolver, AppCoordinator: a11y-denied, triple-toggle ignore, store integration; Rust `#[cfg(test)]` block).
-- [ ] All P2 architectural seams: Transcriber protocol extraction, AudioEngineProtocol seam, transcriptionQueue injection, carbonModifiers visibility, @MainActor annotations, AppCoordinator state exposure.
-- [ ] P3 ergonomics: HallucinationFilter / UserFeedback widening / state-machine comment / dead code removal / README expansion / ARCHITECTURE.md / FFI contract comments / plans updated / .gitignore tightened / toolchain pins.
-- [ ] P4 deferred or tracked in NEXT.md: CI workflow, model provisioning script, integration test target, cbindgen, signing pipeline.
-- [ ] After every phase: sub-agent review → fix → `swift test` green → `cargo test` green → commit.
+- [x] All P0 safety bugs fixed (panic-across-FFI, transcriber thread-safety, main-thread blocking, TranscriptStore isolation, KeyComboMonitor static var, FFI error propagation, NUL-safe result strings).
+- [x] All P1 quick-win tests landed (TranscriptionTrace, TranscriptStore, FloatRingBuffer edges, CaptureStopTiming edges, ModelPathResolver, AppCoordinator: a11y-denied, triple-toggle ignore, store integration; Rust `#[cfg(test)]` block).
+- [x] All P2 architectural seams: Transcriber protocol extraction, AudioEngineProtocol seam, transcriptionQueue injection, carbonModifiers visibility, @MainActor annotations, AppCoordinator state exposure.
+- [x] P3 ergonomics: HallucinationFilter / UserFeedback widening / state-machine comment / dead code removal / README expansion / ARCHITECTURE.md / FFI contract comments / plans updated / .gitignore tightened / toolchain pins.
+- [x] P4 deferred or tracked in NEXT.md: CI workflow, model provisioning script, integration test target, cbindgen, signing pipeline.
+- [x] After every phase: sub-agent review → fix → `swift test` green → `cargo test` green → commit.
 
 ## Guardrails
 
@@ -54,3 +54,8 @@
   converter setup from `init` to `prepare` made converter/buffer state
   mutable; access is guarded by `conversionLock` so shutdown cannot race an
   in-flight tap callback.
+- **Phase 8 — app rename needs data-path compatibility.** The canonical
+  product name is now Wisp, with bundle/logging identifiers moved to
+  `com.wisp.app`. `ModelPathResolver` still falls back to the legacy
+  `com.speakeasy.app` model directory so existing installs do not lose their
+  model provisioning.

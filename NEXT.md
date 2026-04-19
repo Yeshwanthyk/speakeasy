@@ -61,13 +61,13 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 8 — P3 docs & hygiene
 
-- [ ] Pick one canonical name (Speakeasy vs Wisp) and make it consistent; update README.
-- [ ] Expand README: prerequisites, model provisioning, test command.
-- [ ] Add ARCHITECTURE.md: data-flow, state machine, FFI contract.
-- [ ] Add top-of-file FFI contract comment to `lib.rs`.
-- [ ] Update `plans/*.md` statuses (phases 0-4 done vs open).
-- [ ] `.gitignore`: `.pi/`, `*.DS_Store`, untrack tracked `.DS_Store`.
-- [ ] Delete or document empty `resources/`.
+- [x] Pick one canonical name (Speakeasy vs Wisp) and make it consistent; update README.
+- [x] Expand README: prerequisites, model provisioning, test command.
+- [x] Add ARCHITECTURE.md: data-flow, state machine, FFI contract.
+- [x] Add top-of-file FFI contract comment to `lib.rs`.
+- [x] Update `plans/*.md` statuses (phases 0-4 done vs open).
+- [x] `.gitignore`: `.pi/`, `*.DS_Store`, untrack tracked `.DS_Store`.
+- [x] Delete or document empty `resources/`.
 
 ## Phase 9 — P4 parked to NEXT (not this mission)
 

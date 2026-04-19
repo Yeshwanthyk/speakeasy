@@ -80,7 +80,7 @@ final class AppCoordinator {
     /// RMS below this threshold is treated as silence.
     private static let silenceRmsThreshold: Float = 0.005
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "app")
     private let audioCapture: AudioCapturing
     private let transcriber: Transcriber
     let paster: Pasting
@@ -122,7 +122,7 @@ final class AppCoordinator {
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.wisp.app.transcription", qos: .userInteractive)
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber

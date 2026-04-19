@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>Speakeasy</string>
+  <string>Wisp</string>
   <key>CFBundleIdentifier</key>
-  <string>com.speakeasy.app</string>
+  <string>com.wisp.app</string>
   <key>CFBundleExecutable</key>
-  <string>Speakeasy</string>
+  <string>Wisp</string>
   <key>CFBundleIconFile</key>
-  <string>speakeasy</string>
+  <string>wisp</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

@@ -3,7 +3,7 @@ import Foundation
 import os
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "app")
     private var coordinator: AppCoordinator?
     private var menuBarController: MenuBarController?
 
@@ -45,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
 
         let alert = NSAlert()
-        alert.messageText = "Speakeasy"
+        alert.messageText = "Wisp"
         alert.informativeText = message
         alert.addButton(withTitle: "Quit")
         alert.alertStyle = .critical

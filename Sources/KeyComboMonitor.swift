@@ -31,7 +31,7 @@ final class KeyComboMonitor {
         return monitor.handle(event: event)
     }
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "hotkey")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "hotkey")
     private let callback: () -> Void
     private let hotKeyID: EventHotKeyID
     private var hotKeyRef: EventHotKeyRef?

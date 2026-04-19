@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")" && pwd)
-APP_NAME="Speakeasy"
+APP_NAME="Wisp"
 BUILD_DIR="$ROOT_DIR/build"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
 BIN_DIR="$APP_DIR/Contents/MacOS"
@@ -31,8 +31,8 @@ swiftc -O \
   "$ROOT_DIR/Sources/"*.swift \
   -o "$BIN_DIR/$APP_NAME"
 
-ICONSET_DIR="$ROOT_DIR/Assets/speakeasy.iconset"
-ICON_FILE="$BUILD_DIR/speakeasy.icns"
+ICONSET_DIR="$ROOT_DIR/Assets/wisp.iconset"
+ICON_FILE="$BUILD_DIR/wisp.icns"
 iconutil -c icns "$ICONSET_DIR" -o "$ICON_FILE"
 cp "$ICON_FILE" "$RESOURCES_DIR/"
 

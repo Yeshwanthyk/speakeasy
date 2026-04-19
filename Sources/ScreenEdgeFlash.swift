@@ -5,7 +5,7 @@ import os
 /// Draws a transient border flash around the active screen.
 @MainActor
 final class ScreenEdgeFlash {
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "flash")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "flash")
     private var window: NSPanel?
     private var borderView: NSView?
     private var isVisible = false

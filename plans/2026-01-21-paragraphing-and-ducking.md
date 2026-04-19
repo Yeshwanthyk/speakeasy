@@ -3,7 +3,7 @@
 ## Plan Metadata
 - Created: 2026-01-21
 - Ticket: None
-- Status: draft
+- Status: draft; not implemented
 - Owner: yesh
 - Assumptions:
   - Paragraphing is always on (no settings UI or toggle).

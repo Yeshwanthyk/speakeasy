@@ -43,7 +43,7 @@ enum ParakeetError: Error {
 /// across tasks or dispatch queues without external synchronisation.
 final class ParakeetTranscriber {
     private let handle: UnsafeMutableRawPointer
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "parakeet")
+    private let logger = Logger(subsystem: "com.wisp.app", category: "parakeet")
 
     init(modelPath: URL) throws {
         // Pre-flight: URL must be representable as a filesystem path before

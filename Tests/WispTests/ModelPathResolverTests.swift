@@ -46,4 +46,42 @@ final class ModelPathResolverTests: XCTestCase {
             }
         }
     }
+
+    func testCanonicalBundlePathReturnsExistingModelDirectory() throws {
+        let appSupport = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wisp-model-path-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let modelURL = appSupport
+            .appendingPathComponent("com.wisp.app")
+            .appendingPathComponent("models")
+            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
+        try FileManager.default.createDirectory(at: modelURL, withIntermediateDirectories: true)
+
+        let resolved = try ModelPathResolver.parakeetV3Path(
+            appSupport: appSupport,
+            bundleIdentifier: "com.wisp.app",
+            environment: [:]
+        )
+
+        XCTAssertEqual(resolved.path, modelURL.path)
+    }
+
+    func testLegacyBundlePathFallbackKeepsExistingModelInstallsWorking() throws {
+        let appSupport = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wisp-model-path-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let legacyModelURL = appSupport
+            .appendingPathComponent("com.speakeasy.app")
+            .appendingPathComponent("models")
+            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
+        try FileManager.default.createDirectory(at: legacyModelURL, withIntermediateDirectories: true)
+
+        let resolved = try ModelPathResolver.parakeetV3Path(
+            appSupport: appSupport,
+            bundleIdentifier: "com.wisp.app",
+            environment: [:]
+        )
+
+        XCTAssertEqual(resolved.path, legacyModelURL.path)
+    }
 }

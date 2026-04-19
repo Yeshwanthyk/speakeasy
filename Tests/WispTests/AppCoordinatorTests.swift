@@ -24,7 +24,7 @@ final class AppCoordinatorTests: XCTestCase {
         timeout: TimeInterval = 1.0,
         skipWarmup: Bool = true,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription")
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.wisp.app.tests.transcription")
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -351,7 +351,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     func testInjectedTranscriptionQueueRunsStopAndTranscribeWork() {
         let key = DispatchSpecificKey<String>()
-        let queue = DispatchQueue(label: "com.speakeasy.app.tests.injected-transcription")
+        let queue = DispatchQueue(label: "com.wisp.app.tests.injected-transcription")
         queue.setSpecific(key: key, value: "injected")
 
         let audio = AudioCaptureStub(samples: Self.validSamples, expectedQueue: (key, "injected"))
