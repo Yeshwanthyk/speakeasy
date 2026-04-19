@@ -3,10 +3,11 @@ import os
 
 /// Ring-buffered history of transcribed strings, persisted to Application Support.
 ///
-/// Reads/writes to the in-memory array happen on the main thread (append is called
-/// from `AppCoordinator.handleTranscriptionResult`, which runs on main; menu reads
-/// also run on main). Disk writes are dispatched to a background serial queue so
-/// the paste hot path is never blocked by I/O.
+/// # Threading contract
+///
+/// In-memory history is main-actor isolated. Disk writes are dispatched to a
+/// background serial queue so the paste hot path is never blocked by I/O.
+@MainActor
 final class TranscriptStore {
     static let capacity = 50
 
@@ -15,8 +16,13 @@ final class TranscriptStore {
     private let writeQueue = DispatchQueue(label: "com.speakeasy.app.transcripts.write", qos: .utility)
     private var entries: [String]
 
-    /// Entries in insertion order (oldest first).
-    var all: [String] { entries }
+    /// Entries in insertion order (oldest first). Must be called on the main queue.
+    ///
+    /// Exposed as a method (rather than a computed property) to make the
+    /// main-queue side effect syntactically visible at call sites.
+    func allEntries() -> [String] {
+        return entries
+    }
 
     init(fileURL: URL? = nil) {
         let resolvedURL = fileURL ?? Self.defaultFileURL()

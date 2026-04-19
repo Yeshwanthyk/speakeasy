@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import Wisp
 
+@MainActor
 final class AppCoordinatorTests: XCTestCase {
 
     // MARK: - Helpers
@@ -17,7 +18,7 @@ final class AppCoordinatorTests: XCTestCase {
         audio: AudioCaptureStub,
         transcriber: TranscriberStub,
         paster: PasterStub = PasterStub(),
-        flash: FlashStub = FlashStub(),
+        flash: FlashStub? = nil,
         feedback: FeedbackStub = FeedbackStub(),
         accessibility: AccessibilityStub = AccessibilityStub(allowed: true),
         timeout: TimeInterval = 1.0,
@@ -27,7 +28,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: transcriber,
             paster: paster,
-            flash: flash,
+            flash: flash ?? FlashStub(),
             feedback: feedback,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in timeout },
@@ -37,6 +38,14 @@ final class AppCoordinatorTests: XCTestCase {
             coordinator.skipWarmup()
         }
         return coordinator
+    }
+
+    private func waitUntil(timeout: TimeInterval = 1.0, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return condition()
     }
 
     // MARK: - Existing behaviour
@@ -114,6 +123,8 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.toggleRecording()
         coordinator.toggleRecording()
 
+        XCTAssertTrue(waitUntil { audio.endCount == 1 })
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         XCTAssertEqual(transcriber.callCount, 0)
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
@@ -146,17 +157,20 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let feedback = FeedbackStub()
 
+        let rejected = expectation(description: "short rejected")
+        feedback.onError = { message in
+            if message == "Recording too short" { rejected.fulfill() }
+        }
+
         let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
 
-        // Give async dispatch a moment
-        Thread.sleep(forTimeInterval: 0.1)
+        wait(for: [rejected], timeout: 1.0)
 
         XCTAssertEqual(transcriber.callCount, 0, "Short recordings should not reach the transcriber")
         XCTAssertTrue(paster.pastedTexts.isEmpty)
-        XCTAssertTrue(feedback.errors.contains("Recording too short"))
     }
 
     func testSilentAudioIsRejected() {
@@ -165,16 +179,32 @@ final class AppCoordinatorTests: XCTestCase {
         let paster = PasterStub()
         let feedback = FeedbackStub()
 
+        let rejected = expectation(description: "silent rejected")
+        feedback.onError = { message in
+            if message == "No speech detected" { rejected.fulfill() }
+        }
+
         let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
 
-        Thread.sleep(forTimeInterval: 0.1)
+        wait(for: [rejected], timeout: 1.0)
 
         XCTAssertEqual(transcriber.callCount, 0, "Silent audio should not reach the transcriber")
         XCTAssertTrue(paster.pastedTexts.isEmpty)
-        XCTAssertTrue(feedback.errors.contains("No speech detected"))
+    }
+
+    func testEndRecordingRunsOffMainThread() {
+        let audio = AudioCaptureStub(samples: Self.shortSamples)
+        let transcriber = TranscriberStub(result: .success("ignored"))
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        XCTAssertTrue(waitUntil { audio.endCount == 1 })
+        XCTAssertEqual(audio.lastEndRecordingWasMainThread, false)
     }
 
     func testHallucinationIsFiltered() {
@@ -312,6 +342,7 @@ final class AppCoordinatorTests: XCTestCase {
 
 // MARK: - Phase 2: Hot capture engine lifecycle
 
+@MainActor
 final class AudioCaptureLifecycleTests: XCTestCase {
 
     private func makeCoordinator(
@@ -400,14 +431,25 @@ final class AudioCaptureLifecycleTests: XCTestCase {
 // MARK: - Shared Stubs
 
 private final class AudioCaptureStub: AudioCapturing {
-    private(set) var prepareCount = 0
-    private(set) var beginCount = 0
-    private(set) var endCount = 0
-    private(set) var shutdownCount = 0
-    private(set) var prepareError: Error?
+    // Counters are written from `transcriptionQueue` (for `endRecording`) and
+    // read from the test thread. Protect each with a lock so TSAN is happy
+    // and ordering is formal rather than coincidental.
+    private let counterLock = UnfairLock()
+    private var _prepareCount = 0
+    private var _beginCount = 0
+    private var _endCount = 0
+    private var _shutdownCount = 0
+    private var _lastEndRecordingWasMainThread: Bool?
+    private let prepareError: Error?
     private let samples: ContiguousArray<Float>
     private let prependedSampleCount: Int
     private let graceDurationMs: Double
+
+    var prepareCount: Int { counterLock.withLock { _prepareCount } }
+    var beginCount: Int { counterLock.withLock { _beginCount } }
+    var endCount: Int { counterLock.withLock { _endCount } }
+    var shutdownCount: Int { counterLock.withLock { _shutdownCount } }
+    var lastEndRecordingWasMainThread: Bool? { counterLock.withLock { _lastEndRecordingWasMainThread } }
 
     /// Convenience aliases used by older tests.
     var startCount: Int { beginCount }
@@ -426,14 +468,19 @@ private final class AudioCaptureStub: AudioCapturing {
     }
 
     func prepare() throws {
-        prepareCount += 1
+        counterLock.withLock { _prepareCount += 1 }
         if let error = prepareError { throw error }
     }
 
-    func beginRecording() { beginCount += 1 }
+    func beginRecording() {
+        counterLock.withLock { _beginCount += 1 }
+    }
 
     func endRecording() -> AudioCaptureResult {
-        endCount += 1
+        counterLock.withLock {
+            _endCount += 1
+            _lastEndRecordingWasMainThread = Thread.isMainThread
+        }
         return AudioCaptureResult(
             samples: samples,
             prependedSampleCount: prependedSampleCount,
@@ -441,7 +488,9 @@ private final class AudioCaptureStub: AudioCapturing {
         )
     }
 
-    func shutdown() { shutdownCount += 1 }
+    func shutdown() {
+        counterLock.withLock { _shutdownCount += 1 }
+    }
 }
 
 private final class TranscriberStub: Transcribing {

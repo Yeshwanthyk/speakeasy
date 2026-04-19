@@ -23,6 +23,7 @@ protocol Pasting {
     func paste(_ text: String)
 }
 
+@MainActor
 protocol Flashing {
     func show(lineWidth: CGFloat)
     func hide(completion: (() -> Void)?)
@@ -180,6 +181,7 @@ final class AppCoordinator {
     }
 
     #if !SWIFT_PACKAGE
+    @MainActor
     convenience init() throws {
         let modelPath = try ModelPathResolver.parakeetV3Path()
         let feedback = SystemFeedback()
@@ -246,7 +248,7 @@ final class AppCoordinator {
 
         switch transition {
         case .start:
-            DispatchQueue.main.async { [flash] in
+            Task { @MainActor [flash] in
                 flash.show(lineWidth: Self.flashLineWidth)
             }
             audioCapture.beginRecording()
@@ -255,7 +257,7 @@ final class AppCoordinator {
             stateLock.withLock { activeTrace?.markCaptureStarted(at: captureStarted) }
 
         case .stop(let token, let trace):
-            DispatchQueue.main.async { [flash] in
+            Task { @MainActor [flash] in
                 flash.hide(completion: nil)
             }
             stopAndTranscribe(token: token, trace: trace)
@@ -275,7 +277,28 @@ final class AppCoordinator {
     }
 
     private func stopAndTranscribe(token: UUID, trace: TranscriptionTrace) {
-        let captureResult = audioCapture.endRecording()
+        // `endRecording` blocks on a grace-window semaphore (up to ~220ms)
+        // waiting for the trailing audio frame. Run it off-main so the UI
+        // stays responsive during the wait.
+        transcriptionQueue.async { [weak self] in
+            guard let self else { return }
+            let captureResult = self.audioCapture.endRecording()
+            DispatchQueue.main.async { [weak self] in
+                self?.processCaptureResult(
+                    token: token,
+                    trace: trace,
+                    captureResult: captureResult
+                )
+            }
+        }
+    }
+
+    private func processCaptureResult(
+        token: UUID,
+        trace: TranscriptionTrace,
+        captureResult: AudioCaptureResult
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
         let samples = captureResult.samples
 
         var trace = trace
@@ -384,7 +407,9 @@ final class AppCoordinator {
         }
         #endif
 
-        transcriptStore?.append(trimmed)
+        MainActor.assumeIsolated {
+            transcriptStore?.append(trimmed)
+        }
         paster.paste(trimmed)
     }
 

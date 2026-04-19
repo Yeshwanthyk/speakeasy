@@ -40,3 +40,10 @@
   to match Rust `#[repr(C)]` on arm64 for two pointer-sized fields, but this
   is not guaranteed across Swift versions. Parked in NEXT.md Phase 9
   (cbindgen + bridging header).
+- **Phase 2 — app-only sources need the full build path.** `swift test`
+  excludes `AppDelegate.swift`, `ParakeetTranscriber.swift`, and `main.swift`;
+  `./build.sh` caught the `@MainActor` initializer isolation error in the
+  non-SwiftPM app build.
+- **Phase 2 — XCTest callbacks must not cross actor boundaries.** The
+  off-main `endRecording` regression test records thread state inside the
+  stub under a lock, then asserts from the main-actor test body.

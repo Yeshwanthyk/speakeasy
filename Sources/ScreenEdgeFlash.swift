@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import os
 
+/// Draws a transient border flash around the active screen.
+@MainActor
 final class ScreenEdgeFlash {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "flash")
     private var window: NSPanel?
@@ -105,12 +107,4 @@ final class ScreenEdgeFlash {
             ?? NSScreen.screens.first
     }
 
-    private func hide(window: NSPanel) {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            window.animator().alphaValue = 0
-        } completionHandler: {
-            window.orderOut(nil)
-        }
-    }
 }

@@ -5,7 +5,21 @@ import os
 
 final class KeyComboMonitor {
     private static let signature: OSType = 0x53504B59
+
+    // Protects `nextIdentifier`. Two concurrent `init`s would otherwise race
+    // on `Self.nextIdentifier += 1`. In practice the app only ever creates
+    // one monitor, but tests and defensive callers should not depend on that.
+    private static let identifierLock = UnfairLock()
     private static var nextIdentifier: UInt32 = 1
+
+    private static func nextHotKeyIdentifier() -> UInt32 {
+        identifierLock.withLock {
+            let id = nextIdentifier
+            nextIdentifier &+= 1
+            return id
+        }
+    }
+
     private static let eventHandler: EventHandlerUPP = { _, event, userData in
         guard let userData else {
             return noErr
@@ -31,9 +45,7 @@ final class KeyComboMonitor {
     ) {
         self.callback = callback
 
-        let identifier = Self.nextIdentifier
-        Self.nextIdentifier += 1
-        hotKeyID = EventHotKeyID(signature: Self.signature, id: identifier)
+        hotKeyID = EventHotKeyID(signature: Self.signature, id: Self.nextHotKeyIdentifier())
 
         if !forbiddenFlags.isEmpty {
             logger.info("Ignoring forbiddenFlags; Carbon hotkeys match only required modifiers")

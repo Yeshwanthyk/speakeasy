@@ -3,6 +3,7 @@ import Foundation
 
 /// Owns the status-bar item and its menu. Rebuilds the menu lazily via
 /// `NSMenuDelegate.menuNeedsUpdate`, so no work runs on the transcription path.
+@MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
     private static let titleMaxLength = 60
 
@@ -33,7 +34,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let history = store.all
+        let history = store.allEntries()
         if history.isEmpty {
             let empty = NSMenuItem(title: "No transcripts yet", action: nil, keyEquivalent: "")
             empty.isEnabled = false

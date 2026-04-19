@@ -19,10 +19,10 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 2 — P0 Swift safety fixes
 
-- [ ] `AudioCapture.endRecording()` no longer blocks main thread (dispatch the semaphore wait off-main or make async).
-- [ ] `TranscriptStore` → `@MainActor` (enforce the documented contract).
-- [ ] `KeyComboMonitor.nextIdentifier` → atomic / `OSAtomic` / random UUID-derived value (no shared static mutable).
-- [ ] Add `@MainActor` to `ScreenEdgeFlash` (touches NS APIs).
+- [x] `AudioCapture.endRecording()` no longer blocks main thread (dispatch the semaphore wait off-main or make async).
+- [x] `TranscriptStore` → `@MainActor` (enforce the documented contract).
+- [x] `KeyComboMonitor.nextIdentifier` → atomic / `OSAtomic` / random UUID-derived value (no shared static mutable).
+- [x] Add `@MainActor` to `ScreenEdgeFlash` (touches NS APIs).
 
 ## Phase 3 — P2 Transcriber protocol seam
 
