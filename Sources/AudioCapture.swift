@@ -8,6 +8,30 @@ enum AudioCaptureError: Error {
     case engineStartFailed(Error)
 }
 
+protocol AudioInputNodeProtocol {
+    func inputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat
+    func installTap(
+        onBus bus: AVAudioNodeBus,
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat?,
+        block tapBlock: @escaping AVAudioNodeTapBlock
+    )
+    func removeTap(onBus bus: AVAudioNodeBus)
+}
+
+protocol AudioEngineProtocol {
+    var captureInputNode: AudioInputNodeProtocol { get }
+    func prepare()
+    func start() throws
+    func stop()
+}
+
+extension AVAudioInputNode: AudioInputNodeProtocol {}
+
+extension AVAudioEngine: AudioEngineProtocol {
+    var captureInputNode: AudioInputNodeProtocol { inputNode }
+}
+
 struct AudioCaptureResult {
     let samples: ContiguousArray<Float>
     let prependedSampleCount: Int
@@ -22,14 +46,11 @@ final class AudioCapture {
     private static let preRollSampleCount = 6_400
     private static let graceTimeoutPadding: TimeInterval = 0.020
 
-    private let engine = AVAudioEngine()
+    private let engine: AudioEngineProtocol
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
-    private let inputFormat: AVAudioFormat
-    private let targetFormat: AVAudioFormat
-    private let converter: AVAudioConverter
-    private let sampleRateRatio: Double
     private let maxRecordingSamples: Int
     private let onLimitReached: (() -> Void)?
+    private let onAwaitingGrace: (() -> Void)?
     private let ringBuffer = FloatRingBuffer(capacity: AudioCapture.ringBufferCapacity)
     private let graceSemaphore = DispatchSemaphore(value: 0)
 
@@ -37,11 +58,16 @@ final class AudioCapture {
     private let backLock = UnfairLock()
     private let stateLock = UnfairLock()
     private let stopTimingLock = UnfairLock()
+    private let conversionLock = UnfairLock()
 
     private var frontBuffer = ContiguousArray<Float>()
     private var backBuffer = ContiguousArray<Float>()
     private var isRecording = false
     private var isPrepared = false
+    private var inputFormat: AVAudioFormat?
+    private var targetFormat: AVAudioFormat?
+    private var converter: AVAudioConverter?
+    private var sampleRateRatio: Double = 0
     private var conversionBuffer: AVAudioPCMBuffer?
     private var didReachLimit = false
     private var stopTiming = CaptureStopTiming()
@@ -51,31 +77,14 @@ final class AudioCapture {
 
     init(
         maxRecordingSamples: Int = AudioCapture.defaultMaxRecordingSamples,
-        onLimitReached: (() -> Void)? = nil
+        onLimitReached: (() -> Void)? = nil,
+        engine: AudioEngineProtocol = AVAudioEngine(),
+        onAwaitingGrace: (() -> Void)? = nil
     ) throws {
         self.maxRecordingSamples = maxRecordingSamples
         self.onLimitReached = onLimitReached
-
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.inputFormat(forBus: 0)
-
-        guard let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
-            channels: 1,
-            interleaved: false
-        ) else {
-            throw AudioCaptureError.formatUnavailable
-        }
-
-        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
-            throw AudioCaptureError.converterUnavailable
-        }
-
-        self.inputFormat = inputFormat
-        self.targetFormat = targetFormat
-        self.converter = converter
-        self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
+        self.engine = engine
+        self.onAwaitingGrace = onAwaitingGrace
 
         logger.debug("AudioCapture initialized (engine idle)")
     }
@@ -93,7 +102,30 @@ final class AudioCapture {
             return
         }
 
-        let inputNode = engine.inputNode
+        let inputNode = engine.captureInputNode
+        let inputFormat = inputNode.inputFormat(forBus: 0)
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            stateLock.withLock { isPrepared = false }
+            throw AudioCaptureError.formatUnavailable
+        }
+
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            stateLock.withLock { isPrepared = false }
+            throw AudioCaptureError.converterUnavailable
+        }
+
+        conversionLock.withLock {
+            self.inputFormat = inputFormat
+            self.targetFormat = targetFormat
+            self.converter = converter
+            self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
+        }
+
         inputNode.installTap(
             onBus: 0,
             bufferSize: Self.tapBufferSize,
@@ -107,6 +139,13 @@ final class AudioCapture {
             try engine.start()
         } catch {
             stateLock.withLock { isPrepared = false }
+            conversionLock.withLock {
+                self.inputFormat = nil
+                self.targetFormat = nil
+                self.converter = nil
+                self.conversionBuffer = nil
+                self.sampleRateRatio = 0
+            }
             inputNode.removeTap(onBus: 0)
             logger.error("Failed to start engine: \(error.localizedDescription)")
             throw AudioCaptureError.engineStartFailed(error)
@@ -155,6 +194,7 @@ final class AudioCapture {
             awaitingGraceSignal = true
         }
 
+        onAwaitingGrace?()
         _ = graceSemaphore.wait(timeout: .now() + grace + Self.graceTimeoutPadding)
 
         let waitEndedAtNs = TranscriptionTrace.timestamp()
@@ -205,7 +245,14 @@ final class AudioCapture {
         }
 
         engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
+        engine.captureInputNode.removeTap(onBus: 0)
+        conversionLock.withLock {
+            inputFormat = nil
+            targetFormat = nil
+            converter = nil
+            conversionBuffer = nil
+            sampleRateRatio = 0
+        }
         ringBuffer.clear()
         logger.info("AudioCapture engine shut down")
     }
@@ -230,12 +277,24 @@ final class AudioCapture {
     }
 
     private func handle(buffer pcmBuffer: AVAudioPCMBuffer) {
+        let conversionState = conversionLock.withLock { () -> (converter: AVAudioConverter, sampleRateRatio: Double)? in
+            guard let converter else {
+                return nil
+            }
+            return (converter, sampleRateRatio)
+        }
+
+        guard let conversionState else {
+            logger.error("Audio conversion requested before prepare")
+            return
+        }
+
         stopTimingLock.withLock {
             stopTiming.recordCallback()
         }
 
         let requiredCapacity = AVAudioFrameCount(
-            (Double(pcmBuffer.frameLength) * sampleRateRatio).rounded(.up)
+            (Double(pcmBuffer.frameLength) * conversionState.sampleRateRatio).rounded(.up)
         ) + 1
 
         guard let outputBuffer = ensureConversionBuffer(requiredCapacity: requiredCapacity) else {
@@ -249,7 +308,7 @@ final class AudioCapture {
             return pcmBuffer
         }
 
-        converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
+        conversionState.converter.convert(to: outputBuffer, error: &error, withInputFrom: inputBlock)
         if let error {
             logger.error("Audio conversion failed: \(String(describing: error))")
             return
@@ -329,19 +388,25 @@ final class AudioCapture {
     }
 
     private func ensureConversionBuffer(requiredCapacity: AVAudioFrameCount) -> AVAudioPCMBuffer? {
-        if let conversionBuffer, conversionBuffer.frameCapacity >= requiredCapacity {
+        conversionLock.withLock {
+            if let conversionBuffer, conversionBuffer.frameCapacity >= requiredCapacity {
+                return conversionBuffer
+            }
+
+            guard let targetFormat else {
+                return nil
+            }
+
+            guard let conversionBuffer = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: requiredCapacity
+            ) else {
+                return nil
+            }
+
+            self.conversionBuffer = conversionBuffer
             return conversionBuffer
         }
-
-        guard let conversionBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: requiredCapacity
-        ) else {
-            return nil
-        }
-
-        self.conversionBuffer = conversionBuffer
-        return conversionBuffer
     }
 
     private func drainGraceSignal() {

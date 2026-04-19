@@ -49,8 +49,8 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 6 — P2 AudioCapture seam
 
-- [ ] Introduce `AudioEngineProtocol`; move hardware access out of `AudioCapture.init` into `prepare()`.
-- [ ] Add tests: prepare installs tap, engine-start failure surfaces, shutdown removes tap, grace semaphore signalled.
+- [x] Introduce `AudioEngineProtocol`; move hardware access out of `AudioCapture.init` into `prepare()`.
+- [x] Add tests: prepare installs tap, engine-start failure surfaces, shutdown removes tap, grace semaphore signalled.
 
 ## Phase 7 — P3 Agent-friendliness polish
 

@@ -50,3 +50,7 @@
 - **Phase 4 — process environment tests need serialization.** Tests that
   mutate `PARAKEET_MODEL_DIR` save/restore the prior value while holding a
   process-wide lock so parallel Swift test runs do not leak state.
+- **Phase 6 — mutable audio conversion state must be synchronized.** Moving
+  converter setup from `init` to `prepare` made converter/buffer state
+  mutable; access is guarded by `conversionLock` so shutdown cannot race an
+  in-flight tap callback.
