@@ -86,8 +86,8 @@ final class AppCoordinator: @unchecked Sendable {
     private static let maxTranscriptionTimeout: TimeInterval = 600
     /// Minimum active (non-preroll) samples required. 4800 = 300ms at 16kHz.
     private static let minActiveSamples = 4_800
-    /// RMS below this threshold is treated as silence.
-    private static let silenceRmsThreshold: Float = 0.005
+    /// Keep this conservative: microphone gain can put valid speech near -48 dBFS.
+    private static let silenceRmsThreshold: Float = 0.002
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing

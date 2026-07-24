@@ -9,6 +9,8 @@ final class AppCoordinatorTests: XCTestCase {
 
     /// Enough loud samples to pass both minActiveSamples and RMS threshold.
     static let validSamples = ContiguousArray<Float>(repeating: 0.1, count: 8_000)
+    /// Representative quiet speech observed from the built-in microphone.
+    static let quietSpeechSamples = ContiguousArray<Float>(repeating: 0.004, count: 8_000)
     /// Enough samples but too quiet (silence).
     static let silentSamples = ContiguousArray<Float>(repeating: 0.0001, count: 8_000)
     /// Too few active samples.
@@ -196,6 +198,23 @@ final class AppCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(transcriber.callCount, 0, "Short recordings should not reach the transcriber")
         XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
+    func testQuietSpeechReachesTranscriber() {
+        let audio = AudioCaptureStub(samples: Self.quietSpeechSamples)
+        let transcriber = FakeTranscriber(result: .success("Quiet but valid"))
+        let paster = PasterStub()
+        let pasted = expectation(description: "quiet speech pasted")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertEqual(paster.pastedTexts, ["Quiet but valid"])
     }
 
     func testSilentAudioIsRejected() {
