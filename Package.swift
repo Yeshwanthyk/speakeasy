@@ -15,7 +15,7 @@ let package = Package(
             path: "Sources",
             exclude: [
                 "AppDelegate.swift",
-                "ParakeetTranscriber.swift",
+                "TranscribeCppTranscriber.swift",
                 "main.swift"
             ],
             linkerSettings: [

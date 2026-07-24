@@ -26,13 +26,14 @@ if [[ -z "$SIGN_IDENTITY" ]]; then
   echo "Warning: no Apple Development identity found; Accessibility permission may need to be granted again after rebuilds." >&2
 fi
 
-RUST_DIR="$ROOT_DIR/rust/parakeet_bridge"
+RUST_DIR="$ROOT_DIR/rust/asr_bridge"
 
 # --locked ensures Cargo.lock is authoritative; fails if deps drift.
 export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+export TRANSCRIBE_CMAKE_ARGS="-DGGML_NATIVE=OFF${TRANSCRIBE_CMAKE_ARGS:+ $TRANSCRIBE_CMAKE_ARGS}"
 export RUSTFLAGS="-L native=$CLANG_RUNTIME_DIR${RUSTFLAGS:+ $RUSTFLAGS}"
 cargo build --release --locked --manifest-path "$RUST_DIR/Cargo.toml"
-install_name_tool -id @rpath/libparakeet_bridge.dylib "$RUST_DIR/target/release/libparakeet_bridge.dylib"
+install_name_tool -id @rpath/libasr_bridge.dylib "$RUST_DIR/target/release/libasr_bridge.dylib"
 
 rm -rf "$APP_DIR"
 mkdir -p "$BIN_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
@@ -44,7 +45,7 @@ swiftc -O \
   -framework Carbon \
   -framework ApplicationServices \
   -L "$RUST_DIR/target/release" \
-  -lparakeet_bridge \
+  -lasr_bridge \
   -Xlinker -rpath \
   -Xlinker @executable_path/../Frameworks \
   "$ROOT_DIR/Sources/"*.swift \
@@ -56,9 +57,9 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICON_FILE"
 cp "$ICON_FILE" "$RESOURCES_DIR/"
 
 cp "$ROOT_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-cp "$RUST_DIR/target/release/libparakeet_bridge.dylib" "$FRAMEWORKS_DIR/"
+cp "$RUST_DIR/target/release/libasr_bridge.dylib" "$FRAMEWORKS_DIR/"
 
-codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$FRAMEWORKS_DIR/libparakeet_bridge.dylib"
+codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$FRAMEWORKS_DIR/libasr_bridge.dylib"
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 

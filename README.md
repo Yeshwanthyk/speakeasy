@@ -1,57 +1,45 @@
 # Speakeasy
 
-Minimal macOS dictation app using local Parakeet V3 or Nemotron ASR transcription.
+Minimal macOS dictation app using local GGUF speech models through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), with Metal acceleration on Apple Silicon.
 
 ## Requirements
 
-- macOS with Xcode command-line tools (`swiftc`, `iconutil`, `codesign`)
-- Rust toolchain; the Rust bridge pins its version in `rust/parakeet_bridge/rust-toolchain.toml`
-- A local Parakeet V3 int8 model directory. Nemotron 3.5 ASR downloads on first use.
+- macOS 12 or newer with Xcode command-line tools (`swiftc`, `iconutil`, `codesign`)
+- Rust toolchain; `rust/asr_bridge/rust-toolchain.toml` pins the build version
+- Approximately 1.5 GB free for the selected model download and staging copy
 
-## Model Path
+## Models
 
-By default Speakeasy uses Parakeet TDT and looks for:
-
-```text
-~/Library/Application Support/com.speakeasy.app/models/parakeet-tdt-0.6b-v3-int8
-```
-
-For compatibility with pre-rename installs, it also falls back to:
+On first launch Speakeasy downloads, verifies, loads, and warms Parakeet Unified EN 0.6B Q8_0:
 
 ```text
-~/Library/Application Support/com.wisp.app/models/parakeet-tdt-0.6b-v3-int8
+~/Library/Application Support/com.speakeasy.app/models/parakeet-unified-en-0.6b-Q8_0.gguf
 ```
 
-Set `PARAKEET_MODEL_DIR` to override both paths:
+The menu bar `Audio Model` submenu also supports:
+
+- Parakeet TDT v3 Q8_0: multilingual batch transcription
+- Nemotron Streaming 3.5 Q8_0: multilingual transcription
+
+Artifacts are downloaded from immutable Hugging Face revisions and must match their catalog byte count and SHA-256 before atomic promotion. The currently selected model is persisted only after it loads and warms successfully.
+
+Select a model before launch:
 
 ```sh
-export PARAKEET_MODEL_DIR="/path/to/parakeet-tdt-0.6b-v3-int8"
-```
-
-Use the menu bar `Audio Model` submenu to switch between Parakeet TDT and Nemotron 3.5 ASR. On first Nemotron selection, Speakeasy downloads the model into:
-
-```text
-~/Library/Application Support/com.speakeasy.app/models/nemotron-3.5-asr-streaming-0.6b-int8
-```
-
-After download, the selected model is loaded and warmed in memory. Subsequent launches use the persisted `ASRModel` preference.
-
-To use an existing Nemotron directory instead:
-
-```sh
+export SPEAKEASY_ASR_MODEL="parakeet-unified-en" # default
+export SPEAKEASY_ASR_MODEL="parakeet-tdt-v3"
 export SPEAKEASY_ASR_MODEL="nemotron-3.5-asr"
-export NEMOTRON_MODEL_DIR="/path/to/nemotron-3.5-asr-streaming-0.6b-int8"
 ```
 
-Nemotron expects `encoder.onnx`, `encoder.onnx.data`, `decoder_joint.onnx`, and `tokenizer.model` in the same directory. Set `NEMOTRON_TARGET_LANG` (for example `en-US`, `es-ES`, or `auto`) to override language auto-detection.
-
-For normal Finder/LaunchServices launches, persist the same option with:
+Override an artifact with an already-downloaded matching Q8_0 GGUF:
 
 ```sh
-defaults write com.speakeasy.app ASRModel "nemotron-3.5-asr"
-defaults write com.speakeasy.app NemotronModelDir "/path/to/nemotron-3.5-asr-streaming-0.6b-int8"
-defaults write com.speakeasy.app NemotronTargetLang "auto"
+export PARAKEET_UNIFIED_GGUF_PATH="/path/to/parakeet-unified-en-0.6b-Q8_0.gguf"
+export PARAKEET_TDT_GGUF_PATH="/path/to/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+export NEMOTRON_GGUF_PATH="/path/to/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
 ```
+
+Legacy `parakeet-tdt` and `nemotron-3.5-asr` selection values still map to their GGUF replacements. ONNX model directories are no longer used.
 
 ## Build
 
@@ -59,16 +47,17 @@ defaults write com.speakeasy.app NemotronTargetLang "auto"
 ./build.sh
 ```
 
-The app is written to `build/Speakeasy.app`. The build targets macOS 12 or newer, compiles the Rust FFI bridge with `cargo build --release --locked`, links it into the app bundle, and signs both the dylib and app with the first available Apple Development identity. A stable development signature keeps macOS privacy grants attached across rebuilds. If no development identity is available, the build falls back to ad-hoc signing; set `SPEAKEASY_SIGN_IDENTITY` to choose a specific identity.
+The app is written to `build/Speakeasy.app`. The build compiles `transcribe-cpp 0.1.3` with Metal and `GGML_NATIVE=OFF`, embeds `libasr_bridge.dylib`, and signs the dylib and app. Set `SPEAKEASY_SIGN_IDENTITY` to select a development identity; without one, the build falls back to ad-hoc signing.
 
 ## Test
 
 ```sh
 swift test
-cargo test --manifest-path rust/parakeet_bridge/Cargo.toml --locked
+TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF \
+  cargo test --manifest-path rust/asr_bridge/Cargo.toml --locked
 ```
 
-`swift test` exercises the Swift library target. `./build.sh` is still required before release because the app-only files (`AppDelegate.swift`, `ParakeetTranscriber.swift`, `main.swift`) are excluded from SwiftPM tests.
+`swift test` exercises the Swift library target. `./build.sh` additionally compiles the app-only files (`AppDelegate.swift`, `TranscribeCppTranscriber.swift`, and `main.swift`) and verifies the signed bundle.
 
 ## Runtime
 

@@ -1,19 +1,13 @@
+import CryptoKit
 import Foundation
 import os
 
-struct ASRModelDownloadManifest {
-    let baseURL: URL
-    let files: [String]
-
-    func remoteURL(for file: String) -> URL {
-        baseURL.appendingPathComponent(file)
-    }
-}
-
 enum ASRModelInstallError: Error {
-    case downloadUnavailable(String)
+    case invalidArtifactURL(String)
     case invalidHTTPStatus(URL, Int)
     case downloadedFileMissing(String)
+    case unexpectedFileSize(expected: Int64, actual: Int64)
+    case checksumMismatch(expected: String, actual: String)
 }
 
 protocol ModelFileDownloading {
@@ -32,30 +26,28 @@ struct URLSessionModelFileDownloader: ModelFileDownloading {
 }
 
 final class ASRModelInstaller {
+    typealias ArtifactProvider = (ASRModelKind) -> ASRModelArtifact
+
     private let fileManager: FileManager
     private let downloader: ModelFileDownloading
+    private let artifactProvider: ArtifactProvider
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "models")
 
     init(
         fileManager: FileManager = .default,
-        downloader: ModelFileDownloading = URLSessionModelFileDownloader()
+        downloader: ModelFileDownloading = URLSessionModelFileDownloader(),
+        artifactProvider: @escaping ArtifactProvider = { $0.artifact }
     ) {
         self.fileManager = fileManager
         self.downloader = downloader
+        self.artifactProvider = artifactProvider
     }
 
     func resolveOrInstall(kind: ASRModelKind) async throws -> ASRModelConfiguration {
         do {
             return try ModelPathResolver.configuredASRModel(kind: kind)
-        } catch {
-            switch error {
-            case ModelPathError.modelNotFound, ModelPathError.modelIncomplete:
-                guard kind.downloadManifest != nil else {
-                    throw ASRModelInstallError.downloadUnavailable(kind.displayName)
-                }
-            default:
-                throw error
-            }
+        } catch ModelPathError.modelNotFound(_), ModelPathError.modelInvalid(_, _) {
+            // Download and atomically replace a missing or invalid catalog artifact.
         }
 
         let targetURL = try ModelPathResolver.preferredInstallURL(kind: kind)
@@ -64,82 +56,93 @@ final class ASRModelInstaller {
     }
 
     func install(kind: ASRModelKind, at targetURL: URL) async throws {
-        if ModelPathResolver.isModelInstalled(kind: kind, at: targetURL) {
+        let artifact = artifactProvider(kind)
+        if Self.isVerifiedArtifact(artifact, at: targetURL) {
             return
         }
 
-        guard let manifest = kind.downloadManifest else {
-            throw ASRModelInstallError.downloadUnavailable(kind.displayName)
-        }
-
         let parentURL = targetURL.deletingLastPathComponent()
-        let tempURL = parentURL.appendingPathComponent(
-            ".\(targetURL.lastPathComponent).download-\(UUID().uuidString)",
-            isDirectory: true
+        let stagingURL = parentURL.appendingPathComponent(
+            ".\(targetURL.lastPathComponent).download-\(UUID().uuidString)"
         )
 
         try fileManager.createDirectory(at: parentURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: tempURL, withIntermediateDirectories: true)
-
-        var shouldRemoveTemp = true
+        var shouldRemoveStaging = true
         defer {
-            if shouldRemoveTemp {
-                try? fileManager.removeItem(at: tempURL)
+            if shouldRemoveStaging {
+                try? fileManager.removeItem(at: stagingURL)
             }
         }
 
-        logger.info("Installing \(kind.displayName, privacy: .public) model into \(targetURL.path, privacy: .public)")
+        guard let remoteURL = artifact.remoteURL else {
+            throw ASRModelInstallError.invalidArtifactURL(artifact.filename)
+        }
+        logger.info(
+            "Downloading \(kind.displayName, privacy: .public) from pinned revision \(artifact.revision, privacy: .public)"
+        )
+        let downloadedURL = try await downloader.download(from: remoteURL)
+        guard fileManager.fileExists(atPath: downloadedURL.path) else {
+            throw ASRModelInstallError.downloadedFileMissing(artifact.filename)
+        }
 
-        for file in manifest.files {
-            let remoteURL = manifest.remoteURL(for: file)
-            let destinationURL = tempURL.appendingPathComponent(file)
-            logger.info("Downloading \(file, privacy: .public)")
-
-            let downloadedURL = try await downloader.download(from: remoteURL)
-            guard fileManager.fileExists(atPath: downloadedURL.path) else {
-                throw ASRModelInstallError.downloadedFileMissing(file)
-            }
-
-            try fileManager.createDirectory(
-                at: destinationURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+        try fileManager.copyItem(at: downloadedURL, to: stagingURL)
+        let byteCount = try Self.fileSize(at: stagingURL)
+        guard byteCount == artifact.expectedByteCount else {
+            throw ASRModelInstallError.unexpectedFileSize(
+                expected: artifact.expectedByteCount,
+                actual: byteCount
             )
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                try fileManager.removeItem(at: destinationURL)
-            }
-            try fileManager.moveItem(at: downloadedURL, to: destinationURL)
         }
 
-        let missing = ModelPathResolver.missingRequiredFiles(kind: kind, at: tempURL)
-        guard missing.isEmpty else {
-            throw ModelPathError.modelIncomplete(tempURL.path, missing: missing)
+        let checksum = try Self.sha256(at: stagingURL)
+        guard checksum == artifact.sha256 else {
+            throw ASRModelInstallError.checksumMismatch(
+                expected: artifact.sha256,
+                actual: checksum
+            )
         }
 
         if fileManager.fileExists(atPath: targetURL.path) {
-            try fileManager.removeItem(at: targetURL)
+            _ = try fileManager.replaceItemAt(targetURL, withItemAt: stagingURL)
+        } else {
+            try fileManager.moveItem(at: stagingURL, to: targetURL)
         }
-        try fileManager.moveItem(at: tempURL, to: targetURL)
-        shouldRemoveTemp = false
-        logger.info("Installed \(kind.displayName, privacy: .public) model")
+        shouldRemoveStaging = false
+        logger.info("Installed and verified \(kind.displayName, privacy: .public)")
     }
-}
 
-private extension ASRModelKind {
-    var downloadManifest: ASRModelDownloadManifest? {
-        switch self {
-        case .parakeetTDT:
-            return nil
-        case .nemotron:
-            return ASRModelDownloadManifest(
-                baseURL: URL(string: "https://huggingface.co/smcleod/nemotron-3.5-asr-streaming-0.6b-int8/resolve/main")!,
-                files: [
-                    "config.json",
-                    "decoder_joint.onnx",
-                    "encoder.onnx",
-                    "encoder.onnx.data",
-                    "tokenizer.model"
-                ]
-            )
+    private static func isVerifiedArtifact(_ artifact: ASRModelArtifact, at url: URL) -> Bool {
+        guard (try? fileSize(at: url)) == artifact.expectedByteCount,
+              let checksum = try? sha256(at: url) else {
+            return false
         }
+        return checksum == artifact.sha256
+    }
+
+    private static func fileSize(at url: URL) throws -> Int64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values.fileSize ?? 0)
+    }
+
+    private static func sha256(at url: URL) throws -> String {
+        guard let stream = InputStream(url: url) else {
+            throw ASRModelInstallError.downloadedFileMissing(url.lastPathComponent)
+        }
+        stream.open()
+        defer { stream.close() }
+
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 1_048_576)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 {
+                throw stream.streamError ?? CocoaError(.fileReadUnknown)
+            }
+            if count == 0 {
+                break
+            }
+            hasher.update(data: Data(buffer[0..<count]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

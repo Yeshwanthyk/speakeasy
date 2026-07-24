@@ -1,6 +1,6 @@
 # Architecture
 
-Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it locally through a Rust FFI bridge, stores recent transcripts, and pastes accepted text into the frontmost app.
+Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it locally through a Rust/transcribe.cpp bridge, stores recent transcripts, and pastes accepted text into the frontmost app.
 
 ## Data Flow
 
@@ -9,36 +9,41 @@ Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it
 3. On the next hotkey press, `AppCoordinator` moves to transcribing, hides the screen flash, and calls `AudioCapture.endRecording()` on the injected transcription queue.
 4. `AudioCapture` returns captured samples plus pre-roll and stop-grace metadata.
 5. `AppCoordinator` rejects empty, too-short, or silent audio before transcription.
-6. `Transcriber` runs Parakeet inference. The app implementation is `ParakeetTranscriber`; tests inject fakes.
-7. `AppCoordinator` rejects empty or likely hallucinated transcription text before paste.
-8. Successful text is appended to `TranscriptStore` and pasted through `Pasting`.
+6. The `Transcriber` implementation pins the contiguous PCM buffer and calls the Rust ASR bridge.
+7. Rust borrows the 16 kHz mono samples and runs a retained transcribe.cpp GGUF session using Metal or CPU.
+8. `AppCoordinator` rejects empty or likely hallucinated transcription text before paste.
+9. Successful text is appended to `TranscriptStore` and pasted through `Pasting`.
 
 ## State Machine
-
-`AppCoordinator` owns the user-visible recording lifecycle:
 
 ```text
 idle -> recording -> transcribing(token) -> idle
 ```
 
-The `token` on the transcribing state prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
+The token prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
 
-UI-affecting collaborators (`ScreenEdgeFlash`, `TranscriptStore`, menu bar updates) are main-actor isolated. Blocking capture stop and Parakeet inference run off the main thread.
+UI-affecting collaborators are main-actor isolated. Blocking capture stop and native inference run off the main thread.
 
 ## Audio Capture
 
-`AudioCapture` keeps the AVAudioEngine prepared separately from recording state. The engine/input-node protocol seam allows tests to verify tap installation, start failure, shutdown, and stop-grace behavior without touching real hardware.
+`AudioCapture` keeps `AVAudioEngine` prepared separately from recording state. Converted mono 16 kHz samples flow through a bounded ring buffer while idle. Recording prepends a short pre-roll window and uses an adaptive stop grace derived from recent callback cadence.
 
-Converted mono 16 kHz samples flow through a bounded ring buffer while idle. When recording starts, Speakeasy prepends a short pre-roll window to avoid clipped leading syllables. When recording stops, it waits for an adaptive grace window derived from recent callback cadence.
+## Model Lifecycle
 
-## FFI Contract
+`ASRModelKind` selects one pinned Q8_0 GGUF artifact. Each artifact records an immutable Hugging Face revision, expected byte count, and SHA-256. `ASRModelInstaller` downloads into the destination filesystem, verifies it, and atomically promotes it. Existing ONNX directories are not consulted.
 
-The Rust bridge in `rust/parakeet_bridge/src/lib.rs` exports a small C ABI:
+The default is Parakeet Unified EN. Parakeet TDT v3 and Nemotron 3.5 are alternative GGUF models. A model switch downloads if necessary, constructs and warms a replacement off-main, then atomically swaps the app's `Transcriber`; failed replacements do not change the persisted selection.
 
-- `parakeet_create` returns `ParakeetCreateResult { handle, error }`.
-- `parakeet_transcribe` returns `ParakeetResult { text, error }`.
-- `parakeet_result_free`, `parakeet_create_result_free`, and `parakeet_destroy` release Rust-owned memory.
+## Native Boundary
 
-All exported bodies catch Rust panics so unwinding never crosses the FFI boundary. Result strings are NUL-terminated UTF-8; interior NULs in model output are replaced with `U+FFFD`. The Parakeet handle serializes inference through an internal mutex, and a poisoned mutex is treated as unrecoverable model state: the caller should destroy and recreate the handle.
+`rust/asr_bridge` depends on released `transcribe-cpp 0.1.3` with Metal enabled and ONNX removed. Its C ABI exports:
 
-The Swift side currently declares matching result structs manually. C header generation via cbindgen is parked in `NEXT.md` Phase 9.
+- `asr_create` / `asr_create_result_free`
+- `asr_transcribe` / `asr_result_free`
+- `asr_destroy`
+
+All exported bodies catch Rust panics. Rust owns handles and returned strings; Swift owns and pins PCM for the synchronous call. The native session is retained between dictations and serialized by a mutex. A poisoned session is treated as unrecoverable and must be destroyed and recreated.
+
+The GGUF run path accepts `&[f32]`, so there is no full-utterance `Vec` copy at the Rust engine boundary. Distributed builds set `GGML_NATIVE=OFF` to avoid embedding build-machine-specific CPU instructions.
+
+The Swift declarations still mirror the small C ABI manually. Generating and importing the header with `cbindgen` remains the next ABI-hardening step.

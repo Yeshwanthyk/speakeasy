@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         store: store,
                         paster: coordinator.paster,
                         currentASRModelKind: { [weak coordinator] in
-                            coordinator?.selectedASRModelKind() ?? .parakeetTDT
+                            coordinator?.selectedASRModelKind() ?? .parakeetUnified
                         },
                         selectASRModel: { [weak coordinator] kind in
                             coordinator?.switchASRModel(to: kind)

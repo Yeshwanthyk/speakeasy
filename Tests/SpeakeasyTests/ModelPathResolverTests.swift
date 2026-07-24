@@ -3,115 +3,60 @@ import XCTest
 @testable import Speakeasy
 
 final class ModelPathResolverTests: XCTestCase {
-    private static let environmentLock = UnfairLock()
-
-    private func createModelDirectory(kind: ASRModelKind, at url: URL) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        for file in kind.requiredFiles {
-            let fileURL = url.appendingPathComponent(file)
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try Data("test".utf8).write(to: fileURL)
-        }
+    private func createModelFile(kind: ASRModelKind, at url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(kind.artifact.expectedByteCount))
+        try handle.close()
     }
 
-    private func withEnvironment(_ updates: [String: String], _ body: () throws -> Void) rethrows {
-        try Self.environmentLock.withLock {
-            let previous = updates.keys.reduce(into: [String: String?]()) { result, key in
-                result[key] = ProcessInfo.processInfo.environment[key]
-            }
-            for (key, value) in updates {
-                setenv(key, value, 1)
-            }
-            defer {
-                for (key, value) in previous {
-                    if let value {
-                        setenv(key, value, 1)
-                    } else {
-                        unsetenv(key)
-                    }
-                }
-            }
-            try body()
-        }
-    }
-
-    func testEnvironmentOverrideReturnsExistingDirectory() throws {
+    func testEnvironmentOverrideReturnsExistingGGUF() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try createModelDirectory(kind: .parakeetTDT, at: url)
+            .appendingPathComponent("speakeasy-model-path-tests")
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
+        try createModelFile(kind: .parakeetUnified, at: url)
 
-        try withEnvironment(["PARAKEET_MODEL_DIR": url.path]) {
-            XCTAssertEqual(try ModelPathResolver.parakeetV3Path(), url)
-        }
+        let resolved = try ModelPathResolver.configuredASRModel(
+            kind: .parakeetUnified,
+            appSupport: FileManager.default.temporaryDirectory,
+            bundleIdentifier: "com.speakeasy.app",
+            environment: ["PARAKEET_UNIFIED_GGUF_PATH": url.path]
+        )
+
+        XCTAssertEqual(resolved.url, url)
     }
 
-    func testEnvironmentOverrideThrowsForMissingDirectory() throws {
+    func testEnvironmentOverrideThrowsForMissingFile() {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString)
 
-        try withEnvironment(["PARAKEET_MODEL_DIR": url.path]) {
-            XCTAssertThrowsError(try ModelPathResolver.parakeetV3Path()) { error in
-                guard case let ModelPathError.modelNotFound(path) = error else {
-                    XCTFail("Expected modelNotFound, got \(error)")
-                    return
-                }
-                XCTAssertEqual(path, url.path)
+        XCTAssertThrowsError(try ModelPathResolver.configuredASRModel(
+            kind: .parakeetUnified,
+            appSupport: FileManager.default.temporaryDirectory,
+            bundleIdentifier: "com.speakeasy.app",
+            environment: ["PARAKEET_UNIFIED_GGUF_PATH": url.path]
+        )) { error in
+            guard case let ModelPathError.modelNotFound(path) = error else {
+                return XCTFail("Expected modelNotFound, got \(error)")
             }
+            XCTAssertEqual(path, url.path)
         }
     }
 
-    func testCanonicalBundlePathReturnsExistingModelDirectory() throws {
+    func testConfiguredModelDefaultsToUnifiedParakeet() throws {
         let appSupport = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("speakeasy-model-path-tests")
+            .appendingPathComponent(UUID().uuidString)
         let modelURL = appSupport
             .appendingPathComponent("com.speakeasy.app")
             .appendingPathComponent("models")
-            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
-        try createModelDirectory(kind: .parakeetTDT, at: modelURL)
-
-        let resolved = try ModelPathResolver.parakeetV3Path(
-            appSupport: appSupport,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:]
-        )
-
-        XCTAssertEqual(resolved.path, modelURL.path)
-    }
-
-    func testLegacyBundlePathFallbackKeepsExistingModelInstallsWorking() throws {
-        let appSupport = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let legacyModelURL = appSupport
-            .appendingPathComponent("com.wisp.app")
-            .appendingPathComponent("models")
-            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
-        try createModelDirectory(kind: .parakeetTDT, at: legacyModelURL)
-
-        let resolved = try ModelPathResolver.parakeetV3Path(
-            appSupport: appSupport,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:]
-        )
-
-        XCTAssertEqual(resolved.path, legacyModelURL.path)
-    }
-
-    func testConfiguredASRModelDefaultsToParakeet() throws {
-        let appSupport = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let modelURL = appSupport
-            .appendingPathComponent("com.speakeasy.app")
-            .appendingPathComponent("models")
-            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
-        try createModelDirectory(kind: .parakeetTDT, at: modelURL)
+            .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
+        try createModelFile(kind: .parakeetUnified, at: modelURL)
 
         let resolved = try ModelPathResolver.configuredASRModel(
             appSupport: appSupport,
@@ -119,134 +64,102 @@ final class ModelPathResolverTests: XCTestCase {
             environment: [:]
         )
 
-        XCTAssertEqual(resolved.kind, .parakeetTDT)
-        XCTAssertEqual(resolved.url.path, modelURL.path)
+        XCTAssertEqual(resolved.kind, .parakeetUnified)
+        XCTAssertEqual(resolved.url, modelURL)
         XCTAssertNil(resolved.language)
     }
 
-    func testConfiguredASRModelReturnsNemotronOverrideAndLanguage() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try createModelDirectory(kind: .nemotron, at: url)
-
-        let resolved = try ModelPathResolver.configuredASRModel(
-            appSupport: FileManager.default.temporaryDirectory,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [
-                "SPEAKEASY_ASR_MODEL": "nemotron-3.5-asr",
-                "NEMOTRON_MODEL_DIR": url.path,
-                "NEMOTRON_TARGET_LANG": "en-US"
-            ]
+    func testLegacyPreferenceAliasesResolveToGGUFKinds() throws {
+        XCTAssertEqual(
+            try ModelPathResolver.configuredASRModelKind(
+                environment: [:],
+                preferences: ["ASRModel": "parakeet-tdt"]
+            ),
+            .parakeetTDT
         )
-
-        XCTAssertEqual(resolved.kind, .nemotron)
-        XCTAssertEqual(resolved.url.path, url.path)
-        XCTAssertEqual(resolved.language, "en-US")
+        XCTAssertEqual(
+            try ModelPathResolver.configuredASRModelKind(
+                environment: ["WISP_ASR_MODEL": "nemotron-3.5-asr"]
+            ),
+            .nemotron
+        )
     }
 
-    func testConfiguredASRModelReadsPersistentNemotronPreferences() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try createModelDirectory(kind: .nemotron, at: url)
-
-        let resolved = try ModelPathResolver.configuredASRModel(
-            appSupport: FileManager.default.temporaryDirectory,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:],
-            preferences: [
-                "ASRModel": "nemotron",
-                "NemotronModelDir": url.path,
-                "NemotronTargetLang": "auto"
-            ]
-        )
-
-        XCTAssertEqual(resolved.kind, .nemotron)
-        XCTAssertEqual(resolved.url.path, url.path)
-        XCTAssertEqual(resolved.language, "auto")
-    }
-
-    func testForcedConfiguredASRModelIgnoresPersistedKind() throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try createModelDirectory(kind: .nemotron, at: url)
-
-        let resolved = try ModelPathResolver.configuredASRModel(
+    func testCanonicalPathUsesPinnedArtifactFilename() {
+        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let url = ModelPathResolver.preferredInstallURL(
             kind: .nemotron,
-            appSupport: FileManager.default.temporaryDirectory,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:],
-            preferences: [
-                "ASRModel": "parakeet-tdt",
-                "NemotronModelDir": url.path
-            ]
+            appSupport: appSupport,
+            environment: [:]
         )
 
-        XCTAssertEqual(resolved.kind, .nemotron)
-        XCTAssertEqual(resolved.url.path, url.path)
+        XCTAssertEqual(
+            url.path,
+            appSupport
+                .appendingPathComponent("com.speakeasy.app/models")
+                .appendingPathComponent(ASRModelKind.nemotron.artifact.filename)
+                .path
+        )
     }
 
-    func testPersistSelectedModelKindWritesStablePreferenceValue() throws {
+    func testLegacyBundlePathFallbackFindsGGUF() throws {
+        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let legacyURL = appSupport
+            .appendingPathComponent("com.wisp.app/models")
+            .appendingPathComponent(ASRModelKind.parakeetTDT.artifact.filename)
+        try createModelFile(kind: .parakeetTDT, at: legacyURL)
+
+        let resolved = try ModelPathResolver.configuredASRModel(
+            kind: .parakeetTDT,
+            appSupport: appSupport,
+            bundleIdentifier: "com.speakeasy.app",
+            environment: [:]
+        )
+
+        XCTAssertEqual(resolved.url, legacyURL)
+    }
+
+    func testWrongSizedGGUFIsRejected() throws {
+        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let modelURL = appSupport
+            .appendingPathComponent("com.speakeasy.app/models")
+            .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
+        try FileManager.default.createDirectory(
+            at: modelURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("not a model".utf8).write(to: modelURL)
+
+        XCTAssertFalse(ModelPathResolver.isModelInstalled(kind: .parakeetUnified, at: modelURL))
+        XCTAssertThrowsError(try ModelPathResolver.configuredASRModel(
+            kind: .parakeetUnified,
+            appSupport: appSupport,
+            bundleIdentifier: "com.speakeasy.app",
+            environment: [:]
+        )) { error in
+            guard case let ModelPathError.modelInvalid(path, _) = error else {
+                return XCTFail("Expected modelInvalid, got \(error)")
+            }
+            XCTAssertEqual(path, modelURL.path)
+        }
+    }
+
+    func testPersistSelectedModelKindWritesStablePreference() throws {
         let suiteName = "com.speakeasy.tests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        ModelPathResolver.persistSelectedModelKind(.nemotron, defaults: defaults)
+        ModelPathResolver.persistSelectedModelKind(.parakeetUnified, defaults: defaults)
 
-        XCTAssertEqual(defaults.string(forKey: "ASRModel"), "nemotron-3.5-asr")
-    }
-
-    func testIncompleteModelDirectoryThrowsMissingFiles() throws {
-        let appSupport = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let modelURL = appSupport
-            .appendingPathComponent("com.speakeasy.app")
-            .appendingPathComponent("models")
-            .appendingPathComponent("parakeet-tdt-0.6b-v3-int8")
-        try FileManager.default.createDirectory(at: modelURL, withIntermediateDirectories: true)
-        try Data("test".utf8).write(to: modelURL.appendingPathComponent("config.json"))
-
-        XCTAssertThrowsError(try ModelPathResolver.parakeetV3Path(
-            appSupport: appSupport,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:]
-        )) { error in
-            guard case let ModelPathError.modelIncomplete(path, missing) = error else {
-                XCTFail("Expected modelIncomplete, got \(error)")
-                return
-            }
-            XCTAssertEqual(path, modelURL.path)
-            XCTAssertTrue(missing.contains("encoder-model.int8.onnx"))
-        }
-    }
-
-    func testZeroByteRequiredFileIsNotTreatedAsInstalled() throws {
-        let modelURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speakeasy-model-path-tests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try createModelDirectory(kind: .nemotron, at: modelURL)
-        let emptyFile = modelURL.appendingPathComponent("encoder.onnx")
-        try Data().write(to: emptyFile)
-
-        XCTAssertFalse(ModelPathResolver.isModelInstalled(kind: .nemotron, at: modelURL))
-        XCTAssertTrue(
-            ModelPathResolver.missingRequiredFiles(kind: .nemotron, at: modelURL)
-                .contains("encoder.onnx")
-        )
+        XCTAssertEqual(defaults.string(forKey: "ASRModel"), "parakeet-unified-en")
     }
 
     func testConfiguredASRModelRejectsUnknownModel() {
-        XCTAssertThrowsError(try ModelPathResolver.configuredASRModel(
-            appSupport: FileManager.default.temporaryDirectory,
-            bundleIdentifier: "com.speakeasy.app",
+        XCTAssertThrowsError(try ModelPathResolver.configuredASRModelKind(
             environment: ["SPEAKEASY_ASR_MODEL": "whisper"]
         )) { error in
             guard case let ModelPathError.unsupportedModel(value) = error else {
-                XCTFail("Expected unsupportedModel, got \(error)")
-                return
+                return XCTFail("Expected unsupportedModel, got \(error)")
             }
             XCTAssertEqual(value, "whisper")
         }

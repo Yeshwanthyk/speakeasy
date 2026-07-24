@@ -17,7 +17,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(
         store: TranscriptStore,
         paster: Pasting,
-        currentASRModelKind: @escaping () -> ASRModelKind = { .parakeetTDT },
+        currentASRModelKind: @escaping () -> ASRModelKind = { .parakeetUnified },
         selectASRModel: @escaping (ASRModelKind) -> Void = { _ in }
     ) {
         self.store = store

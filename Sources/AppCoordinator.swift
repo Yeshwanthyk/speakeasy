@@ -132,7 +132,7 @@ final class AppCoordinator: @unchecked Sendable {
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
-        asrModelKind: ASRModelKind = .parakeetTDT,
+        asrModelKind: ASRModelKind = .parakeetUnified,
         asrModelResolver: ASRModelResolver? = nil,
         transcriberFactory: TranscriberFactory? = nil,
         modelSelectionStore: @escaping ASRModelSelectionStore = { _ in },
@@ -265,8 +265,9 @@ final class AppCoordinator: @unchecked Sendable {
     @MainActor
     convenience init() async throws {
         let (model, transcriber) = try await Task.detached(priority: .userInitiated) {
-            let model = try ModelPathResolver.configuredASRModel()
-            let transcriber = try ParakeetTranscriber(model: model)
+            let kind = try ModelPathResolver.configuredASRModelKind()
+            let model = try await ASRModelInstaller().resolveOrInstall(kind: kind)
+            let transcriber = try TranscribeCppTranscriber(model: model)
             return (model, transcriber)
         }.value
 
@@ -302,7 +303,7 @@ final class AppCoordinator: @unchecked Sendable {
             asrModelResolver: {
                 try await ASRModelInstaller().resolveOrInstall(kind: $0)
             },
-            transcriberFactory: { try ParakeetTranscriber(model: $0) },
+            transcriberFactory: { try TranscribeCppTranscriber(model: $0) },
             modelSelectionStore: { ModelPathResolver.persistSelectedModelKind($0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
