@@ -1,6 +1,6 @@
 # Architecture
 
-Wisp is a menu-bar macOS app that captures microphone audio, transcribes it locally through a Rust FFI bridge, stores recent transcripts, and pastes accepted text into the frontmost app.
+Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it locally through a Rust FFI bridge, stores recent transcripts, and pastes accepted text into the frontmost app.
 
 ## Data Flow
 
@@ -29,7 +29,7 @@ UI-affecting collaborators (`ScreenEdgeFlash`, `TranscriptStore`, menu bar updat
 
 `AudioCapture` keeps the AVAudioEngine prepared separately from recording state. The engine/input-node protocol seam allows tests to verify tap installation, start failure, shutdown, and stop-grace behavior without touching real hardware.
 
-Converted mono 16 kHz samples flow through a bounded ring buffer while idle. When recording starts, Wisp prepends a short pre-roll window to avoid clipped leading syllables. When recording stops, it waits for an adaptive grace window derived from recent callback cadence.
+Converted mono 16 kHz samples flow through a bounded ring buffer while idle. When recording starts, Speakeasy prepends a short pre-roll window to avoid clipped leading syllables. When recording stops, it waits for an adaptive grace window derived from recent callback cadence.
 
 ## FFI Contract
 

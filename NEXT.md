@@ -61,7 +61,7 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 ## Phase 8 — P3 docs & hygiene
 
-- [x] Pick one canonical name (Speakeasy vs Wisp) and make it consistent; update README.
+- [x] Pick one canonical app name and make it consistent; update README.
 - [x] Expand README: prerequisites, model provisioning, test command.
 - [x] Add ARCHITECTURE.md: data-flow, state machine, FFI contract.
 - [x] Add top-of-file FFI contract comment to `lib.rs`.
@@ -73,7 +73,7 @@ Each phase: implement → sub-agent review → fix findings → run `swift test`
 
 - [ ] CI workflow (macOS runner, cached cargo, `swift test` + `cargo test`).
 - [ ] `fetch_model.sh` with checksum.
-- [ ] `WispIntegrationTests` target (opt-in, fixture WAV).
+- [ ] `SpeakeasyIntegrationTests` target (opt-in, fixture WAV).
 - [ ] cbindgen FFI header generation + Swift bridging header so
       `ParakeetResult` / `ParakeetCreateResult` layouts are C-ABI-guaranteed
       rather than a Swift-default coincidence (parked from Phase 1 review).

@@ -1,6 +1,6 @@
 # Mission
 
-**Mission:** Harden Wisp for extensibility, AI-agent friendliness, and test coverage by working through the audited punch list phase-by-phase with sub-agent review, tests, and commit per phase.
+**Mission:** Harden Speakeasy for extensibility, AI-agent friendliness, and test coverage by working through the audited punch list phase-by-phase with sub-agent review, tests, and commit per phase.
 
 ## Done Criteria
 
@@ -55,7 +55,7 @@
   mutable; access is guarded by `conversionLock` so shutdown cannot race an
   in-flight tap callback.
 - **Phase 8 — app rename needs data-path compatibility.** The canonical
-  product name is now Wisp, with bundle/logging identifiers moved to
-  `com.wisp.app`. `ModelPathResolver` still falls back to the legacy
-  `com.speakeasy.app` model directory so existing installs do not lose their
+  product name is now Speakeasy, with bundle/logging identifiers moved to
+  `com.speakeasy.app`. `ModelPathResolver` still falls back to the legacy
+  `com.wisp.app` model directory so existing installs do not lose their
   model provisioning.
