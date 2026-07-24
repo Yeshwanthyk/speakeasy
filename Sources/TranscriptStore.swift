@@ -11,9 +11,9 @@ import os
 final class TranscriptStore {
     static let capacity = 50
 
-    private let logger = Logger(subsystem: "com.wisp.app", category: "transcripts")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcripts")
     private let fileURL: URL
-    private let writeQueue = DispatchQueue(label: "com.wisp.app.transcripts.write", qos: .utility)
+    private let writeQueue = DispatchQueue(label: "com.speakeasy.app.transcripts.write", qos: .utility)
     private var entries: [String]
 
     /// Entries in insertion order (oldest first). Must be called on the main queue.
@@ -24,10 +24,22 @@ final class TranscriptStore {
         return entries
     }
 
-    init(fileURL: URL? = nil) {
+    init(fileURL: URL? = nil, legacyFileURL: URL? = nil) {
         let resolvedURL = fileURL ?? Self.defaultFileURL()
+        let fallbackURL = legacyFileURL ?? (fileURL == nil ? Self.defaultLegacyFileURL() : nil)
         self.fileURL = resolvedURL
-        self.entries = Self.load(from: resolvedURL)
+
+        if FileManager.default.fileExists(atPath: resolvedURL.path) {
+            self.entries = Self.load(from: resolvedURL)
+        } else if let fallbackURL {
+            self.entries = Self.load(from: fallbackURL)
+        } else {
+            self.entries = []
+        }
+
+        if !entries.isEmpty, !FileManager.default.fileExists(atPath: resolvedURL.path) {
+            scheduleWrite()
+        }
     }
 
     func append(_ text: String) {
@@ -73,9 +85,17 @@ final class TranscriptStore {
     private static func defaultFileURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let identifier = Bundle.main.bundleIdentifier ?? "Wisp"
+        let identifier = Bundle.main.bundleIdentifier ?? "Speakeasy"
         return base
             .appendingPathComponent(identifier, isDirectory: true)
+            .appendingPathComponent("history.json")
+    }
+
+    private static func defaultLegacyFileURL() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base
+            .appendingPathComponent("com.wisp.app", isDirectory: true)
             .appendingPathComponent("history.json")
     }
 }

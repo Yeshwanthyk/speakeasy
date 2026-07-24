@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 @MainActor
 final class AppCoordinatorTests: XCTestCase {
@@ -24,7 +24,7 @@ final class AppCoordinatorTests: XCTestCase {
         timeout: TimeInterval = 1.0,
         skipWarmup: Bool = true,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.wisp.app.tests.transcription")
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription")
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -96,7 +96,7 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
 
-    func testTimeoutDropsLateResults() {
+    func testTimeoutDropsLateResultsAndBlocksNewCaptureUntilWorkerReturns() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Late"), delay: 0.2)
         let paster = PasterStub()
@@ -113,8 +113,17 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.toggleRecording()
 
         wait(for: [timedOut], timeout: 1.0)
-        Thread.sleep(forTimeInterval: 0.3)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertEqual(audio.endCount, 1)
+
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         XCTAssertTrue(paster.pastedTexts.isEmpty)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 2)
     }
 
     func testEmptySamplesDoNotTriggerTranscription() {
@@ -237,6 +246,100 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isRecording)
     }
 
+    func testSwitchASRModelLoadsSelectedTranscriberAndPersistsSelection() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let initialTranscriber = FakeTranscriber(result: .success("Parakeet text"))
+        let replacementTranscriber = FakeTranscriber(result: .success("Nemotron text"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let switchLock = UnfairLock()
+        let queue = DispatchQueue(label: "com.speakeasy.app.tests.model-switch")
+        let modelURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var resolvedKinds: [ASRModelKind] = []
+        var factoryKinds: [ASRModelKind] = []
+        var persistedKinds: [ASRModelKind] = []
+
+        let coordinator = AppCoordinator(
+            audioCapture: audio,
+            transcriber: initialTranscriber,
+            paster: paster,
+            flash: FlashStub(),
+            feedback: feedback,
+            accessibilityChecker: AccessibilityStub(allowed: true),
+            asrModelKind: .parakeetTDT,
+            asrModelResolver: { kind in
+                switchLock.withLock { resolvedKinds.append(kind) }
+                return ASRModelConfiguration(kind: kind, url: modelURL, language: nil)
+            },
+            transcriberFactory: { model in
+                switchLock.withLock { factoryKinds.append(model.kind) }
+                return replacementTranscriber
+            },
+            modelSelectionStore: { kind in
+                switchLock.withLock { persistedKinds.append(kind) }
+            },
+            transcriptionTimeoutProvider: { _ in 1.0 },
+            keyMonitorFactory: { _ in nil },
+            transcriptionQueue: queue
+        )
+        coordinator.skipWarmup()
+
+        coordinator.switchASRModel(to: .nemotron)
+
+        XCTAssertTrue(waitUntil {
+            coordinator.selectedASRModelKind() == .nemotron && replacementTranscriber.warmUpCount == 1
+        })
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+
+        let pasted = expectation(description: "paste from switched model")
+        paster.onPaste = { pasted.fulfill() }
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["Nemotron text"])
+        XCTAssertEqual(initialTranscriber.callCount, 0)
+        XCTAssertTrue(feedback.errors.isEmpty)
+        XCTAssertEqual(switchLock.withLock { resolvedKinds }, [.nemotron])
+        XCTAssertEqual(switchLock.withLock { factoryKinds }, [.nemotron])
+        XCTAssertEqual(switchLock.withLock { persistedKinds }, [.nemotron])
+    }
+
+    func testSwitchASRModelIsRejectedWhileRecording() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let feedback = FeedbackStub()
+        var factoryCallCount = 0
+
+        let coordinator = AppCoordinator(
+            audioCapture: audio,
+            transcriber: transcriber,
+            paster: PasterStub(),
+            flash: FlashStub(),
+            feedback: feedback,
+            accessibilityChecker: AccessibilityStub(allowed: true),
+            asrModelKind: .parakeetTDT,
+            asrModelResolver: { kind in
+                ASRModelConfiguration(kind: kind, url: FileManager.default.temporaryDirectory, language: nil)
+            },
+            transcriberFactory: { _ in
+                factoryCallCount += 1
+                return transcriber
+            },
+            transcriptionTimeoutProvider: { _ in 1.0 },
+            keyMonitorFactory: { _ in nil }
+        )
+        coordinator.skipWarmup()
+
+        coordinator.toggleRecording()
+        coordinator.switchASRModel(to: .nemotron)
+
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertEqual(factoryCallCount, 0)
+        XCTAssertEqual(feedback.errors, ["Stop recording before switching models"])
+    }
+
     func testHallucinationIsFiltered() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Yeah."))
@@ -351,7 +454,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     func testInjectedTranscriptionQueueRunsStopAndTranscribeWork() {
         let key = DispatchSpecificKey<String>()
-        let queue = DispatchQueue(label: "com.wisp.app.tests.injected-transcription")
+        let queue = DispatchQueue(label: "com.speakeasy.app.tests.injected-transcription")
         queue.setSpecific(key: key, value: "injected")
 
         let audio = AudioCaptureStub(samples: Self.validSamples, expectedQueue: (key, "injected"))
@@ -633,7 +736,7 @@ private final class AudioCaptureStub: AudioCapturing {
     }
 }
 
-private final class FakeTranscriber: Transcriber {
+private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     private let counterLock = UnfairLock()
     private let result: Result<String, Error>
     private let delay: TimeInterval
@@ -719,7 +822,7 @@ private final class FeedbackStub: UserFeedback {
 
 private struct AccessibilityStub: AccessibilityChecking {
     let allowed: Bool
-    func ensureAccessibilityPrompted() -> Bool { allowed }
+    func hasAccessibilityAccess() -> Bool { allowed }
 }
 
 private struct TestError: Error {}

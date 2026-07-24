@@ -1,12 +1,12 @@
 import Foundation
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 @MainActor
 final class TranscriptStoreTests: XCTestCase {
     private func temporaryHistoryURL() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("wisp-transcript-store-tests", isDirectory: true)
+            .appendingPathComponent("speakeasy-transcript-store-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("history.json")
     }
@@ -61,6 +61,23 @@ final class TranscriptStoreTests: XCTestCase {
         let store = TranscriptStore(fileURL: url)
 
         XCTAssertTrue(store.allEntries().isEmpty)
+    }
+
+    func testMissingCanonicalHistoryLoadsAndMigratesLegacyHistory() throws {
+        let currentURL = temporaryHistoryURL()
+        let legacyURL = temporaryHistoryURL()
+        let legacyEntries = ["one", "two"]
+        let data = try JSONEncoder().encode(legacyEntries)
+        try FileManager.default.createDirectory(
+            at: legacyURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: legacyURL)
+
+        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
+
+        XCTAssertEqual(store.allEntries(), legacyEntries)
+        XCTAssertTrue(waitUntil { decodedHistory(at: currentURL) == legacyEntries })
     }
 
     func testLoadedHistoryIsTruncatedToCapacity() throws {

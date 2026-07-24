@@ -12,7 +12,11 @@ struct ParakeetCreateResult {
 }
 
 @_silgen_name("parakeet_create")
-private func parakeet_create(_ path: UnsafePointer<CChar>) -> ParakeetCreateResult
+private func parakeet_create(
+    _ path: UnsafePointer<CChar>,
+    _ modelKind: Int32,
+    _ language: UnsafePointer<CChar>?
+) -> ParakeetCreateResult
 
 @_silgen_name("parakeet_create_result_free")
 private func parakeet_create_result_free(_ result: ParakeetCreateResult)
@@ -43,18 +47,25 @@ enum ParakeetError: Error {
 /// across tasks or dispatch queues without external synchronisation.
 final class ParakeetTranscriber {
     private let handle: UnsafeMutableRawPointer
-    private let logger = Logger(subsystem: "com.wisp.app", category: "parakeet")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "parakeet")
 
-    init(modelPath: URL) throws {
+    init(model: ASRModelConfiguration) throws {
         // Pre-flight: URL must be representable as a filesystem path before
         // we cross the FFI boundary.
-        let createResult: ParakeetCreateResult = try modelPath.withUnsafeFileSystemRepresentation { pointer in
+        let createResult: ParakeetCreateResult = try model.url.withUnsafeFileSystemRepresentation { pointer in
             guard let pointer else {
                 throw ParakeetError.modelLoadFailed(
-                    "Cannot represent model URL as a filesystem path: \(modelPath.absoluteString)"
+                    "Cannot represent model URL as a filesystem path: \(model.url.absoluteString)"
                 )
             }
-            return parakeet_create(pointer)
+
+            if let language = model.language {
+                return language.withCString {
+                    parakeet_create(pointer, model.kind.ffiValue, $0)
+                }
+            }
+
+            return parakeet_create(pointer, model.kind.ffiValue, nil)
         }
 
         // Always free the error string on this code path. Safe if error is null.
@@ -68,7 +79,7 @@ final class ParakeetTranscriber {
         }
 
         self.handle = handle
-        logger.debug("Parakeet model loaded")
+        logger.debug("ASR model loaded")
     }
 
     deinit {
@@ -108,3 +119,15 @@ final class ParakeetTranscriber {
 }
 
 extension ParakeetTranscriber: Transcriber {}
+extension ParakeetTranscriber: @unchecked Sendable {}
+
+private extension ASRModelKind {
+    var ffiValue: Int32 {
+        switch self {
+        case .parakeetTDT:
+            return 0
+        case .nemotron:
+            return 1
+        }
+    }
+}

@@ -1,7 +1,7 @@
 import Carbon
 import CoreGraphics
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 final class KeyComboMonitorTests: XCTestCase {
     func testCarbonModifiersMapsSupportedModifierFlags() {

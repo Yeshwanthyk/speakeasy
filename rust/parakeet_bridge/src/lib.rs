@@ -1,4 +1,4 @@
-//! FFI bridge from Swift to the `transcribe-rs` Parakeet V3 model.
+//! FFI bridge from Swift to local ASR models.
 //!
 //! # Contract
 //!
@@ -27,8 +27,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Mutex;
 
-use ndarray::{aview1, ArrayView2};
-use transcribe_rs::engines::parakeet::ParakeetModel;
+use parakeet_rs::{Nemotron, ParakeetTDT, Transcriber};
+
+const MODEL_KIND_PARAKEET_TDT: i32 = 0;
+const MODEL_KIND_NEMOTRON: i32 = 1;
+const SAMPLE_RATE: u32 = 16_000;
+const CHANNELS: u16 = 1;
 
 #[repr(C)]
 pub struct ParakeetResult {
@@ -43,7 +47,26 @@ pub struct ParakeetCreateResult {
 }
 
 pub struct ParakeetHandle {
-    model: Mutex<ParakeetModel>,
+    model: Mutex<AsrModel>,
+}
+
+enum AsrModel {
+    ParakeetTdt(ParakeetTDT),
+    Nemotron(Nemotron),
+}
+
+impl AsrModel {
+    fn transcribe(&mut self, samples: &[f32]) -> Result<String, String> {
+        match self {
+            Self::ParakeetTdt(model) => model
+                .transcribe_samples(samples.to_vec(), SAMPLE_RATE, CHANNELS, None)
+                .map(|result| result.text)
+                .map_err(|err| format!("Parakeet transcription failed: {err}")),
+            Self::Nemotron(model) => model
+                .transcribe_audio(samples)
+                .map_err(|err| format!("Nemotron transcription failed: {err}")),
+        }
+    }
 }
 
 /// Allocate a NUL-terminated C string from `value`, sanitising interior NULs.
@@ -90,7 +113,7 @@ fn create_err(message: &str) -> ParakeetCreateResult {
     }
 }
 
-/// Load a Parakeet model from disk.
+/// Load a local ASR model from disk.
 ///
 /// On success, `handle` is non-null and `error` is null. On failure, `handle`
 /// is null and `error` carries the underlying error message. The caller must
@@ -99,10 +122,15 @@ fn create_err(message: &str) -> ParakeetCreateResult {
 ///
 /// # Safety
 ///
-/// `model_path` must be a valid NUL-terminated UTF-8 C string, or null.
+/// `model_path` and `language` must be valid NUL-terminated UTF-8 C strings,
+/// or null. `language` is only used by Nemotron; null means model default.
 #[no_mangle]
-pub unsafe extern "C" fn parakeet_create(model_path: *const c_char) -> ParakeetCreateResult {
-    catch_unwind(|| {
+pub unsafe extern "C" fn parakeet_create(
+    model_path: *const c_char,
+    model_kind: i32,
+    language: *const c_char,
+) -> ParakeetCreateResult {
+    catch_unwind(AssertUnwindSafe(|| {
         if model_path.is_null() {
             return create_err("null model path");
         }
@@ -114,16 +142,49 @@ pub unsafe extern "C" fn parakeet_create(model_path: *const c_char) -> ParakeetC
             Err(err) => return create_err(&format!("model path is not valid UTF-8: {err}")),
         };
 
-        match ParakeetModel::new(Path::new(path_str), true) {
-            Ok(model) => {
-                let boxed = Box::new(ParakeetHandle {
-                    model: Mutex::new(model),
-                });
-                create_ok(Box::into_raw(boxed))
+        let language = if language.is_null() {
+            None
+        } else {
+            // SAFETY: caller guarantees `language` is a valid NUL-terminated C string.
+            let language = unsafe { CStr::from_ptr(language) };
+            match language.to_str() {
+                Ok("") => None,
+                Ok(value) => Some(value),
+                Err(err) => return create_err(&format!("language is not valid UTF-8: {err}")),
             }
-            Err(err) => create_err(&format!("Failed to load Parakeet model: {err}")),
-        }
-    })
+        };
+
+        let model = match model_kind {
+            MODEL_KIND_PARAKEET_TDT => {
+                match ParakeetTDT::from_pretrained(Path::new(path_str), None) {
+                    Ok(model) => AsrModel::ParakeetTdt(model),
+                    Err(err) => {
+                        return create_err(&format!("Failed to load Parakeet model: {err}"));
+                    }
+                }
+            }
+            MODEL_KIND_NEMOTRON => {
+                let mut model = match Nemotron::from_pretrained(Path::new(path_str), None) {
+                    Ok(model) => model,
+                    Err(err) => {
+                        return create_err(&format!("Failed to load Nemotron model: {err}"));
+                    }
+                };
+                if let Some(language) = language {
+                    if let Err(err) = model.set_target_lang(language) {
+                        return create_err(&format!("Failed to set Nemotron language: {err}"));
+                    }
+                }
+                AsrModel::Nemotron(model)
+            }
+            other => return create_err(&format!("unsupported model kind: {other}")),
+        };
+
+        let boxed = Box::new(ParakeetHandle {
+            model: Mutex::new(model),
+        });
+        create_ok(Box::into_raw(boxed))
+    }))
     .unwrap_or_else(|_| create_err("Rust panicked during parakeet_create"))
 }
 
@@ -191,24 +252,14 @@ pub unsafe extern "C" fn parakeet_transcribe(
             // caller destroy + recreate the handle.
             Err(_) => {
                 return result_err(
-                    "Parakeet model is poisoned after a prior panic; destroy and recreate the handle",
+                    "ASR model is poisoned after a prior panic; destroy and recreate the handle",
                 );
             }
         };
 
-        let waveforms = match ArrayView2::from_shape((1, len), slice) {
-            Ok(view) => view.into_dyn(),
-            Err(err) => return result_err(&format!("Invalid waveform shape: {err}")),
-        };
-        let lens = [len as i64];
-        let waveforms_len = aview1(&lens).into_dyn();
-
-        match model.recognize_batch(&waveforms, &waveforms_len) {
-            Ok(mut results) => match results.pop() {
-                Some(result) => result_ok(result.text),
-                None => result_err("Parakeet transcription returned no result"),
-            },
-            Err(err) => result_err(&format!("Parakeet transcription failed: {err}")),
+        match model.transcribe(slice) {
+            Ok(text) => result_ok(text),
+            Err(err) => result_err(&err),
         }
     }))
     .unwrap_or_else(|_| result_err("Rust panicked during parakeet_transcribe"))
@@ -349,7 +400,8 @@ mod tests {
 
     #[test]
     fn create_null_path_returns_error() {
-        let r = unsafe { parakeet_create(std::ptr::null()) };
+        let r =
+            unsafe { parakeet_create(std::ptr::null(), MODEL_KIND_PARAKEET_TDT, std::ptr::null()) };
         assert!(r.handle.is_null());
         assert!(!r.error.is_null());
         let msg = unsafe { CStr::from_ptr(r.error).to_str().unwrap().to_owned() };
@@ -360,13 +412,45 @@ mod tests {
     #[test]
     fn create_missing_path_returns_error_with_underlying_message() {
         let path = CString::new("/definitely/does/not/exist/parakeet").unwrap();
-        let r = unsafe { parakeet_create(path.as_ptr()) };
+        let r =
+            unsafe { parakeet_create(path.as_ptr(), MODEL_KIND_PARAKEET_TDT, std::ptr::null()) };
         assert!(r.handle.is_null());
         assert!(!r.error.is_null());
         let msg = unsafe { CStr::from_ptr(r.error).to_str().unwrap().to_owned() };
         assert!(
             msg.starts_with("Failed to load Parakeet model"),
             "expected underlying error forwarding, got: {msg}"
+        );
+        unsafe { parakeet_create_result_free(r) };
+    }
+
+    #[test]
+    fn create_invalid_model_kind_returns_error() {
+        let path = CString::new("/tmp").unwrap();
+        let r = unsafe { parakeet_create(path.as_ptr(), 99, std::ptr::null()) };
+        assert!(r.handle.is_null());
+        assert!(!r.error.is_null());
+        let msg = unsafe { CStr::from_ptr(r.error).to_str().unwrap().to_owned() };
+        assert!(
+            msg.contains("unsupported model kind: 99"),
+            "unexpected message: {msg}"
+        );
+        unsafe { parakeet_create_result_free(r) };
+    }
+
+    #[test]
+    fn create_rejects_invalid_language_utf8() {
+        let path = CString::new("/tmp").unwrap();
+        let language = [0xFFu8, 0];
+        let r = unsafe {
+            parakeet_create(path.as_ptr(), MODEL_KIND_NEMOTRON, language.as_ptr().cast())
+        };
+        assert!(r.handle.is_null());
+        assert!(!r.error.is_null());
+        let msg = unsafe { CStr::from_ptr(r.error).to_str().unwrap().to_owned() };
+        assert!(
+            msg.contains("language is not valid UTF-8"),
+            "unexpected message: {msg}"
         );
         unsafe { parakeet_create_result_free(r) };
     }

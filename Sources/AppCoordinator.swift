@@ -25,25 +25,28 @@ protocol Flashing {
 }
 
 protocol AccessibilityChecking {
-    func ensureAccessibilityPrompted() -> Bool
+    func hasAccessibilityAccess() -> Bool
 }
 
 typealias KeyMonitorFactory = (_ callback: @escaping () -> Void) -> KeyComboMonitor?
+typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConfiguration
+typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
+typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
 
 extension AudioCapture: AudioCapturing {}
 extension ScreenEdgeFlash: Flashing {}
 
 struct SystemAccessibilityChecker: AccessibilityChecking {
-    func ensureAccessibilityPrompted() -> Bool {
-        Permissions.ensureAccessibilityPrompted()
+    func hasAccessibilityAccess() -> Bool {
+        Permissions.hasAccessibilityAccess()
     }
 }
 
-final class AppCoordinator {
+final class AppCoordinator: @unchecked Sendable {
     private enum State {
         case idle
         case recording
-        case transcribing(UUID)
+        case transcribing(UUID, didTimeOut: Bool)
     }
 
     /// Readiness of the transcription model.
@@ -71,6 +74,12 @@ final class AppCoordinator {
         case ignore
     }
 
+    private enum ModelSwitchStart {
+        case start(previousWarmupState: WarmupState)
+        case alreadySelected
+        case reject(String)
+    }
+
     private static let flashLineWidth: CGFloat = 3
     private static let transcriptionSampleRate: Double = 16_000
     private static let minTranscriptionTimeout: TimeInterval = 30
@@ -80,14 +89,18 @@ final class AppCoordinator {
     /// RMS below this threshold is treated as silence.
     private static let silenceRmsThreshold: Float = 0.005
 
-    private let logger = Logger(subsystem: "com.wisp.app", category: "app")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing
-    private let transcriber: Transcriber
+    private var transcriber: Transcriber
     let paster: Pasting
     let transcriptStore: TranscriptStore?
     private let feedback: UserFeedback
     private let accessibilityChecker: AccessibilityChecking
     private let hallucinationFilter: HallucinationFilter
+    private var currentASRModelKind: ASRModelKind
+    private let asrModelResolver: ASRModelResolver?
+    private let transcriberFactory: TranscriberFactory?
+    private let modelSelectionStore: ASRModelSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
@@ -119,10 +132,14 @@ final class AppCoordinator {
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
+        asrModelKind: ASRModelKind = .parakeetTDT,
+        asrModelResolver: ASRModelResolver? = nil,
+        transcriberFactory: TranscriberFactory? = nil,
+        modelSelectionStore: @escaping ASRModelSelectionStore = { _ in },
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.wisp.app.transcription", qos: .userInteractive)
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -131,6 +148,10 @@ final class AppCoordinator {
         self.feedback = feedback
         self.accessibilityChecker = accessibilityChecker
         self.hallucinationFilter = hallucinationFilter
+        self.currentASRModelKind = asrModelKind
+        self.asrModelResolver = asrModelResolver
+        self.transcriberFactory = transcriberFactory
+        self.modelSelectionStore = modelSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.transcriptStore = transcriptStore
         self.transcriptionQueue = transcriptionQueue
@@ -155,8 +176,9 @@ final class AppCoordinator {
         stateLock.withLock { warmupState = .warming }
         logger.info("Model warmup started")
 
+        let model = stateLock.withLock { transcriber }
         do {
-            try await transcriber.warmUp()
+            try await model.warmUp()
             stateLock.withLock { warmupState = .ready }
             logger.info("Model warmup completed successfully")
         } catch {
@@ -177,17 +199,83 @@ final class AppCoordinator {
         stateLock.withLock { warmupState = .ready }
     }
 
+    func selectedASRModelKind() -> ASRModelKind {
+        stateLock.withLock { currentASRModelKind }
+    }
+
+    func switchASRModel(to kind: ASRModelKind) {
+        guard let asrModelResolver, let transcriberFactory else {
+            logger.error("Model switching requested without a transcriber factory")
+            feedback.notify(event: .error("Model switching unavailable"))
+            return
+        }
+
+        let start = stateLock.withLock { () -> ModelSwitchStart in
+            guard currentASRModelKind != kind else {
+                return .alreadySelected
+            }
+
+            guard warmupState.isReady else {
+                return .reject("Model warming up, please wait")
+            }
+
+            switch state {
+            case .idle:
+                let previousWarmupState = warmupState
+                warmupState = .warming
+                return .start(previousWarmupState: previousWarmupState)
+            case .recording:
+                return .reject("Stop recording before switching models")
+            case .transcribing:
+                return .reject("Wait for transcription to finish")
+            }
+        }
+
+        switch start {
+        case .alreadySelected:
+            return
+
+        case .reject(let message):
+            logger.info("Ignoring ASR model switch to \(kind.displayName): \(message)")
+            feedback.notify(event: .error(message))
+
+        case .start(let previousWarmupState):
+            Task(priority: .userInitiated) { [weak self] in
+                let result: Result<(ASRModelConfiguration, Transcriber), Error>
+                do {
+                    let model = try await asrModelResolver(kind)
+                    let transcriber = try transcriberFactory(model)
+                    result = .success((model, transcriber))
+                } catch {
+                    result = .failure(error)
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    self?.completeASRModelSwitch(
+                        to: kind,
+                        restoring: previousWarmupState,
+                        result: result
+                    )
+                }
+            }
+        }
+    }
+
     #if !SWIFT_PACKAGE
     @MainActor
-    convenience init() throws {
-        let modelPath = try ModelPathResolver.parakeetV3Path()
+    convenience init() async throws {
+        let (model, transcriber) = try await Task.detached(priority: .userInitiated) {
+            let model = try ModelPathResolver.configuredASRModel()
+            let transcriber = try ParakeetTranscriber(model: model)
+            return (model, transcriber)
+        }.value
+
         let feedback = SystemFeedback()
         let audioCapture = try AudioCapture(
             onLimitReached: { [feedback] in
                 feedback.notify(event: .error("Recording limit reached (6 minutes)"))
             }
         )
-        let transcriber = try ParakeetTranscriber(modelPath: modelPath)
         let paster = PasteboardPaster(feedback: feedback)
         let flash = ScreenEdgeFlash()
 
@@ -210,6 +298,12 @@ final class AppCoordinator {
             flash: flash,
             feedback: feedback,
             accessibilityChecker: SystemAccessibilityChecker(),
+            asrModelKind: model.kind,
+            asrModelResolver: {
+                try await ASRModelInstaller().resolveOrInstall(kind: $0)
+            },
+            transcriberFactory: { try ParakeetTranscriber(model: $0) },
+            modelSelectionStore: { ModelPathResolver.persistSelectedModelKind($0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
             transcriptStore: TranscriptStore()
@@ -240,7 +334,7 @@ final class AppCoordinator {
                 return .start
             case .recording:
                 let token = UUID()
-                state = .transcribing(token)
+                state = .transcribing(token, didTimeOut: false)
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
                 activeTrace = nil
@@ -287,11 +381,13 @@ final class AppCoordinator {
         transcriptionQueue.async { [weak self] in
             guard let self else { return }
             let captureResult = self.audioCapture.endRecording()
+            let rms = Self.rms(of: captureResult.samples)
             DispatchQueue.main.async { [weak self] in
                 self?.processCaptureResult(
                     token: token,
                     trace: trace,
-                    captureResult: captureResult
+                    captureResult: captureResult,
+                    rms: rms
                 )
             }
         }
@@ -300,7 +396,8 @@ final class AppCoordinator {
     private func processCaptureResult(
         token: UUID,
         trace: TranscriptionTrace,
-        captureResult: AudioCaptureResult
+        captureResult: AudioCaptureResult,
+        rms: Float
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         let samples = captureResult.samples
@@ -314,12 +411,11 @@ final class AppCoordinator {
 
         guard !samples.isEmpty else {
             trace.log(logger: logger, outcome: .emptyAudio)
-            finishTranscription(token: token)
+            _ = finishTranscription(token: token)
             return
         }
 
         let activeSampleCount = samples.count - captureResult.prependedSampleCount
-        let rms = Self.rms(of: samples)
         logger.info(
             "Audio stats: \(samples.count) samples (\(activeSampleCount) active, \(captureResult.prependedSampleCount) preroll), RMS=\(rms, format: .fixed(precision: 4))"
         )
@@ -328,7 +424,7 @@ final class AppCoordinator {
             trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
             feedback.notify(event: .error("Recording too short"))
-            finishTranscription(token: token)
+            _ = finishTranscription(token: token)
             return
         }
 
@@ -336,7 +432,7 @@ final class AppCoordinator {
             trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
             feedback.notify(event: .error("No speech detected"))
-            finishTranscription(token: token)
+            _ = finishTranscription(token: token)
             return
         }
 
@@ -353,7 +449,8 @@ final class AppCoordinator {
             trace.markTranscriptionStarted()
             let result: Result<String, Error>
             do {
-                let text = try self.transcriber.transcribe(samples: samples)
+                let transcriber = self.stateLock.withLock { self.transcriber }
+                let text = try transcriber.transcribe(samples: samples)
                 result = .success(text)
             } catch {
                 result = .failure(error)
@@ -362,10 +459,8 @@ final class AppCoordinator {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                guard self.isCurrentTranscription(token: token) else { return }
-
                 timeoutWorkItem.cancel()
-                self.finishTranscription(token: token)
+                guard self.finishTranscription(token: token) else { return }
 
                 switch result {
                 case .success(let text):
@@ -394,7 +489,7 @@ final class AppCoordinator {
             return
         }
 
-        guard accessibilityChecker.ensureAccessibilityPrompted() else {
+        guard accessibilityChecker.hasAccessibilityAccess() else {
             trace.log(logger: logger, outcome: .accessibilityDenied)
             logger.error("Accessibility permission missing")
             feedback.notify(event: .error("Accessibility permission required"))
@@ -417,30 +512,32 @@ final class AppCoordinator {
         paster.paste(trimmed)
     }
 
-    private func isCurrentTranscription(token: UUID) -> Bool {
+    /// Returns whether the completed result is still eligible for delivery.
+    /// A timed-out native inference cannot be cancelled, so it keeps ownership
+    /// of the serial worker until it returns; only then does the app become idle.
+    @discardableResult
+    private func finishTranscription(token: UUID) -> Bool {
         stateLock.withLock {
-            if case let .transcribing(current) = state {
-                return current == token
+            guard case let .transcribing(current, didTimeOut) = state,
+                  current == token else {
+                return false
             }
-            return false
-        }
-    }
 
-    private func finishTranscription(token: UUID) {
-        stateLock.withLock {
-            if case let .transcribing(current) = state, current == token {
-                state = .idle
-            }
+            state = .idle
+            return !didTimeOut
         }
     }
 
     private func handleTranscriptionTimeout(token: UUID, timeout: TimeInterval, trace: TranscriptionTrace) {
         let shouldNotify = stateLock.withLock { () -> Bool in
-            if case let .transcribing(current) = state, current == token {
-                state = .idle
-                return true
+            guard case let .transcribing(current, didTimeOut) = state,
+                  current == token,
+                  !didTimeOut else {
+                return false
             }
-            return false
+
+            state = .transcribing(current, didTimeOut: true)
+            return true
         }
 
         guard shouldNotify else { return }
@@ -448,6 +545,43 @@ final class AppCoordinator {
         trace.log(logger: logger, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
+    }
+
+    private func completeASRModelSwitch(
+        to kind: ASRModelKind,
+        restoring previousWarmupState: WarmupState,
+        result: Result<(ASRModelConfiguration, Transcriber), Error>
+    ) {
+        switch result {
+        case .success(let (model, newTranscriber)):
+            let previousTranscriber = stateLock.withLock {
+                let previousTranscriber = transcriber
+                transcriber = newTranscriber
+                currentASRModelKind = kind
+                return previousTranscriber
+            }
+            transcriptionQueue.async {
+                withExtendedLifetime(previousTranscriber) {}
+            }
+            modelSelectionStore(kind)
+            logger.info("Switched ASR model to \(kind.displayName) at \(model.url.path)")
+            Task { [weak self] in
+                await self?.warmUpModel()
+            }
+
+        case .failure(let error):
+            failASRModelSwitch(to: kind, restoring: previousWarmupState, error: error)
+        }
+    }
+
+    private func failASRModelSwitch(
+        to kind: ASRModelKind,
+        restoring previousWarmupState: WarmupState,
+        error: Error
+    ) {
+        stateLock.withLock { warmupState = previousWarmupState }
+        logger.error("Failed to switch ASR model to \(kind.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
+        feedback.notify(event: .error("Failed to switch audio model"))
     }
 
     private static func defaultTranscriptionTimeout(

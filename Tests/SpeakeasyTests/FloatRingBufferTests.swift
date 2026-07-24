@@ -1,5 +1,5 @@
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 final class FloatRingBufferTests: XCTestCase {
     func testReadLastOnEmptyBufferReturnsEmpty() {

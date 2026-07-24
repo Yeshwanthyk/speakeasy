@@ -2,16 +2,16 @@
 import PackageDescription
 
 let package = Package(
-    name: "Wisp",
+    name: "Speakeasy",
     platforms: [
         .macOS(.v12)
     ],
     products: [
-        .library(name: "Wisp", targets: ["Wisp"])
+        .library(name: "Speakeasy", targets: ["Speakeasy"])
     ],
     targets: [
         .target(
-            name: "Wisp",
+            name: "Speakeasy",
             path: "Sources",
             exclude: [
                 "AppDelegate.swift",
@@ -26,8 +26,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "WispTests",
-            dependencies: ["Wisp"],
+            name: "SpeakeasyTests",
+            dependencies: ["Speakeasy"],
             path: "Tests"
         )
     ]

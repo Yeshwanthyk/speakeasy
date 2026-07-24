@@ -1,6 +1,6 @@
 import AVFoundation
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 final class AudioCaptureTests: XCTestCase {
     private func makeEngine() throws -> FakeAudioEngine {

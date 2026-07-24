@@ -1,5 +1,5 @@
 import XCTest
-@testable import Wisp
+@testable import Speakeasy
 
 final class TranscriptionTraceTests: XCTestCase {
     func testDurationsAreComputedFromExplicitMarkers() {

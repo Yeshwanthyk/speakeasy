@@ -47,7 +47,7 @@ final class AudioCapture {
     private static let graceTimeoutPadding: TimeInterval = 0.020
 
     private let engine: AudioEngineProtocol
-    private let logger = Logger(subsystem: "com.wisp.app", category: "audio")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "audio")
     private let maxRecordingSamples: Int
     private let onLimitReached: (() -> Void)?
     private let onAwaitingGrace: (() -> Void)?

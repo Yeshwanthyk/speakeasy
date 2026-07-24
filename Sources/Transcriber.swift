@@ -1,6 +1,6 @@
 import Foundation
 
-protocol Transcriber {
+protocol Transcriber: Sendable {
     func transcribe(samples: ContiguousArray<Float>) throws -> String
     func warmUp() async throws
 }

@@ -8,6 +8,10 @@ enum PermissionError: Error {
 }
 
 enum Permissions {
+    static let accessibilitySettingsURL = URL(
+        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    )!
+
     static func requestMicrophoneAccess() async throws {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         switch status {
@@ -28,13 +32,22 @@ enum Permissions {
         }
     }
 
+    static func hasAccessibilityAccess() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    @discardableResult
     static func ensureAccessibilityPrompted() -> Bool {
-        if AXIsProcessTrusted() {
+        if hasAccessibilityAccess() {
             return true
         }
 
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let options = [promptKey: true] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
+    }
+
+    static func openAccessibilitySettings() {
+        NSWorkspace.shared.open(accessibilitySettingsURL)
     }
 }
