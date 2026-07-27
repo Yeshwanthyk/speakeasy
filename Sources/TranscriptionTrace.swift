@@ -6,6 +6,7 @@ struct TranscriptionTrace {
         case pasted
         case noSpeech
         case emptyAudio
+        case captureInterrupted
         case transcriptionFailed
         case timedOut
         case warmupBlocked

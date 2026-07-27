@@ -5,7 +5,7 @@ Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it
 ## Data Flow
 
 1. `KeyComboMonitor` receives the Hyper+S hotkey.
-2. `AppCoordinator` moves from idle to recording and tells `AudioCapture` to begin accumulating samples.
+2. `AppCoordinator` moves through `startingCapture` and enters recording only after `AudioCapture` confirms a fresh input callback.
 3. On the next hotkey press, `AppCoordinator` moves to transcribing, hides the screen flash, and calls `AudioCapture.endRecording()` on the injected transcription queue.
 4. `AudioCapture` returns captured samples plus pre-roll and stop-grace metadata.
 5. `AppCoordinator` rejects empty, too-short, or silent audio before transcription.
@@ -17,16 +17,18 @@ Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it
 ## State Machine
 
 ```text
-idle -> recording -> transcribing(token) -> idle
+idle -> startingCapture -> recording -> transcribing(token) -> idle
 ```
 
-The token prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
+Capture must confirm a running engine and a fresh converted input callback before `startingCapture` becomes `recording`. The token prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
 
 UI-affecting collaborators are main-actor isolated. Blocking capture stop and native inference run off the main thread.
 
 ## Audio Capture
 
 `AudioCapture` keeps `AVAudioEngine` prepared separately from recording state. Converted mono 16 kHz samples flow through a bounded ring buffer while idle. Recording prepends a short pre-roll window and uses an adaptive stop grace derived from recent callback cadence.
+
+The capture lifecycle observes `AVAudioEngineConfigurationChange` and wake events. Recovery is serialized off Apple's notification callback, invalidates callbacks from old graph generations, rebuilds the input format/converter/tap, and becomes ready only after a fresh converted callback. Route changes arriving during a rebuild are revalidated against a later callback or trigger another generation; transient failures receive bounded retries. A device change during recording aborts that recording rather than transcribing discontinuous audio.
 
 ## Model Lifecycle
 

@@ -27,12 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentAccessibilityGuidanceIfNeeded()
 
             do {
-                let coordinator = try await AppCoordinator()
+                let feedback = SystemFeedback()
+                let coordinator = try await AppCoordinator(feedback: feedback)
                 try coordinator.prepareCapture()
                 self.coordinator = coordinator
 
                 if let store = coordinator.transcriptStore {
-                    self.menuBarController = MenuBarController(
+                    let menuBarController = MenuBarController(
                         store: store,
                         paster: coordinator.paster,
                         currentASRModelKind: { [weak coordinator] in
@@ -42,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             coordinator?.switchASRModel(to: kind)
                         }
                     )
+                    feedback.setPresenter { [weak menuBarController] event in
+                        menuBarController?.showFeedback(event)
+                    }
+                    self.menuBarController = menuBarController
                 }
 
                 Task(priority: .utility) {

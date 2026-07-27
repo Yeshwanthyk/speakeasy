@@ -13,6 +13,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let selectASRModel: (ASRModelKind) -> Void
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
+    private var transientFeedback: UserFeedbackEvent?
+    private var feedbackGeneration = 0
 
     init(
         store: TranscriptStore,
@@ -31,6 +33,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             let image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Speakeasy")
             image?.isTemplate = true
             button.image = image
+            button.toolTip = "Speakeasy"
         }
 
         menu.delegate = self
@@ -38,10 +41,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
     }
 
+    func showFeedback(_ event: UserFeedbackEvent) {
+        transientFeedback = event
+        feedbackGeneration &+= 1
+        let generation = feedbackGeneration
+
+        if let button = statusItem.button {
+            button.title = " \(event.message)"
+            button.toolTip = event.message
+        }
+
+        let duration: TimeInterval
+        switch event {
+        case .status:
+            duration = 3
+        case .error:
+            duration = 6
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.feedbackGeneration == generation else {
+                return
+            }
+            self.transientFeedback = nil
+            if let button = self.statusItem.button {
+                button.title = ""
+                button.toolTip = "Speakeasy"
+            }
+        }
+    }
+
     // MARK: - NSMenuDelegate
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+
+        if let transientFeedback {
+            let feedbackItem = NSMenuItem(
+                title: transientFeedback.message,
+                action: nil,
+                keyEquivalent: ""
+            )
+            feedbackItem.isEnabled = false
+            menu.addItem(feedbackItem)
+            menu.addItem(.separator())
+        }
 
         let history = store.allEntries()
         if history.isEmpty {

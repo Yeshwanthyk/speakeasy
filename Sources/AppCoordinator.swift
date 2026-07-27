@@ -6,8 +6,10 @@ import os
 protocol AudioCapturing {
     /// Arm the engine at startup. Must be called before `beginRecording()`.
     func prepare() throws
-    /// Begin accumulating audio into buffers.
-    func beginRecording()
+    /// Receive runtime capture recovery and interruption events.
+    func setEventHandler(_ handler: @escaping @Sendable (AudioCaptureEvent) -> Void)
+    /// Begin accumulating audio only when the engine and input callback are healthy.
+    func beginRecording() throws
     /// Stop accumulating; flush and return all captured samples plus capture metadata.
     func endRecording() -> AudioCaptureResult
     /// Stop the engine entirely. Call at app termination.
@@ -45,6 +47,7 @@ struct SystemAccessibilityChecker: AccessibilityChecking {
 final class AppCoordinator: @unchecked Sendable {
     private enum State {
         case idle
+        case startingCapture
         case recording
         case transcribing(UUID, didTimeOut: Bool)
     }
@@ -69,9 +72,9 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     private enum Transition {
-        case start
+        case start(TranscriptionTrace)
         case stop(UUID, TranscriptionTrace)
-        case ignore
+        case ignore(String?)
     }
 
     private enum ModelSwitchStart {
@@ -105,6 +108,7 @@ final class AppCoordinator: @unchecked Sendable {
     private let stateLock = UnfairLock()
     private var state: State = .idle
     private var warmupState: WarmupState = .pending
+    private var suppressRecoverySuccessStatus = false
     /// Partial trace built during a recording session; nil when idle or transcribing.
     private var activeTrace: TranscriptionTrace?
     private let transcriptionQueue: DispatchQueue
@@ -155,6 +159,10 @@ final class AppCoordinator: @unchecked Sendable {
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.transcriptStore = transcriptStore
         self.transcriptionQueue = transcriptionQueue
+
+        audioCapture.setEventHandler { [weak self] event in
+            self?.handleAudioCaptureEvent(event)
+        }
 
         keyMonitor = keyMonitorFactory? { [weak self] in
             self?.toggleRecording()
@@ -224,6 +232,8 @@ final class AppCoordinator: @unchecked Sendable {
                 let previousWarmupState = warmupState
                 warmupState = .warming
                 return .start(previousWarmupState: previousWarmupState)
+            case .startingCapture:
+                return .reject("Wait for microphone reconnection")
             case .recording:
                 return .reject("Stop recording before switching models")
             case .transcribing:
@@ -263,7 +273,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     #if !SWIFT_PACKAGE
     @MainActor
-    convenience init() async throws {
+    convenience init(feedback: UserFeedback) async throws {
         let (model, transcriber) = try await Task.detached(priority: .userInitiated) {
             let kind = try ModelPathResolver.configuredASRModelKind()
             let model = try await ASRModelInstaller().resolveOrInstall(kind: kind)
@@ -271,7 +281,6 @@ final class AppCoordinator: @unchecked Sendable {
             return (model, transcriber)
         }.value
 
-        let feedback = SystemFeedback()
         let audioCapture = try AudioCapture(
             onLimitReached: { [feedback] in
                 feedback.notify(event: .error("Recording limit reached (6 minutes)"))
@@ -315,7 +324,7 @@ final class AppCoordinator: @unchecked Sendable {
     // MARK: - State Machine
     //
     // Hotkey input advances the coordinator through a single linear recording
-    // session: idle -> recording -> transcribing(token) -> idle. The token
+    // session: idle -> startingCapture -> recording -> transcribing(token) -> idle. The token
     // prevents timeout and transcription callbacks from completing stale work
     // after a later session has already moved the state forward.
 
@@ -323,16 +332,16 @@ final class AppCoordinator: @unchecked Sendable {
         let now = TranscriptionTrace.timestamp()
 
         let transition = stateLock.withLock { () -> Transition in
-            // Block hotkey until model warmup finishes
             guard warmupState.isReady else {
-                return .ignore
+                return .ignore("Model warming up, please wait")
             }
 
             switch state {
             case .idle:
-                state = .recording
-                activeTrace = TranscriptionTrace(hotkeyPressedAt: now)
-                return .start
+                state = .startingCapture
+                return .start(TranscriptionTrace(hotkeyPressedAt: now))
+            case .startingCapture:
+                return .ignore("Microphone reconnecting, please wait")
             case .recording:
                 let token = UUID()
                 state = .transcribing(token, didTimeOut: false)
@@ -341,19 +350,40 @@ final class AppCoordinator: @unchecked Sendable {
                 activeTrace = nil
                 return .stop(token, trace)
             case .transcribing:
-                return .ignore
+                return .ignore(nil)
             }
         }
 
         switch transition {
-        case .start:
-            Task { @MainActor [flash] in
-                flash.show(lineWidth: Self.flashLineWidth)
+        case .start(var trace):
+            do {
+                try audioCapture.beginRecording()
+                trace.markCaptureStarted()
+                let didStart = stateLock.withLock { () -> Bool in
+                    guard case .startingCapture = state else {
+                        return false
+                    }
+                    state = .recording
+                    activeTrace = trace
+                    return true
+                }
+                guard didStart else {
+                    return
+                }
+
+                Task { @MainActor [flash] in
+                    flash.show(lineWidth: Self.flashLineWidth)
+                }
+            } catch {
+                stateLock.withLock {
+                    if case .startingCapture = state {
+                        state = .idle
+                    }
+                    activeTrace = nil
+                }
+                logger.error("Recording start rejected: audio capture unavailable")
+                feedback.notify(event: .error("Microphone reconnecting, try again shortly"))
             }
-            audioCapture.beginRecording()
-            // Record actual beginRecording return time
-            let captureStarted = TranscriptionTrace.timestamp()
-            stateLock.withLock { activeTrace?.markCaptureStarted(at: captureStarted) }
 
         case .stop(let token, let trace):
             Task { @MainActor [flash] in
@@ -361,17 +391,86 @@ final class AppCoordinator: @unchecked Sendable {
             }
             stopAndTranscribe(token: token, trace: trace)
 
-        case .ignore:
-            let ws = stateLock.withLock { warmupState }
-            switch ws {
-            case .pending, .warming:
-                logger.info("Ignoring hotkey: model warmup in progress")
-                DispatchQueue.main.async { [feedback] in
-                    feedback.notify(event: .error("Model warming up, please wait"))
-                }
-            default:
+        case .ignore(let message):
+            guard let message else {
                 logger.debug("Ignoring hotkey while transcribing")
+                return
             }
+            logger.info("Ignoring hotkey: \(message, privacy: .public)")
+            feedback.notify(event: .error(message))
+        }
+    }
+
+    private func handleAudioCaptureEvent(_ event: AudioCaptureEvent) {
+        DispatchQueue.main.async { [weak self] in
+            self?.applyAudioCaptureEvent(event)
+        }
+    }
+
+    private func applyAudioCaptureEvent(_ event: AudioCaptureEvent) {
+        dispatchPrecondition(condition: .onQueue(.main))
+
+        switch event {
+        case .recoveryStarted(let interruptedRecording):
+            guard interruptedRecording else {
+                feedback.notify(event: .status("Microphone reconnecting…"))
+                return
+            }
+
+            let interruption = stateLock.withLock { () -> (shouldNotify: Bool, shouldHideFlash: Bool) in
+                suppressRecoverySuccessStatus = true
+                switch state {
+                case .idle:
+                    return (false, false)
+                case .startingCapture:
+                    state = .idle
+                    activeTrace = nil
+                    return (true, false)
+                case .recording:
+                    state = .idle
+                    activeTrace = nil
+                    return (true, true)
+                case .transcribing:
+                    // `endRecording()` still owns the capture buffers. Keep the
+                    // token until its interrupted result releases that ownership.
+                    return (false, false)
+                }
+            }
+            guard interruption.shouldNotify else {
+                return
+            }
+            if interruption.shouldHideFlash {
+                MainActor.assumeIsolated {
+                    flash.hide(completion: nil)
+                }
+            }
+            logger.error("Recording interrupted by microphone configuration change")
+            feedback.notify(event: .error("Recording interrupted by microphone change"))
+
+        case .recoverySucceeded:
+            let shouldNotify = stateLock.withLock { () -> Bool in
+                let shouldNotify = !suppressRecoverySuccessStatus
+                suppressRecoverySuccessStatus = false
+                return shouldNotify
+            }
+            logger.info("Microphone reconnected")
+            if shouldNotify {
+                feedback.notify(event: .status("Microphone reconnected"))
+            }
+
+        case .recoveryFailed:
+            stateLock.withLock {
+                suppressRecoverySuccessStatus = false
+                switch state {
+                case .startingCapture, .recording:
+                    state = .idle
+                    activeTrace = nil
+                case .idle, .transcribing:
+                    break
+                }
+            }
+            logger.error("Microphone reconnection failed")
+            feedback.notify(event: .error("Microphone reconnection failed"))
         }
     }
 
@@ -409,6 +508,14 @@ final class AppCoordinator: @unchecked Sendable {
             prependedSampleCount: captureResult.prependedSampleCount,
             graceDurationMs: captureResult.graceDurationMs
         )
+
+        guard !captureResult.wasInterrupted else {
+            trace.log(logger: logger, outcome: .captureInterrupted)
+            if finishTranscription(token: token) {
+                feedback.notify(event: .error("Recording interrupted by microphone change"))
+            }
+            return
+        }
 
         guard !samples.isEmpty else {
             trace.log(logger: logger, outcome: .emptyAudio)

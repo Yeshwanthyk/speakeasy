@@ -498,6 +498,159 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(transcriber.transcribeUsedExpectedQueue, true)
     }
 
+    // MARK: - Capture recovery
+
+    func testCaptureStartFailureRollsBackAndKeepsFlashHidden() {
+        let audio = AudioCaptureStub(
+            samples: Self.validSamples,
+            beginError: AudioCaptureError.unavailable
+        )
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let flash = FlashStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            flash: flash,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+
+        XCTAssertFalse(coordinator.isRecording)
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertEqual(flash.showCount, 0)
+        XCTAssertEqual(feedback.errors, ["Microphone reconnecting, try again shortly"])
+    }
+
+    func testCaptureInterruptionReturnsCoordinatorToIdleAndHidesFlash() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let flash = FlashStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            flash: flash,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { flash.showCount == 1 })
+        audio.emit(.recoveryStarted(interruptedRecording: true))
+        audio.emit(.recoverySucceeded)
+
+        XCTAssertTrue(waitUntil {
+            feedback.errors.contains("Recording interrupted by microphone change")
+        })
+        XCTAssertFalse(coordinator.isRecording)
+        XCTAssertEqual(flash.hideCount, 1)
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertEqual(
+            feedback.events,
+            [.error("Recording interrupted by microphone change")]
+        )
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(coordinator.isRecording)
+        XCTAssertEqual(audio.beginCount, 2)
+    }
+
+    func testInterruptedStopRetainsSessionOwnershipUntilEndRecordingReturns() {
+        let endRecordingStarted = DispatchSemaphore(value: 0)
+        let releaseEndRecording = DispatchSemaphore(value: 0)
+        let audio = AudioCaptureStub(
+            samples: Self.validSamples,
+            wasInterrupted: true,
+            endRecordingStarted: endRecordingStarted,
+            endRecordingGate: releaseEndRecording
+        )
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertEqual(endRecordingStarted.wait(timeout: .now() + 1), .success)
+
+        let recoveryEventsApplied = expectation(description: "recovery events applied")
+        audio.emit(.recoveryStarted(interruptedRecording: true))
+        audio.emit(.recoverySucceeded)
+        DispatchQueue.main.async {
+            recoveryEventsApplied.fulfill()
+        }
+        wait(for: [recoveryEventsApplied], timeout: 1)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertTrue(feedback.events.isEmpty)
+
+        releaseEndRecording.signal()
+        XCTAssertTrue(waitUntil {
+            feedback.errors == ["Recording interrupted by microphone change"]
+        })
+        XCTAssertEqual(transcriber.callCount, 0)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 2)
+    }
+
+    func testInterruptedCaptureResultNeverReachesTranscriber() {
+        let audio = AudioCaptureStub(
+            samples: Self.validSamples,
+            wasInterrupted: true
+        )
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        XCTAssertTrue(waitUntil {
+            feedback.errors.contains("Recording interrupted by microphone change")
+        })
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertFalse(coordinator.isRecording)
+    }
+
+    func testRecoveryEventsPreserveStatusAndFailureMessages() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("ignored"))
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            feedback: feedback
+        )
+
+        audio.emit(.recoveryStarted(interruptedRecording: false))
+        audio.emit(.recoverySucceeded)
+        audio.emit(.recoveryFailed)
+
+        XCTAssertTrue(waitUntil { feedback.events.count == 3 })
+        XCTAssertEqual(
+            feedback.events,
+            [
+                .status("Microphone reconnecting…"),
+                .status("Microphone reconnected"),
+                .error("Microphone reconnection failed")
+            ]
+        )
+        XCTAssertFalse(coordinator.isRecording)
+    }
+
     // MARK: - Phase 1: Warmup gate
 
     /// Hotkey during warmup must be silently dropped; no audio start.
@@ -696,10 +849,15 @@ private final class AudioCaptureStub: AudioCapturing {
     private var _lastEndRecordingWasMainThread: Bool?
     private var _endRecordingUsedExpectedQueue: Bool?
     private let prepareError: Error?
+    private let beginError: Error?
+    private var eventHandler: (@Sendable (AudioCaptureEvent) -> Void)?
     private let samples: ContiguousArray<Float>
     private let prependedSampleCount: Int
     private let graceDurationMs: Double
+    private let wasInterrupted: Bool
     private let expectedQueue: (key: DispatchSpecificKey<String>, value: String)?
+    private let endRecordingStarted: DispatchSemaphore?
+    private let endRecordingGate: DispatchSemaphore?
 
     var prepareCount: Int { counterLock.withLock { _prepareCount } }
     var beginCount: Int { counterLock.withLock { _beginCount } }
@@ -715,15 +873,23 @@ private final class AudioCaptureStub: AudioCapturing {
     init(
         samples: ContiguousArray<Float>,
         prepareError: Error? = nil,
+        beginError: Error? = nil,
         prependedSampleCount: Int = 0,
         graceDurationMs: Double = 0,
-        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil
+        wasInterrupted: Bool = false,
+        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil,
+        endRecordingStarted: DispatchSemaphore? = nil,
+        endRecordingGate: DispatchSemaphore? = nil
     ) {
         self.samples = samples
         self.prepareError = prepareError
+        self.beginError = beginError
         self.prependedSampleCount = prependedSampleCount
         self.graceDurationMs = graceDurationMs
+        self.wasInterrupted = wasInterrupted
         self.expectedQueue = expectedQueue
+        self.endRecordingStarted = endRecordingStarted
+        self.endRecordingGate = endRecordingGate
     }
 
     func prepare() throws {
@@ -731,8 +897,22 @@ private final class AudioCaptureStub: AudioCapturing {
         if let error = prepareError { throw error }
     }
 
-    func beginRecording() {
+    func setEventHandler(_ handler: @escaping @Sendable (AudioCaptureEvent) -> Void) {
+        counterLock.withLock {
+            eventHandler = handler
+        }
+    }
+
+    func beginRecording() throws {
         counterLock.withLock { _beginCount += 1 }
+        if let beginError {
+            throw beginError
+        }
+    }
+
+    func emit(_ event: AudioCaptureEvent) {
+        let handler = counterLock.withLock { eventHandler }
+        handler?(event)
     }
 
     func endRecording() -> AudioCaptureResult {
@@ -743,10 +923,13 @@ private final class AudioCaptureStub: AudioCapturing {
                 _endRecordingUsedExpectedQueue = DispatchQueue.getSpecific(key: expectedQueue.key) == expectedQueue.value
             }
         }
+        endRecordingStarted?.signal()
+        endRecordingGate?.wait()
         return AudioCaptureResult(
             samples: samples,
             prependedSampleCount: prependedSampleCount,
-            graceDurationMs: graceDurationMs
+            graceDurationMs: graceDurationMs,
+            wasInterrupted: wasInterrupted
         )
     }
 
