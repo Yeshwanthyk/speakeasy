@@ -909,6 +909,9 @@ final class AudioCapture: @unchecked Sendable {
         }
 
         let inputNode = engine.captureInputNode
+        // Keep voice processing disabled here. This graph intentionally runs while idle
+        // to preserve pre-roll and start latency; enabling its ducking would therefore
+        // lower other apps for the entire lifetime of the prepared capture graph.
         let newInputFormat = inputNode.inputFormat(forBus: 0)
         guard newInputFormat.sampleRate > 0, newInputFormat.channelCount > 0 else {
             markStartFailed(generation: generation)
