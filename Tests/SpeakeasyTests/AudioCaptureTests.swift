@@ -62,6 +62,27 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertEqual(engine.input.removeTapCount, 1)
     }
 
+    func testRecordingBufferCapacitySurvivesResultHandoff() throws {
+        let engine = try makeEngine()
+        let maxRecordingSamples = 32_000
+        let capture = try AudioCapture(
+            maxRecordingSamples: maxRecordingSamples,
+            engine: engine
+        )
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        try capture.beginRecording()
+        try engine.input.emit(frameLength: 8_000)
+
+        let result = capture.endRecording()
+        let capacities = capture.bufferCapacitiesForTesting()
+
+        XCTAssertFalse(result.samples.isEmpty)
+        XCTAssertGreaterThanOrEqual(capacities.front, maxRecordingSamples)
+        XCTAssertGreaterThanOrEqual(capacities.back, 16_000)
+    }
+
     func testLimitReachedDuringGraceSignalsStopWait() throws {
         let engine = try makeEngine()
         let awaitingGrace = expectation(description: "awaiting grace")

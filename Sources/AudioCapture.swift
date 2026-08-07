@@ -41,6 +41,11 @@ extension AVAudioEngine: AudioEngineProtocol {
     var captureInputNode: AudioInputNodeProtocol { inputNode }
 }
 
+struct AudioCaptureBufferCapacities: Equatable {
+    let front: Int
+    let back: Int
+}
+
 struct AudioCaptureResult {
     let samples: ContiguousArray<Float>
     let prependedSampleCount: Int
@@ -268,6 +273,12 @@ final class AudioCapture: @unchecked Sendable {
         }
     }
 
+    func bufferCapacitiesForTesting() -> AudioCaptureBufferCapacities {
+        let front = frontLock.withLock { frontBuffer.capacity }
+        let back = backLock.withLock { backBuffer.capacity }
+        return AudioCaptureBufferCapacities(front: front, back: back)
+    }
+
     func prepare() throws {
         try lifecycleQueue.sync {
             let shouldPrepare = stateLock.withLock { () -> Bool in
@@ -382,7 +393,9 @@ final class AudioCapture: @unchecked Sendable {
 
         let samples = frontLock.withLock { () -> ContiguousArray<Float> in
             var result = ContiguousArray<Float>()
-            swap(&result, &frontBuffer)
+            result.reserveCapacity(frontBuffer.count)
+            result.append(contentsOf: frontBuffer)
+            frontBuffer.removeAll(keepingCapacity: true)
             return result
         }
 
@@ -441,21 +454,15 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     private func flushBackBuffer() {
-        let pending = backLock.withLock { () -> ContiguousArray<Float> in
+        backLock.withLock {
             guard !backBuffer.isEmpty else {
-                return ContiguousArray()
+                return
             }
-            var temp = ContiguousArray<Float>()
-            swap(&temp, &backBuffer)
-            return temp
-        }
 
-        guard !pending.isEmpty else {
-            return
-        }
-
-        frontLock.withLock {
-            frontBuffer.append(contentsOf: pending)
+            frontLock.withLock {
+                frontBuffer.append(contentsOf: backBuffer)
+            }
+            backBuffer.removeAll(keepingCapacity: true)
         }
     }
 
