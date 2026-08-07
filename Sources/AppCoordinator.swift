@@ -36,12 +36,6 @@ extension Pasting {
     }
 }
 
-@MainActor
-protocol Flashing {
-    func show(lineWidth: CGFloat)
-    func hide(completion: (() -> Void)?)
-}
-
 protocol AccessibilityChecking {
     func hasAccessibilityAccess() -> Bool
 }
@@ -59,7 +53,6 @@ enum TranscriptCorrectionUpdateError: Error, Equatable {
 }
 
 extension AudioCapture: AudioCapturing {}
-extension ScreenEdgeFlash: Flashing {}
 
 struct SystemAccessibilityChecker: AccessibilityChecking {
     func hasAccessibilityAccess() -> Bool {
@@ -103,11 +96,17 @@ final class AppCoordinator: @unchecked Sendable {
         case ignore(String?)
     }
 
-    private enum TranscriptionSettlement {
+    private enum TranscriptionSettlement: Equatable {
         case eligible
         case timedOut
         case cancelled
         case stale
+    }
+
+    private enum RecordingFeedbackTransition {
+        case recording
+        case processing
+        case hidden
     }
 
     private enum ModelSwitchStart {
@@ -116,7 +115,6 @@ final class AppCoordinator: @unchecked Sendable {
         case reject(String)
     }
 
-    private static let flashLineWidth: CGFloat = 3
     private static let transcriptionSampleRate: Double = 16_000
     private static let minTranscriptionTimeout: TimeInterval = 30
     private static let maxTranscriptionTimeout: TimeInterval = 600
@@ -168,7 +166,8 @@ final class AppCoordinator: @unchecked Sendable {
     private var invocationMode: DictationInvocationMode = .toggle
     private var dictationShortcut: DictationShortcut
     private let transcriptionQueue: DispatchQueue
-    private let flash: Flashing
+    private let recordingFeedback: RecordingFeedbackPresenting
+    private var recordingFeedbackGeneration: UInt64 = 0
     private var keyMonitor: DictationKeyMonitoring?
 
     var isRecording: Bool {
@@ -184,7 +183,7 @@ final class AppCoordinator: @unchecked Sendable {
         audioCapture: AudioCapturing,
         transcriber: Transcriber,
         paster: Pasting,
-        flash: Flashing,
+        recordingFeedback: RecordingFeedbackPresenting,
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
@@ -211,7 +210,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
         self.paster = paster
-        self.flash = flash
+        self.recordingFeedback = recordingFeedback
         self.feedback = feedback
         self.accessibilityChecker = accessibilityChecker
         self.deliveryTargetProvider = deliveryTargetProvider
@@ -279,6 +278,7 @@ final class AppCoordinator: @unchecked Sendable {
             activeDeliveryTarget = nil
         }
         failedCaptureReplayBuffer.clear()
+        transitionRecordingFeedback(to: .hidden)
         audioCapture.shutdown()
     }
 
@@ -485,6 +485,7 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
 
+        transitionRecordingFeedback(to: .processing)
         beginNativeTranscription(
             samples: retry.lease.samples,
             activeSampleCount: retry.lease.samples.count,
@@ -599,7 +600,9 @@ final class AppCoordinator: @unchecked Sendable {
             initialInputDeviceUID: MicrophoneSelectionStore.selectedUID()
         )
         let paster = PasteboardPaster()
-        let flash = ScreenEdgeFlash()
+        let recordingFeedback = RecordingIndicator {
+            audioCapture.microphoneLevelSnapshot()
+        }
         let correctionStore = TranscriptCorrectionStore()
         let postProcessor = (try? TranscriptPostProcessor(corrections: correctionStore.allCorrections()))
             ?? TranscriptPostProcessor()
@@ -616,7 +619,7 @@ final class AppCoordinator: @unchecked Sendable {
             audioCapture: audioCapture,
             transcriber: transcriber,
             paster: paster,
-            flash: flash,
+            recordingFeedback: recordingFeedback,
             feedback: feedback,
             accessibilityChecker: SystemAccessibilityChecker(),
             asrModelKind: model.kind,
@@ -782,9 +785,7 @@ final class AppCoordinator: @unchecked Sendable {
                     return
                 }
 
-                Task { @MainActor [flash] in
-                    flash.show(lineWidth: Self.flashLineWidth)
-                }
+                transitionRecordingFeedback(to: .recording)
             } catch {
                 stateLock.withLock {
                     if case .startingCapture = state {
@@ -798,16 +799,12 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
         case .stop(let token, let runID, let trace, let target):
-            Task { @MainActor [flash] in
-                flash.hide(completion: nil)
-            }
+            transitionRecordingFeedback(to: .processing)
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
 
         case .discardCapture(let trace, let notify):
             audioCapture.discardRecording()
-            Task { @MainActor [flash] in
-                flash.hide(completion: nil)
-            }
+            transitionRecordingFeedback(to: .hidden)
             if let trace {
                 recordTerminal(trace: trace, outcome: .cancelled)
             }
@@ -816,6 +813,7 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
         case .cancelTranscription(let runID, let trace):
+            transitionRecordingFeedback(to: .hidden)
             let transcriber = stateLock.withLock { self.transcriber }
             transcriber.cancel(runID: runID)
             recordTerminal(trace: trace, outcome: .cancelled)
@@ -858,7 +856,7 @@ final class AppCoordinator: @unchecked Sendable {
                 return
             }
 
-            let interruption = stateLock.withLock { () -> (shouldNotify: Bool, shouldHideFlash: Bool) in
+            let interruption = stateLock.withLock { () -> (shouldNotify: Bool, shouldHideFeedback: Bool) in
                 suppressRecoverySuccessStatus = true
                 switch state {
                 case .idle:
@@ -882,10 +880,8 @@ final class AppCoordinator: @unchecked Sendable {
             guard interruption.shouldNotify else {
                 return
             }
-            if interruption.shouldHideFlash {
-                MainActor.assumeIsolated {
-                    flash.hide(completion: nil)
-                }
+            if interruption.shouldHideFeedback {
+                transitionRecordingFeedback(to: .hidden)
             }
             logger.error("Recording interrupted by microphone configuration change")
             feedback.notify(event: .error("Recording interrupted by microphone change"))
@@ -902,16 +898,25 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
         case .recoveryFailed:
-            stateLock.withLock {
+            let shouldHideFeedback = stateLock.withLock { () -> Bool in
                 suppressRecoverySuccessStatus = false
                 switch state {
-                case .startingCapture, .recording:
+                case .startingCapture:
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    return false
+                case .recording:
+                    state = .idle
+                    activeTrace = nil
+                    activeDeliveryTarget = nil
+                    return true
                 case .idle, .transcribing:
-                    break
+                    return false
                 }
+            }
+            if shouldHideFeedback {
+                transitionRecordingFeedback(to: .hidden)
             }
             logger.error("Microphone reconnection failed")
             feedback.notify(event: .error("Microphone reconnection failed"))
@@ -1366,7 +1371,7 @@ final class AppCoordinator: @unchecked Sendable {
     /// it settles; only then does the app become idle.
     @discardableResult
     private func finishTranscription(token: UUID) -> TranscriptionSettlement {
-        stateLock.withLock {
+        let settlement = stateLock.withLock { () -> TranscriptionSettlement in
             guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
                   current == token else {
                 return .stale
@@ -1378,6 +1383,34 @@ final class AppCoordinator: @unchecked Sendable {
             if didTimeOut { return .timedOut }
             if didCancel { return .cancelled }
             return .eligible
+        }
+
+        if settlement != .stale {
+            transitionRecordingFeedback(to: .hidden)
+        }
+        return settlement
+    }
+
+    private func transitionRecordingFeedback(to transition: RecordingFeedbackTransition) {
+        let generation = stateLock.withLock { () -> UInt64 in
+            recordingFeedbackGeneration &+= 1
+            return recordingFeedbackGeneration
+        }
+
+        Task { @MainActor [self, recordingFeedback] in
+            let isCurrent = stateLock.withLock {
+                recordingFeedbackGeneration == generation
+            }
+            guard isCurrent else { return }
+
+            switch transition {
+            case .recording:
+                recordingFeedback.showRecording()
+            case .processing:
+                recordingFeedback.showProcessing()
+            case .hidden:
+                recordingFeedback.hide()
+            }
         }
     }
 
@@ -1415,6 +1448,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard let cancellation, cancellation.shouldNotify else { return }
 
+        transitionRecordingFeedback(to: .hidden)
         let transcriber = stateLock.withLock { self.transcriber }
         transcriber.cancel(runID: cancellation.runID)
         recordTerminal(trace: trace, outcome: .timedOut)

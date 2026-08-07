@@ -20,7 +20,7 @@ final class AppCoordinatorTests: XCTestCase {
         audio: AudioCaptureStub,
         transcriber: FakeTranscriber,
         paster: PasterStub = PasterStub(),
-        flash: FlashStub? = nil,
+        recordingFeedback: RecordingFeedbackStub? = nil,
         feedback: FeedbackStub = FeedbackStub(),
         accessibility: AccessibilityStub = AccessibilityStub(allowed: true),
         timeout: TimeInterval = 1.0,
@@ -40,7 +40,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: transcriber,
             paster: paster,
-            flash: flash ?? FlashStub(),
+            recordingFeedback: recordingFeedback ?? RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: accessibility,
             hallucinationFilter: hallucinationFilter,
@@ -198,24 +198,63 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Hello"))
         let paster = PasterStub()
-        let flash = FlashStub()
+        let recordingFeedback = RecordingFeedbackStub()
         let feedback = FeedbackStub()
 
         let pasted = expectation(description: "paste")
         paster.onPaste = { pasted.fulfill() }
 
-        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, flash: flash, feedback: feedback)
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            recordingFeedback: recordingFeedback,
+            feedback: feedback
+        )
 
         coordinator.toggleRecording()
         XCTAssertEqual(audio.startCount, 1)
+        XCTAssertTrue(waitUntil { recordingFeedback.phases == [.recording] })
 
         coordinator.toggleRecording()
         wait(for: [pasted], timeout: 1.0)
 
         XCTAssertEqual(paster.pastedTexts, ["Hello"])
-        XCTAssertEqual(flash.showCount, 1)
-        XCTAssertEqual(flash.hideCount, 1)
+        XCTAssertEqual(recordingFeedback.phases, [.recording, .processing])
+        XCTAssertTrue(waitUntil { recordingFeedback.hideCount == 1 })
         XCTAssertTrue(feedback.errors.isEmpty)
+    }
+
+    func testStaleCompletionHideCannotDismissANewerRecording() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let paster = PasterStub()
+        let recordingFeedback = RecordingFeedbackStub()
+        let pasted = expectation(description: "paste")
+        var coordinator: AppCoordinator?
+        paster.onPaste = {
+            coordinator?.toggleRecording()
+            pasted.fulfill()
+        }
+        coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            recordingFeedback: recordingFeedback
+        )
+
+        coordinator?.toggleRecording()
+        XCTAssertTrue(waitUntil { recordingFeedback.phases == [.recording] })
+        coordinator?.toggleRecording()
+        wait(for: [pasted], timeout: 1.0)
+
+        XCTAssertTrue(waitUntil { audio.beginCount == 2 })
+        XCTAssertTrue(
+            waitUntil {
+                recordingFeedback.phases == [.recording, .processing, .recording]
+            }
+        )
+        XCTAssertEqual(recordingFeedback.hideCount, 0)
     }
 
     func testTranscriptionFailureNotifiesUser() {
@@ -249,7 +288,10 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(waitUntil { transcriber.callCount == 2 })
         XCTAssertEqual(audio.endCount, 1)
         XCTAssertEqual(transcriber.sampleInputs, [Self.validSamples, Self.validSamples])
-        XCTAssertTrue(coordinator.canRetryFailedCapture(), "A settled retry failure remains explicitly retryable")
+        XCTAssertTrue(
+            waitUntil { coordinator.canRetryFailedCapture() },
+            "A settled retry failure remains explicitly retryable"
+        )
     }
 
     func testQueuedTranscriptionTimeoutRetainsCaptureForReplay() {
@@ -362,6 +404,7 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Late"), delay: 0.2)
         let paster = PasterStub()
+        let recordingFeedback = RecordingFeedbackStub()
         let feedback = FeedbackStub()
 
         let timedOut = expectation(description: "timeout")
@@ -369,12 +412,20 @@ final class AppCoordinatorTests: XCTestCase {
             if message == "Transcription timed out" { timedOut.fulfill() }
         }
 
-        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback, timeout: 0.05)
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            recordingFeedback: recordingFeedback,
+            feedback: feedback,
+            timeout: 0.05
+        )
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
 
         wait(for: [timedOut], timeout: 1.0)
+        XCTAssertTrue(waitUntil { recordingFeedback.hideCount == 1 })
 
         coordinator.toggleRecording()
         coordinator.toggleRecording()
@@ -432,6 +483,7 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("late private text"), delay: 0.2)
         let paster = PasterStub()
+        let recordingFeedback = RecordingFeedbackStub()
         let feedback = FeedbackStub()
         let cancelled = expectation(description: "cancelled")
         feedback.onError = { message in
@@ -442,6 +494,7 @@ final class AppCoordinatorTests: XCTestCase {
             audio: audio,
             transcriber: transcriber,
             paster: paster,
+            recordingFeedback: recordingFeedback,
             feedback: feedback,
             timeout: 1.0,
             diagnosticsStore: diagnostics
@@ -452,6 +505,7 @@ final class AppCoordinatorTests: XCTestCase {
 
         coordinator.cancelTranscription()
         wait(for: [cancelled], timeout: 1.0)
+        XCTAssertTrue(waitUntil { recordingFeedback.hideCount == 1 })
 
         coordinator.toggleRecording()
         XCTAssertEqual(audio.beginCount, 1)
@@ -693,7 +747,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: initialTranscriber,
             paster: paster,
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
             asrModelKind: .parakeetUnified,
@@ -756,7 +810,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: AudioCaptureStub(samples: Self.validSamples),
             transcriber: initialTranscriber,
             paster: PasterStub(),
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
             asrModelKind: .parakeetUnified,
@@ -806,7 +860,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: initialTranscriber,
             paster: paster,
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
             asrModelKind: .parakeetUnified,
@@ -854,7 +908,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: transcriber,
             paster: PasterStub(),
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
             asrModelKind: .parakeetUnified,
@@ -1106,7 +1160,7 @@ final class AppCoordinatorTests: XCTestCase {
             audioCapture: audio,
             transcriber: transcriber,
             paster: paster,
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: feedback,
             accessibilityChecker: accessibility,
             transcriptionTimeoutProvider: { _ in 1.0 },
@@ -1429,18 +1483,18 @@ final class AppCoordinatorTests: XCTestCase {
 
     // MARK: - Capture recovery
 
-    func testCaptureStartFailureRollsBackAndKeepsFlashHidden() {
+    func testCaptureStartFailureRollsBackAndKeepsRecordingFeedbackHidden() {
         let audio = AudioCaptureStub(
             samples: Self.validSamples,
             beginError: AudioCaptureError.unavailable
         )
         let transcriber = FakeTranscriber(result: .success("ignored"))
-        let flash = FlashStub()
+        let recordingFeedback = RecordingFeedbackStub()
         let feedback = FeedbackStub()
         let coordinator = makeCoordinator(
             audio: audio,
             transcriber: transcriber,
-            flash: flash,
+            recordingFeedback: recordingFeedback,
             feedback: feedback
         )
 
@@ -1448,24 +1502,24 @@ final class AppCoordinatorTests: XCTestCase {
 
         XCTAssertFalse(coordinator.isRecording)
         XCTAssertEqual(audio.beginCount, 1)
-        XCTAssertEqual(flash.showCount, 0)
+        XCTAssertEqual(recordingFeedback.showCount, 0)
         XCTAssertEqual(feedback.errors, ["Microphone reconnecting, try again shortly"])
     }
 
-    func testCaptureInterruptionReturnsCoordinatorToIdleAndHidesFlash() {
+    func testCaptureInterruptionReturnsCoordinatorToIdleAndHidesRecordingFeedback() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("ignored"))
-        let flash = FlashStub()
+        let recordingFeedback = RecordingFeedbackStub()
         let feedback = FeedbackStub()
         let coordinator = makeCoordinator(
             audio: audio,
             transcriber: transcriber,
-            flash: flash,
+            recordingFeedback: recordingFeedback,
             feedback: feedback
         )
 
         coordinator.toggleRecording()
-        XCTAssertTrue(waitUntil { flash.showCount == 1 })
+        XCTAssertTrue(waitUntil { recordingFeedback.showCount == 1 })
         audio.emit(.recoveryStarted(interruptedRecording: true))
         audio.emit(.recoverySucceeded)
 
@@ -1473,7 +1527,7 @@ final class AppCoordinatorTests: XCTestCase {
             feedback.errors.contains("Recording interrupted by microphone change")
         })
         XCTAssertFalse(coordinator.isRecording)
-        XCTAssertEqual(flash.hideCount, 1)
+        XCTAssertTrue(waitUntil { recordingFeedback.hideCount == 1 })
         XCTAssertEqual(transcriber.callCount, 0)
         XCTAssertEqual(
             feedback.events,
@@ -1703,7 +1757,7 @@ final class AudioCaptureLifecycleTests: XCTestCase {
             audioCapture: audio,
             transcriber: transcriber,
             paster: paster,
-            flash: FlashStub(),
+            recordingFeedback: RecordingFeedbackStub(),
             feedback: FeedbackStub(),
             accessibilityChecker: AccessibilityStub(allowed: true),
             transcriptionTimeoutProvider: { _ in 1.0 },
@@ -2019,12 +2073,23 @@ private final class TestCoordinatorTargetProvider: DeliveryTargetProviding {
     func isRunning(_ application: TranscriptDeliveryApplication) -> Bool { true }
 }
 
-private final class FlashStub: Flashing {
-    private(set) var showCount = 0
+private final class RecordingFeedbackStub: RecordingFeedbackPresenting {
+    private(set) var phases: [RecordingFeedbackPhase] = []
     private(set) var hideCount = 0
 
-    func show(lineWidth: CGFloat) { showCount += 1 }
-    func hide(completion: (() -> Void)?) { hideCount += 1; completion?() }
+    var showCount: Int { phases.filter { $0 == .recording }.count }
+
+    func showRecording() {
+        phases.append(.recording)
+    }
+
+    func showProcessing() {
+        phases.append(.processing)
+    }
+
+    func hide() {
+        hideCount += 1
+    }
 }
 
 private final class KeyMonitorStub: DictationKeyMonitoring {

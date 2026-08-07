@@ -84,6 +84,7 @@ ICON_FILE="$RESOURCES_DIR/speakeasy.icns"
 iconutil -c icns "$ICONSET_DIR" -o "$ICON_FILE"
 
 cp "$ROOT_DIR/Info.plist" "$STAGED_PLIST"
+cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 plutil -replace CFBundleShortVersionString -string "$MARKETING_VERSION" "$STAGED_PLIST"
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$STAGED_PLIST"
 cp "$RUST_DIR/target/release/libasr_bridge.dylib" "$FRAMEWORKS_DIR/"
