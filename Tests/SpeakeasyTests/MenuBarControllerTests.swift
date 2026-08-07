@@ -29,6 +29,25 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertFalse(item?.submenu?.items.first?.isEnabled ?? true)
     }
 
+    func testMenuExposesOnlyDefaultAndFallbackModels() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-models-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let controller = MenuBarController(store: store)
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let modelItems = menu.items.first(where: { $0.title == "Audio Model" })?.submenu?.items
+        XCTAssertEqual(
+            modelItems?.map(\.title),
+            ["Parakeet TDT+CTC 110M Q8_0", "Parakeet Unified EN 0.6B Q8_0"]
+        )
+        XCTAssertEqual(modelItems?.first?.state, .on)
+    }
+
     func testMenuExposesInvocationModesAndCancelControl() {
         let store = TranscriptStore(
             fileURL: FileManager.default.temporaryDirectory

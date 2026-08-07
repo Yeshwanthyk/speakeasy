@@ -40,7 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             _ = coordinator?.pasteTranscript(text)
                         },
                         currentASRModelKind: { [weak coordinator] in
-                            coordinator?.selectedASRModelKind() ?? .parakeetUnified
+                            coordinator?.selectedASRModelKind() ?? .parakeet110M
                         },
                         selectASRModel: { [weak coordinator] kind in
                             coordinator?.switchASRModel(to: kind)

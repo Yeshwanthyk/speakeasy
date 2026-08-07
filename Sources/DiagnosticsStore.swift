@@ -52,18 +52,46 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
 }
 
 struct BackendCounters: Codable, Equatable, Sendable {
+    var parakeet110M = 0
     var parakeetUnified = 0
-    var parakeetTDT = 0
-    var nemotron = 0
     var unknown = 0
 
     mutating func increment(_ backend: String) {
         switch backend {
+        case "parakeet-tdt-ctc-110m": parakeet110M += 1
         case "parakeet-unified-en": parakeetUnified += 1
-        case "parakeet-tdt-v3": parakeetTDT += 1
-        case "nemotron-3.5-asr": nemotron += 1
+        case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3",
+             "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
+            parakeetUnified += 1
         default: unknown += 1
         }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case parakeet110M
+        case parakeetUnified
+        case parakeetTDT
+        case nemotron
+        case unknown
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        parakeet110M = try container.decodeIfPresent(Int.self, forKey: .parakeet110M) ?? 0
+        let unified = try container.decodeIfPresent(Int.self, forKey: .parakeetUnified) ?? 0
+        let legacyTDT = try container.decodeIfPresent(Int.self, forKey: .parakeetTDT) ?? 0
+        let legacyNemotron = try container.decodeIfPresent(Int.self, forKey: .nemotron) ?? 0
+        parakeetUnified = unified + legacyTDT + legacyNemotron
+        unknown = try container.decodeIfPresent(Int.self, forKey: .unknown) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(parakeet110M, forKey: .parakeet110M)
+        try container.encode(parakeetUnified, forKey: .parakeetUnified)
+        try container.encode(unknown, forKey: .unknown)
     }
 }
 
@@ -128,7 +156,7 @@ struct LatencySample: Codable, Equatable, Sendable {
 }
 
 struct DiagnosticsDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     let schemaVersion: Int
     var lifetime: AggregateStats
@@ -331,12 +359,16 @@ final class DiagnosticsStore {
         guard
             let data = try? Data(contentsOf: url),
             let decoded = try? JSONDecoder().decode(DiagnosticsDocument.self, from: data),
-            decoded.schemaVersion == DiagnosticsDocument.currentSchemaVersion
+            (1...DiagnosticsDocument.currentSchemaVersion).contains(decoded.schemaVersion)
         else {
             return LoadResult(document: DiagnosticsDocument(), shouldPersist: false)
         }
 
-        var bounded = decoded
+        var bounded = DiagnosticsDocument(
+            lifetime: decoded.lifetime,
+            dailyBuckets: decoded.dailyBuckets,
+            latencySamples: decoded.latencySamples
+        )
         if bounded.dailyBuckets.count > maxDailyBuckets {
             bounded.dailyBuckets = Array(bounded.dailyBuckets.suffix(maxDailyBuckets))
         }

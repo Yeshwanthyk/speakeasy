@@ -21,6 +21,23 @@ struct ASRModelArtifact: Equatable, Sendable {
     let filename: String
     let expectedByteCount: Int64
     let sha256: String
+    let license: String
+
+    init(
+        repository: String,
+        revision: String,
+        filename: String,
+        expectedByteCount: Int64,
+        sha256: String,
+        license: String = "Unknown"
+    ) {
+        self.repository = repository
+        self.revision = revision
+        self.filename = filename
+        self.expectedByteCount = expectedByteCount
+        self.sha256 = sha256
+        self.license = license
+    }
 
     var remoteURL: URL? {
         URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(filename)")
@@ -28,24 +45,25 @@ struct ASRModelArtifact: Equatable, Sendable {
 }
 
 enum ASRModelKind: CaseIterable, Equatable, Sendable {
+    case parakeet110M
     case parakeetUnified
-    case parakeetTDT
-    case nemotron
 
     init(environmentValue: String?) throws {
         guard let value = environmentValue?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
-            self = .parakeetUnified
+            self = .parakeet110M
             return
         }
 
         switch value.lowercased() {
+        case "parakeet-110m", "parakeet-tdt-ctc-110m", "parakeet-tdt-ctc-110m-q8_0":
+            self = .parakeet110M
         case "parakeet", "parakeet-unified", "parakeet-unified-en":
             self = .parakeetUnified
         case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3":
-            self = .parakeetTDT
+            self = .parakeetUnified
         case "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
-            self = .nemotron
+            self = .parakeetUnified
         default:
             throw ModelPathError.unsupportedModel(value)
         }
@@ -60,74 +78,70 @@ enum ASRModelKind: CaseIterable, Equatable, Sendable {
 
     var displayName: String {
         switch self {
+        case .parakeet110M:
+            return "Parakeet TDT+CTC 110M Q8_0"
         case .parakeetUnified:
-            return "Parakeet Unified EN"
-        case .parakeetTDT:
-            return "Parakeet TDT v3"
-        case .nemotron:
-            return "Nemotron Streaming 3.5"
+            return "Parakeet Unified EN 0.6B Q8_0"
         }
     }
 
     var preferenceValue: String {
         switch self {
+        case .parakeet110M:
+            return "parakeet-tdt-ctc-110m"
         case .parakeetUnified:
             return "parakeet-unified-en"
-        case .parakeetTDT:
-            return "parakeet-tdt-v3"
-        case .nemotron:
-            return "nemotron-3.5-asr"
         }
     }
 
     var overrideEnvironmentKey: String {
         switch self {
+        case .parakeet110M:
+            return "PARAKEET_110M_GGUF_PATH"
         case .parakeetUnified:
             return "PARAKEET_UNIFIED_GGUF_PATH"
-        case .parakeetTDT:
-            return "PARAKEET_TDT_GGUF_PATH"
-        case .nemotron:
-            return "NEMOTRON_GGUF_PATH"
         }
     }
 
     var overridePreferenceKey: String {
         switch self {
+        case .parakeet110M:
+            return "Parakeet110MGGUFPath"
         case .parakeetUnified:
             return "ParakeetUnifiedGGUFPath"
-        case .parakeetTDT:
-            return "ParakeetTDTGGUFPath"
-        case .nemotron:
-            return "NemotronGGUFPath"
         }
     }
 
     var artifact: ASRModelArtifact {
         switch self {
+        case .parakeet110M:
+            return ASRModelArtifact(
+                repository: "handy-computer/parakeet-tdt_ctc-110m-gguf",
+                revision: "9d66d34f9e1594075c5dd72c90c0f4c321b29f21",
+                filename: "parakeet-tdt_ctc-110m-Q8_0.gguf",
+                expectedByteCount: 135_373_280,
+                sha256: "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296",
+                license: "CC-BY-4.0"
+            )
         case .parakeetUnified:
             return ASRModelArtifact(
                 repository: "handy-computer/parakeet-unified-en-0.6b-gguf",
                 revision: "7e948f21b7bdbac698d3318db9d350f1096f3b6c",
                 filename: "parakeet-unified-en-0.6b-Q8_0.gguf",
                 expectedByteCount: 731_357_568,
-                sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795"
+                sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+                license: "CC-BY-4.0"
             )
-        case .parakeetTDT:
-            return ASRModelArtifact(
-                repository: "handy-computer/parakeet-tdt-0.6b-v3-gguf",
-                revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
-                filename: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
-                expectedByteCount: 739_508_576,
-                sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7"
-            )
-        case .nemotron:
-            return ASRModelArtifact(
-                repository: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
-                revision: "6d44e540bc31b0de1dbe174a3cea87f53a7f22fb",
-                filename: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
-                expectedByteCount: 751_094_240,
-                sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c"
-            )
+        }
+    }
+
+    static func isRemovedLegacyAlias(_ value: String) -> Bool {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3",
+             "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
+            return true
+        default:
+            return false
         }
     }
 }
@@ -165,19 +179,27 @@ enum ModelPathResolver {
     static func configuredASRModelKind() throws -> ASRModelKind {
         try configuredASRModelKind(
             environment: ProcessInfo.processInfo.environment,
-            preferences: stringPreferences()
+            preferences: stringPreferences(),
+            persistMigratedPreference: { persistSelectedModelKind($0) }
         )
     }
 
     static func configuredASRModelKind(
         environment: [String: String],
-        preferences: [String: String] = [:]
+        preferences: [String: String] = [:],
+        persistMigratedPreference: ((ASRModelKind) -> Void)? = nil
     ) throws -> ASRModelKind {
-        let value = environment[modelKindEnvironmentKey]
+        let environmentValue = environment[modelKindEnvironmentKey]
             ?? environment[legacyModelKindEnvironmentKey]
-            ?? preferences[modelKindPreferenceKey]
+        let preferenceValue = preferences[modelKindPreferenceKey]
             ?? preferences[legacyModelKindEnvironmentKey]
-        return try ASRModelKind(environmentValue: value)
+        let kind = try ASRModelKind(environmentValue: environmentValue ?? preferenceValue)
+        if environmentValue == nil,
+           let preferenceValue,
+           ASRModelKind.isRemovedLegacyAlias(preferenceValue) {
+            persistMigratedPreference?(kind)
+        }
+        return kind
     }
 
     static func configuredASRModel() throws -> ASRModelConfiguration {

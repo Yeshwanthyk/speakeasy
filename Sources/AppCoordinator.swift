@@ -181,7 +181,7 @@ final class AppCoordinator: @unchecked Sendable {
         feedback: UserFeedback,
         accessibilityChecker: AccessibilityChecking,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
-        asrModelKind: ASRModelKind = .parakeetUnified,
+        asrModelKind: ASRModelKind = .parakeet110M,
         asrModelResolver: ASRModelResolver? = nil,
         transcriberFactory: TranscriberFactory? = nil,
         modelArtifactVerifier: @escaping ASRModelArtifactVerifier = { model in

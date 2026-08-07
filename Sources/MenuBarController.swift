@@ -39,7 +39,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         diagnosticsStore: DiagnosticsStore? = nil,
         paster: Pasting? = nil,
         pasteTranscript: ((String) -> Void)? = nil,
-        currentASRModelKind: @escaping () -> ASRModelKind = { .parakeetUnified },
+        currentASRModelKind: @escaping () -> ASRModelKind = { .parakeet110M },
         selectASRModel: @escaping (ASRModelKind) -> Void = { _ in },
         copyLastTranscript: @escaping () -> Void = {},
         pasteLastTranscript: @escaping () -> Void = {},

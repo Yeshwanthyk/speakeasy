@@ -54,14 +54,14 @@ final class ModelPathResolverTests: XCTestCase {
         }
     }
 
-    func testConfiguredModelDefaultsToUnifiedParakeet() throws {
+    func testConfiguredModelDefaultsToParakeet110M() throws {
         let appSupport = FileManager.default.temporaryDirectory
             .appendingPathComponent("speakeasy-model-path-tests")
             .appendingPathComponent(UUID().uuidString)
         let modelURL = appSupport
             .appendingPathComponent("com.speakeasy.app")
             .appendingPathComponent("models")
-            .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
+            .appendingPathComponent(ASRModelKind.parakeet110M.artifact.filename)
         try createModelFile(Data("test".utf8), at: modelURL)
 
         let resolved = try ModelPathResolver.configuredASRModel(
@@ -71,31 +71,34 @@ final class ModelPathResolverTests: XCTestCase {
             artifactProvider: { _ in Self.testArtifact }
         )
 
-        XCTAssertEqual(resolved.kind, .parakeetUnified)
+        XCTAssertEqual(resolved.kind, .parakeet110M)
         XCTAssertEqual(resolved.url, modelURL)
         XCTAssertNil(resolved.language)
     }
 
-    func testLegacyPreferenceAliasesResolveToGGUFKinds() throws {
+    func testRemovedSelectionAliasesMigrateToUnifiedFallback() throws {
+        var migratedKinds: [ASRModelKind] = []
         XCTAssertEqual(
             try ModelPathResolver.configuredASRModelKind(
                 environment: [:],
-                preferences: ["ASRModel": "parakeet-tdt"]
+                preferences: ["ASRModel": "parakeet-tdt"],
+                persistMigratedPreference: { migratedKinds.append($0) }
             ),
-            .parakeetTDT
+            .parakeetUnified
         )
         XCTAssertEqual(
             try ModelPathResolver.configuredASRModelKind(
                 environment: ["WISP_ASR_MODEL": "nemotron-3.5-asr"]
             ),
-            .nemotron
+            .parakeetUnified
         )
+        XCTAssertEqual(migratedKinds, [.parakeetUnified])
     }
 
     func testCanonicalPathUsesPinnedArtifactFilename() {
         let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let url = ModelPathResolver.preferredInstallURL(
-            kind: .nemotron,
+            kind: .parakeet110M,
             appSupport: appSupport,
             environment: [:]
         )
@@ -104,20 +107,35 @@ final class ModelPathResolverTests: XCTestCase {
             url.path,
             appSupport
                 .appendingPathComponent("com.speakeasy.app/models")
-                .appendingPathComponent(ASRModelKind.nemotron.artifact.filename)
+                .appendingPathComponent(ASRModelKind.parakeet110M.artifact.filename)
                 .path
         )
+    }
+
+    func testProductionModelSetAndParakeet110MArtifactContract() {
+        XCTAssertEqual(ASRModelKind.allCases, [.parakeet110M, .parakeetUnified])
+
+        let artifact = ASRModelKind.parakeet110M.artifact
+        XCTAssertEqual(artifact.repository, "handy-computer/parakeet-tdt_ctc-110m-gguf")
+        XCTAssertEqual(artifact.revision, "9d66d34f9e1594075c5dd72c90c0f4c321b29f21")
+        XCTAssertEqual(artifact.filename, "parakeet-tdt_ctc-110m-Q8_0.gguf")
+        XCTAssertEqual(artifact.expectedByteCount, 135_373_280)
+        XCTAssertEqual(
+            artifact.sha256,
+            "7dd44c74a331d788a4e5f8b16913b3feb29ced22cf5613aad0e0f6cd30516296"
+        )
+        XCTAssertEqual(artifact.license, "CC-BY-4.0")
     }
 
     func testLegacyBundlePathFallbackFindsGGUF() throws {
         let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let legacyURL = appSupport
             .appendingPathComponent("com.wisp.app/models")
-            .appendingPathComponent(ASRModelKind.parakeetTDT.artifact.filename)
+            .appendingPathComponent(ASRModelKind.parakeet110M.artifact.filename)
         try createModelFile(Data("test".utf8), at: legacyURL)
 
         let resolved = try ModelPathResolver.configuredASRModel(
-            kind: .parakeetTDT,
+            kind: .parakeet110M,
             appSupport: appSupport,
             bundleIdentifier: "com.speakeasy.app",
             environment: [:],

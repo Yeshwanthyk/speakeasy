@@ -606,7 +606,7 @@ final class AppCoordinatorTests: XCTestCase {
     func testSwitchASRModelLoadsSelectedTranscriberAndPersistsSelection() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let initialTranscriber = FakeTranscriber(result: .success("Parakeet text"))
-        let replacementTranscriber = FakeTranscriber(result: .success("Nemotron text"))
+        let replacementTranscriber = FakeTranscriber(result: .success("Compact text"))
         let paster = PasterStub()
         let feedback = FeedbackStub()
         let switchLock = UnfairLock()
@@ -624,7 +624,7 @@ final class AppCoordinatorTests: XCTestCase {
             flash: FlashStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
-            asrModelKind: .parakeetTDT,
+            asrModelKind: .parakeetUnified,
             asrModelResolver: { kind in
                 switchLock.withLock { resolvedKinds.append(kind) }
                 return ASRModelConfiguration(
@@ -650,10 +650,10 @@ final class AppCoordinatorTests: XCTestCase {
         )
         coordinator.skipWarmup()
 
-        coordinator.switchASRModel(to: .nemotron)
+        coordinator.switchASRModel(to: .parakeet110M)
 
         XCTAssertTrue(waitUntil {
-            coordinator.selectedASRModelKind() == .nemotron && replacementTranscriber.warmUpCount == 1
+            coordinator.selectedASRModelKind() == .parakeet110M && replacementTranscriber.warmUpCount == 1
         })
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
 
@@ -664,12 +664,12 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.toggleRecording()
 
         wait(for: [pasted], timeout: 1.0)
-        XCTAssertEqual(paster.pastedTexts, ["Nemotron text"])
+        XCTAssertEqual(paster.pastedTexts, ["Compact text"])
         XCTAssertEqual(initialTranscriber.callCount, 0)
         XCTAssertTrue(feedback.errors.isEmpty)
-        XCTAssertEqual(switchLock.withLock { resolvedKinds }, [.nemotron])
-        XCTAssertEqual(switchLock.withLock { factoryKinds }, [.nemotron])
-        XCTAssertEqual(switchLock.withLock { persistedKinds }, [.nemotron])
+        XCTAssertEqual(switchLock.withLock { resolvedKinds }, [.parakeet110M])
+        XCTAssertEqual(switchLock.withLock { factoryKinds }, [.parakeet110M])
+        XCTAssertEqual(switchLock.withLock { persistedKinds }, [.parakeet110M])
         XCTAssertEqual(switchLock.withLock { verifierCallCount }, 0)
     }
 
@@ -687,7 +687,7 @@ final class AppCoordinatorTests: XCTestCase {
             flash: FlashStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
-            asrModelKind: .parakeetTDT,
+            asrModelKind: .parakeetUnified,
             asrModelResolver: { kind in
                 ASRModelConfiguration(
                     kind: kind,
@@ -710,10 +710,10 @@ final class AppCoordinatorTests: XCTestCase {
         )
         coordinator.skipWarmup()
 
-        coordinator.switchASRModel(to: .nemotron)
+        coordinator.switchASRModel(to: .parakeet110M)
 
         XCTAssertTrue(waitUntil { feedback.errors == ["Failed to switch audio model"] })
-        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertEqual(factoryCallCount, 0)
         XCTAssertEqual(candidateTranscriber.warmUpCount, 0)
         XCTAssertTrue(persistedKinds.isEmpty)
@@ -737,7 +737,7 @@ final class AppCoordinatorTests: XCTestCase {
             flash: FlashStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
-            asrModelKind: .parakeetTDT,
+            asrModelKind: .parakeetUnified,
             asrModelResolver: { kind in
                 ASRModelConfiguration(
                     kind: kind,
@@ -752,13 +752,13 @@ final class AppCoordinatorTests: XCTestCase {
         )
         coordinator.skipWarmup()
 
-        coordinator.switchASRModel(to: .nemotron)
+        coordinator.switchASRModel(to: .parakeet110M)
 
         XCTAssertTrue(waitUntil {
             candidateTranscriber.warmUpCount == 1
                 && feedback.errors == ["Failed to switch audio model"]
         })
-        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertTrue(persistedKinds.isEmpty)
 
         let pasted = expectation(description: "previous backend remains active")
@@ -785,7 +785,7 @@ final class AppCoordinatorTests: XCTestCase {
             flash: FlashStub(),
             feedback: feedback,
             accessibilityChecker: AccessibilityStub(allowed: true),
-            asrModelKind: .parakeetTDT,
+            asrModelKind: .parakeetUnified,
             asrModelResolver: { kind in
                 ASRModelConfiguration(kind: kind, url: FileManager.default.temporaryDirectory, language: nil)
             },
@@ -799,9 +799,9 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.skipWarmup()
 
         coordinator.toggleRecording()
-        coordinator.switchASRModel(to: .nemotron)
+        coordinator.switchASRModel(to: .parakeet110M)
 
-        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertEqual(factoryCallCount, 0)
         XCTAssertEqual(feedback.errors, ["Stop recording before switching models"])
     }
