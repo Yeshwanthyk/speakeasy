@@ -33,7 +33,7 @@ private final class MenuHeaderView: NSView {
     private let statusDot = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
 
-    init(activity: MenuBarActivity) {
+    init(activity: MenuBarActivity, shortcut: DictationShortcut) {
         super.init(frame: NSRect(x: 0, y: 0, width: 380, height: 68))
 
         let iconBackground = NSView(frame: NSRect(x: 14, y: 14, width: 40, height: 40))
@@ -64,16 +64,17 @@ private final class MenuHeaderView: NSView {
         statusLabel.textColor = .secondaryLabelColor
         addSubview(statusLabel)
 
-        let shortcut = NSTextField(labelWithString: "⌃⌥⇧⌘ S")
-        shortcut.frame = NSRect(x: 286, y: 24, width: 78, height: 20)
-        shortcut.alignment = .center
-        shortcut.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
-        shortcut.textColor = .secondaryLabelColor
-        shortcut.wantsLayer = true
-        shortcut.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.12).cgColor
-        shortcut.layer?.cornerRadius = 6
-        shortcut.toolTip = "Hyper+S starts and stops dictation"
-        addSubview(shortcut)
+        let shortcutLabel = NSTextField(labelWithString: shortcut.displayName)
+        shortcutLabel.frame = NSRect(x: 274, y: 24, width: 90, height: 20)
+        shortcutLabel.alignment = .center
+        shortcutLabel.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.lineBreakMode = .byTruncatingMiddle
+        shortcutLabel.wantsLayer = true
+        shortcutLabel.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.12).cgColor
+        shortcutLabel.layer?.cornerRadius = 6
+        shortcutLabel.toolTip = "\(shortcut.accessibilityName) starts and stops dictation"
+        addSubview(shortcutLabel)
 
         update(activity: activity)
     }
@@ -99,7 +100,7 @@ private final class MicrophoneLevelView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
 
-        let label = NSTextField(labelWithString: "Input level")
+        let label = NSTextField(labelWithString: "Live input level")
         label.frame = NSRect(x: 14, y: 22, width: 220, height: 17)
         label.font = .systemFont(ofSize: 11, weight: .medium)
         label.textColor = .secondaryLabelColor
@@ -146,30 +147,183 @@ private final class MicrophoneLevelView: NSView {
     }
 }
 
-private final class DiagnosticsReportView: NSView {
-    init(report: String) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 380, height: 104))
+private enum MenuStatsFormatter {
+    private static let countFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter
+    }()
 
-        let title = NSTextField(labelWithString: "Private, on-device activity")
-        title.frame = NSRect(x: 14, y: 78, width: 352, height: 18)
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
-        title.textColor = .labelColor
-        addSubview(title)
+    static func count(_ value: Int) -> String {
+        countFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
 
-        let detail = NSTextField(wrappingLabelWithString: report)
-        detail.frame = NSRect(x: 14, y: 12, width: 352, height: 60)
-        detail.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        detail.textColor = .secondaryLabelColor
-        detail.maximumNumberOfLines = 3
-        detail.lineBreakMode = .byWordWrapping
-        addSubview(detail)
+    static func duration(milliseconds: Double) -> String {
+        let seconds = max(milliseconds, 0) / 1_000
+        if seconds < 60 {
+            return "\(Int(seconds.rounded())) sec"
+        }
+        let minutes = seconds / 60
+        if minutes < 60 {
+            return "\(Int(minutes.rounded())) min"
+        }
+        return String(format: "%.1f hr", minutes / 60)
+    }
 
-        setAccessibilityLabel("Private, on-device activity. \(report)")
+    static func latency(milliseconds: Double?) -> String {
+        guard let milliseconds else { return "—" }
+        if milliseconds < 1_000 {
+            return "\(Int(milliseconds.rounded())) ms"
+        }
+        return String(format: "%.1f sec", milliseconds / 1_000)
+    }
+
+    static func percentage(_ rate: Double?) -> String {
+        guard let rate else { return "—" }
+        return "\(Int((rate * 100).rounded()))%"
+    }
+}
+
+private final class MenuSectionHeaderView: NSView {
+    init(title: String, width: CGFloat) {
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 25))
+
+        let label = NSTextField(labelWithString: title)
+        label.frame = NSRect(x: 14, y: 3, width: width - 28, height: 17)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        addSubview(label)
+        setAccessibilityLabel(title)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         nil
+    }
+}
+
+private final class ProductivityStatsView: NSView {
+    init(summary: ProductivitySummary) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 238))
+
+        addLabel(
+            "Your dictation impact",
+            frame: NSRect(x: 18, y: 207, width: 364, height: 19),
+            font: .systemFont(ofSize: 13, weight: .semibold),
+            color: .labelColor
+        )
+        addLabel(
+            "Compared with typing at 70 words per minute",
+            frame: NSRect(x: 18, y: 188, width: 364, height: 17),
+            font: .systemFont(ofSize: 10.5, weight: .regular),
+            color: .secondaryLabelColor
+        )
+
+        addLabel(
+            MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs),
+            frame: NSRect(x: 18, y: 145, width: 165, height: 35),
+            font: .monospacedDigitSystemFont(ofSize: 27, weight: .semibold),
+            color: summary.timeSavedMs > 0 ? .controlAccentColor : .secondaryLabelColor
+        )
+        addLabel(
+            "estimated time saved",
+            frame: NSRect(x: 18, y: 126, width: 165, height: 17),
+            font: .systemFont(ofSize: 10.5, weight: .medium),
+            color: .secondaryLabelColor
+        )
+
+        let verticalDivider = NSBox(frame: NSRect(x: 195, y: 122, width: 1, height: 58))
+        verticalDivider.boxType = .separator
+        addSubview(verticalDivider)
+
+        addLabel(
+            MenuStatsFormatter.count(summary.lifetimeWords),
+            frame: NSRect(x: 216, y: 151, width: 166, height: 29),
+            font: .monospacedDigitSystemFont(ofSize: 21, weight: .semibold),
+            color: .labelColor
+        )
+        addLabel(
+            "words dictated",
+            frame: NSRect(x: 216, y: 132, width: 166, height: 17),
+            font: .systemFont(ofSize: 10.5, weight: .medium),
+            color: .secondaryLabelColor
+        )
+        addLabel(
+            "\(MenuStatsFormatter.count(summary.lifetimeDictations)) dictations  ·  \(MenuStatsFormatter.percentage(summary.deliveryRate)) delivered",
+            frame: NSRect(x: 216, y: 113, width: 166, height: 17),
+            font: .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular),
+            color: .tertiaryLabelColor
+        )
+
+        let horizontalDivider = NSBox(frame: NSRect(x: 18, y: 98, width: 364, height: 1))
+        horizontalDivider.boxType = .separator
+        addSubview(horizontalDivider)
+
+        addLabel(
+            "Today",
+            frame: NSRect(x: 18, y: 71, width: 72, height: 17),
+            font: .systemFont(ofSize: 10.5, weight: .semibold),
+            color: .secondaryLabelColor
+        )
+        addLabel(
+            "\(MenuStatsFormatter.count(summary.todayWords)) words from \(MenuStatsFormatter.count(summary.todayDictations)) dictations",
+            frame: NSRect(x: 92, y: 71, width: 290, height: 17),
+            font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+            color: .labelColor
+        )
+
+        addLabel(
+            "Speed",
+            frame: NSRect(x: 18, y: 49, width: 72, height: 17),
+            font: .systemFont(ofSize: 10.5, weight: .semibold),
+            color: .secondaryLabelColor
+        )
+        addLabel(
+            "Text is typically ready in \(MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP50Ms))",
+            frame: NSRect(x: 92, y: 49, width: 290, height: 17),
+            font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+            color: .labelColor
+        )
+
+        let note = summary.usesEstimatedSpeakingDuration
+            ? "Based on 70 wpm typing. New dictations use your measured dictation time."
+            : "Based on 70 wpm typing and your measured dictation time."
+        addLabel(
+            note,
+            frame: NSRect(x: 18, y: 12, width: 364, height: 30),
+            font: .systemFont(ofSize: 9.5, weight: .regular),
+            color: .tertiaryLabelColor,
+            maximumLines: 2
+        )
+
+        setAccessibilityLabel(
+            "Dictation impact. \(MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs)) estimated time saved. "
+                + "\(summary.lifetimeWords) words dictated across \(summary.lifetimeDictations) dictations."
+        )
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    private func addLabel(
+        _ text: String,
+        frame: NSRect,
+        font: NSFont,
+        color: NSColor,
+        maximumLines: Int = 1
+    ) {
+        let label = maximumLines == 1
+            ? NSTextField(labelWithString: text)
+            : NSTextField(wrappingLabelWithString: text)
+        label.frame = frame
+        label.font = font
+        label.textColor = color
+        label.maximumNumberOfLines = maximumLines
+        label.lineBreakMode = maximumLines == 1 ? .byTruncatingTail : .byWordWrapping
+        addSubview(label)
     }
 }
 
@@ -186,10 +340,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let pasteTranscript: (String) -> Void
     private let copyLastTranscript: () -> Void
     private let pasteLastTranscript: () -> Void
+    private let loadCorrections: CorrectionEditorModel.Loader
+    private let saveCorrections: CorrectionEditorModel.Saver
     private let currentASRModelKind: () -> ASRModelKind
     private let selectASRModel: (ASRModelKind) -> Void
     private let currentInvocationMode: () -> DictationInvocationMode
     private let selectInvocationMode: (DictationInvocationMode) -> Void
+    private let currentDictationShortcut: () -> DictationShortcut
+    private let setDictationShortcut: (DictationShortcut) -> DictationShortcutUpdateResult
+    private let setShortcutCaptureActive: (Bool) -> Void
+    private let canChangeDictationShortcut: () -> Bool
     private let cancelDictation: () -> Void
     private let canCancelDictation: () -> Bool
     private let isRecording: () -> Bool
@@ -208,6 +368,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var feedbackGeneration = 0
     private var levelTimer: Timer?
     private weak var levelItem: NSMenuItem?
+    private var correctionEditorController: CorrectionEditorWindowController?
 
     init(
         store: TranscriptStore,
@@ -218,8 +379,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         selectASRModel: @escaping (ASRModelKind) -> Void = { _ in },
         copyLastTranscript: @escaping () -> Void = {},
         pasteLastTranscript: @escaping () -> Void = {},
+        loadCorrections: @escaping CorrectionEditorModel.Loader = { [] },
+        saveCorrections: @escaping CorrectionEditorModel.Saver = { _ in false },
         currentInvocationMode: @escaping () -> DictationInvocationMode = { .toggle },
         selectInvocationMode: @escaping (DictationInvocationMode) -> Void = { _ in },
+        currentDictationShortcut: @escaping () -> DictationShortcut = { .defaultShortcut },
+        setDictationShortcut: @escaping (DictationShortcut) -> DictationShortcutUpdateResult = { _ in .success },
+        setShortcutCaptureActive: @escaping (Bool) -> Void = { _ in },
+        canChangeDictationShortcut: @escaping () -> Bool = { true },
         cancelDictation: @escaping () -> Void = {},
         canCancelDictation: @escaping () -> Bool = { false },
         isRecording: @escaping () -> Bool = { false },
@@ -242,10 +409,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
         self.copyLastTranscript = copyLastTranscript
         self.pasteLastTranscript = pasteLastTranscript
+        self.loadCorrections = loadCorrections
+        self.saveCorrections = saveCorrections
         self.currentASRModelKind = currentASRModelKind
         self.selectASRModel = selectASRModel
         self.currentInvocationMode = currentInvocationMode
         self.selectInvocationMode = selectInvocationMode
+        self.currentDictationShortcut = currentDictationShortcut
+        self.setDictationShortcut = setDictationShortcut
+        self.setShortcutCaptureActive = setShortcutCaptureActive
+        self.canChangeDictationShortcut = canChangeDictationShortcut
         self.cancelDictation = cancelDictation
         self.canCancelDictation = canCancelDictation
         self.isRecording = isRecording
@@ -264,7 +437,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if let button = statusItem.button {
             let image = Self.symbol("waveform", accessibilityDescription: "Speakeasy")
             button.image = image
-            button.toolTip = "Speakeasy — Hyper+S to dictate"
+            button.toolTip = statusToolTip
         }
 
         menu.delegate = self
@@ -298,7 +471,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             self.transientFeedback = nil
             if let button = self.statusItem.button {
                 button.title = ""
-                button.toolTip = "Speakeasy — Hyper+S to dictate"
+                button.toolTip = self.statusToolTip
             }
         }
     }
@@ -350,7 +523,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         if records.isEmpty {
             let empty = NSMenuItem(
-                title: "Dictate with Hyper+S — transcripts appear here",
+                title: "Dictate with \(currentDictationShortcut().displayName) — transcripts appear here",
                 action: nil,
                 keyEquivalent: ""
             )
@@ -403,8 +576,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         addSectionTitle("Dictation Settings", to: menu)
         addInvocationMode(to: menu)
+        addShortcutControls(to: menu)
         addMicrophoneControls(to: menu)
         addModelControls(to: menu)
+        addCorrectionControls(to: menu)
         addDiagnostics(to: menu)
 
         menu.addItem(.separator())
@@ -421,7 +596,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     private func addHeader(to menu: NSMenu) {
         let item = NSMenuItem(title: "Speakeasy", action: nil, keyEquivalent: "")
-        item.view = MenuHeaderView(activity: currentActivity())
+        item.view = MenuHeaderView(
+            activity: currentActivity(),
+            shortcut: currentDictationShortcut()
+        )
         menu.addItem(item)
     }
 
@@ -523,6 +701,38 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(modeItem)
     }
 
+    private func addShortcutControls(to menu: NSMenu) {
+        let shortcut = currentDictationShortcut()
+        let shortcutItem = NSMenuItem(
+            title: "Shortcut — \(shortcut.displayName)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        shortcutItem.image = Self.symbol("keyboard", accessibilityDescription: "Dictation shortcut")
+
+        let shortcutMenu = NSMenu(title: "Dictation Shortcut")
+        shortcutMenu.autoenablesItems = false
+
+        let change = actionItem(
+            title: "Change Shortcut…",
+            action: #selector(changeShortcutAction),
+            symbol: "keyboard.badge.ellipsis"
+        )
+        change.isEnabled = canChangeDictationShortcut()
+        shortcutMenu.addItem(change)
+
+        let reset = actionItem(
+            title: "Reset to fn",
+            action: #selector(resetShortcutAction),
+            symbol: "arrow.counterclockwise"
+        )
+        reset.isEnabled = canChangeDictationShortcut() && shortcut != .defaultShortcut
+        shortcutMenu.addItem(reset)
+
+        shortcutItem.submenu = shortcutMenu
+        menu.addItem(shortcutItem)
+    }
+
     private func addMicrophoneControls(to menu: NSMenu) {
         let devices = availableInputDevices()
         let selectedUID = selectedInputDeviceUID()
@@ -558,15 +768,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         microphoneItem.submenu = microphoneMenu
         menu.addItem(microphoneItem)
 
-        let snapshot = microphoneLevelSnapshot()
-        let level = NSMenuItem(title: Self.levelTitle(for: snapshot), action: nil, keyEquivalent: "")
-        let levelView = MicrophoneLevelView(
-            frame: NSRect(x: 0, y: 0, width: Self.menuWidth, height: 44)
-        )
-        levelView.update(snapshot: snapshot)
-        level.view = levelView
-        levelItem = level
-        menu.addItem(level)
+        if isRecording() {
+            let snapshot = microphoneLevelSnapshot()
+            let level = NSMenuItem(title: Self.levelTitle(for: snapshot), action: nil, keyEquivalent: "")
+            let levelView = MicrophoneLevelView(
+                frame: NSRect(x: 0, y: 0, width: Self.menuWidth, height: 44)
+            )
+            levelView.update(snapshot: snapshot)
+            level.view = levelView
+            levelItem = level
+            menu.addItem(level)
+        }
     }
 
     private func addModelControls(to menu: NSMenu) {
@@ -596,31 +808,80 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(modelItem)
     }
 
-    private func addDiagnostics(to menu: NSMenu) {
-        let diagnosticsItem = NSMenuItem(title: "Stats & Diagnostics", action: nil, keyEquivalent: "")
-        diagnosticsItem.image = Self.symbol("chart.bar.xaxis", accessibilityDescription: "Stats and diagnostics")
+    private func addCorrectionControls(to menu: NSMenu) {
+        menu.addItem(
+            actionItem(
+                title: "Corrections…",
+                action: #selector(showCorrections),
+                symbol: "text.badge.checkmark"
+            )
+        )
+    }
 
-        let diagnosticsMenu = NSMenu(title: "Stats & Diagnostics")
+    private func addDiagnostics(to menu: NSMenu) {
+        let summary = diagnosticsStore?.productivitySummary()
+            ?? DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
+        let statsTitle = summary.lifetimeWords > 0
+            ? "Stats — \(MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs)) saved"
+            : "Stats & Insights"
+        let diagnosticsItem = NSMenuItem(title: statsTitle, action: nil, keyEquivalent: "")
+        diagnosticsItem.image = Self.symbol("chart.bar.xaxis", accessibilityDescription: "Stats and insights")
+
+        let diagnosticsMenu = NSMenu(title: "Stats & Insights")
         diagnosticsMenu.autoenablesItems = false
-        let report = diagnosticsStore?.report() ?? "Diagnostics unavailable"
-        let reportItem = NSMenuItem(title: report, action: nil, keyEquivalent: "")
-        reportItem.isEnabled = false
-        reportItem.view = DiagnosticsReportView(report: report)
-        diagnosticsMenu.addItem(reportItem)
+        let summaryItem = NSMenuItem(title: "Dictation impact", action: nil, keyEquivalent: "")
+        summaryItem.isEnabled = false
+        summaryItem.view = ProductivityStatsView(summary: summary)
+        diagnosticsMenu.addItem(summaryItem)
+
+        diagnosticsMenu.addItem(.separator())
+        let technicalItem = NSMenuItem(title: "Technical Details", action: nil, keyEquivalent: "")
+        technicalItem.image = Self.symbol("gauge", accessibilityDescription: "Technical details")
+        let technicalMenu = NSMenu(title: "Technical Details")
+        technicalMenu.autoenablesItems = false
+        addTechnicalDetail(
+            title: "Typical release to text",
+            value: MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP50Ms),
+            to: technicalMenu
+        )
+        addTechnicalDetail(
+            title: "95% release to text",
+            value: MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP95Ms),
+            to: technicalMenu
+        )
+        addTechnicalDetail(
+            title: "Estimated typing time",
+            value: MenuStatsFormatter.duration(milliseconds: summary.estimatedTypingDurationMs),
+            to: technicalMenu
+        )
+        addTechnicalDetail(
+            title: "Measured dictation time",
+            value: MenuStatsFormatter.duration(milliseconds: summary.speakingDurationMs),
+            to: technicalMenu
+        )
+        if summary.usesEstimatedSpeakingDuration {
+            addTechnicalDetail(
+                title: "Older dictation pace estimate",
+                value: "150 words/min",
+                to: technicalMenu
+            )
+        }
+        technicalItem.submenu = technicalMenu
+        diagnosticsMenu.addItem(technicalItem)
+
         diagnosticsItem.submenu = diagnosticsMenu
         menu.addItem(diagnosticsItem)
     }
 
+    private func addTechnicalDetail(title: String, value: String, to menu: NSMenu) {
+        let item = NSMenuItem(title: "\(title) — \(value)", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
     private func addSectionTitle(_ title: String, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.secondaryLabelColor
-            ]
-        )
-        item.isEnabled = false
+        item.view = MenuSectionHeaderView(title: title, width: Self.menuWidth)
         menu.addItem(item)
     }
 
@@ -694,7 +955,65 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         selectASRModel(kind)
     }
 
+    @objc private func changeShortcutAction() {
+        guard canChangeDictationShortcut() else { return }
+
+        setShortcutCaptureActive(true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.presentShortcutRecorder()
+            }
+        }
+    }
+
+    @objc private func resetShortcutAction() {
+        guard canChangeDictationShortcut() else { return }
+        applyShortcut(.defaultShortcut)
+    }
+
+    @objc private func showCorrections() {
+        if correctionEditorController == nil {
+            correctionEditorController = CorrectionEditorWindowController(
+                loadCorrections: loadCorrections,
+                saveCorrections: saveCorrections
+            )
+        }
+        correctionEditorController?.present()
+    }
+
     // MARK: - Helpers
+
+    private var statusToolTip: String {
+        "Speakeasy — press \(currentDictationShortcut().accessibilityName) to dictate"
+    }
+
+    private func presentShortcutRecorder() {
+        defer { setShortcutCaptureActive(false) }
+
+        guard let shortcut = ShortcutRecorder.record(
+            currentShortcut: currentDictationShortcut()
+        ) else {
+            return
+        }
+        applyShortcut(shortcut)
+    }
+
+    private func applyShortcut(_ shortcut: DictationShortcut) {
+        switch setDictationShortcut(shortcut) {
+        case .success:
+            statusItem.button?.toolTip = statusToolTip
+        case .failure(let message):
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t Change Shortcut"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+        }
+    }
 
     private func currentActivity() -> MenuBarActivity {
         if isRecording() {

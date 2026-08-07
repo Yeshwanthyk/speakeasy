@@ -1,4 +1,3 @@
-import Carbon
 import CoreGraphics
 import Foundation
 import os
@@ -47,12 +46,17 @@ protocol AccessibilityChecking {
     func hasAccessibilityAccess() -> Bool
 }
 
-typealias KeyMonitorFactory = (_ callback: @escaping (DictationIntent) -> Void) -> KeyComboMonitor?
+typealias KeyMonitorFactory = (_ callback: @escaping (DictationIntent) -> Void) -> DictationKeyMonitoring?
 typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConfiguration
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
 typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
 typealias InputDeviceSelectionStore = (_ uid: String) -> Void
+typealias DictationShortcutSelectionStore = (_ shortcut: DictationShortcut) -> Void
+
+enum TranscriptCorrectionUpdateError: Error, Equatable {
+    case storeUnavailable
+}
 
 extension AudioCapture: AudioCapturing {}
 extension ScreenEdgeFlash: Flashing {}
@@ -131,13 +135,15 @@ final class AppCoordinator: @unchecked Sendable {
     private let accessibilityChecker: AccessibilityChecking
     private let deliveryTargetProvider: DeliveryTargetProviding
     private let hallucinationFilter: HallucinationFilter
-    private let transcriptPostProcessor: TranscriptPostProcessor
+    private var transcriptPostProcessor: TranscriptPostProcessor
+    private let transcriptCorrectionStore: TranscriptCorrectionStore?
     private var currentASRModelKind: ASRModelKind
     private let asrModelResolver: ASRModelResolver?
     private let transcriberFactory: TranscriberFactory?
     private let modelArtifactVerifier: ASRModelArtifactVerifier
     private let modelSelectionStore: ASRModelSelectionStore
     private let inputDeviceSelectionStore: InputDeviceSelectionStore
+    private let shortcutSelectionStore: DictationShortcutSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
@@ -160,9 +166,10 @@ final class AppCoordinator: @unchecked Sendable {
     /// not use this value; they resolve a fresh external target.
     private var activeDeliveryTarget: TranscriptDeliveryTarget?
     private var invocationMode: DictationInvocationMode = .toggle
+    private var dictationShortcut: DictationShortcut
     private let transcriptionQueue: DispatchQueue
     private let flash: Flashing
-    private var keyMonitor: KeyComboMonitor?
+    private var keyMonitor: DictationKeyMonitoring?
 
     var isRecording: Bool {
         stateLock.withLock {
@@ -189,11 +196,14 @@ final class AppCoordinator: @unchecked Sendable {
         },
         modelSelectionStore: @escaping ASRModelSelectionStore = { _ in },
         inputDeviceSelectionStore: @escaping InputDeviceSelectionStore = { _ in },
+        dictationShortcut: DictationShortcut = .defaultShortcut,
+        shortcutSelectionStore: @escaping DictationShortcutSelectionStore = { _ in },
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
         diagnosticsStore: DiagnosticsStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
+        transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
         deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
         failedCaptureReplayBuffer: FailedCaptureReplayBuffer = FailedCaptureReplayBuffer()
@@ -207,12 +217,15 @@ final class AppCoordinator: @unchecked Sendable {
         self.deliveryTargetProvider = deliveryTargetProvider
         self.hallucinationFilter = hallucinationFilter
         self.transcriptPostProcessor = transcriptPostProcessor
+        self.transcriptCorrectionStore = transcriptCorrectionStore
         self.currentASRModelKind = asrModelKind
         self.asrModelResolver = asrModelResolver
         self.transcriberFactory = transcriberFactory
         self.modelArtifactVerifier = modelArtifactVerifier
         self.modelSelectionStore = modelSelectionStore
         self.inputDeviceSelectionStore = inputDeviceSelectionStore
+        self.dictationShortcut = dictationShortcut
+        self.shortcutSelectionStore = shortcutSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.failedCaptureReplayBuffer = failedCaptureReplayBuffer
         self.transcriptStore = transcriptStore
@@ -283,6 +296,38 @@ final class AppCoordinator: @unchecked Sendable {
         stateLock.withLock { invocationMode }
     }
 
+    func selectedDictationShortcut() -> DictationShortcut {
+        stateLock.withLock { dictationShortcut }
+    }
+
+    @MainActor
+    func transcriptCorrections() -> [TranscriptCorrection] {
+        transcriptCorrectionStore?.allCorrections() ?? []
+    }
+
+    /// Persists and compiles settings work before atomically publishing the
+    /// immutable matcher used by future accepted transcripts.
+    @MainActor
+    func replaceTranscriptCorrections(
+        _ corrections: [TranscriptCorrection]
+    ) throws -> Task<Bool, Never> {
+        guard let transcriptCorrectionStore else {
+            throw TranscriptCorrectionUpdateError.storeUnavailable
+        }
+        let nextProcessor = try TranscriptPostProcessor(corrections: corrections)
+        let persistence = try transcriptCorrectionStore.replace(corrections)
+
+        return Task { @MainActor [weak self] in
+            guard await persistence.value else { return false }
+            if let self {
+                self.stateLock.withLock {
+                    self.transcriptPostProcessor = nextProcessor
+                }
+            }
+            return true
+        }
+    }
+
     func availableInputDevices() -> [MicrophoneDevice] {
         audioCapture.availableInputDevices()
     }
@@ -328,8 +373,55 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     func setInvocationMode(_ mode: DictationInvocationMode) {
-        stateLock.withLock { invocationMode = mode }
-        keyMonitor?.setInvocationMode(mode)
+        guard stateLock.withLock({ invocationMode != mode }) else { return }
+        do {
+            try keyMonitor?.setInvocationMode(mode)
+            stateLock.withLock { invocationMode = mode }
+        } catch let error as KeyComboMonitorError {
+            feedback.notify(event: .error(error.userMessage))
+        } catch {
+            feedback.notify(event: .error("Could not change dictation mode"))
+        }
+    }
+
+    func canChangeDictationShortcut() -> Bool {
+        stateLock.withLock {
+            guard !isShuttingDown,
+                  activeInputDeviceSwitchUID == nil,
+                  activeModelSwitchID == nil,
+                  case .idle = state else {
+                return false
+            }
+            return keyMonitor != nil
+        }
+    }
+
+    func setShortcutCaptureActive(_ isActive: Bool) {
+        keyMonitor?.setSuspended(isActive)
+    }
+
+    func setDictationShortcut(_ shortcut: DictationShortcut) -> DictationShortcutUpdateResult {
+        guard shortcut.isValid else {
+            return .failure("Choose a key with Command, Control, or Option")
+        }
+        guard canChangeDictationShortcut(), let keyMonitor else {
+            return .failure("Finish dictation before changing the shortcut")
+        }
+        guard stateLock.withLock({ dictationShortcut != shortcut }) else {
+            return .success
+        }
+
+        do {
+            try keyMonitor.updateShortcut(shortcut)
+            stateLock.withLock { dictationShortcut = shortcut }
+            shortcutSelectionStore(shortcut)
+            feedback.notify(event: .status("Shortcut changed to \(shortcut.displayName)"))
+            return .success
+        } catch let error as KeyComboMonitorError {
+            return .failure(error.userMessage)
+        } catch {
+            return .failure("Could not register that shortcut")
+        }
     }
 
     func canCancelDictation() -> Bool {
@@ -512,14 +604,10 @@ final class AppCoordinator: @unchecked Sendable {
         let postProcessor = (try? TranscriptPostProcessor(corrections: correctionStore.allCorrections()))
             ?? TranscriptPostProcessor()
 
-        let keyCode = CGKeyCode(kVK_ANSI_S)
-        let requiredFlags: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
-        let forbiddenFlags: CGEventFlags = []
+        let dictationShortcut = DictationShortcutStore.selected()
         let keyMonitorFactory: KeyMonitorFactory = { callback in
             KeyComboMonitor(
-                keyCode: keyCode,
-                requiredFlags: requiredFlags,
-                forbiddenFlags: forbiddenFlags,
+                shortcut: dictationShortcut,
                 callback: callback
             )
         }
@@ -538,11 +626,14 @@ final class AppCoordinator: @unchecked Sendable {
             transcriberFactory: { try TranscribeCppTranscriber(model: $0) },
             modelSelectionStore: { ModelPathResolver.persistSelectedModelKind($0) },
             inputDeviceSelectionStore: { MicrophoneSelectionStore.persist(uid: $0) },
+            dictationShortcut: dictationShortcut,
+            shortcutSelectionStore: { DictationShortcutStore.persist($0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
             transcriptStore: TranscriptStore(),
             diagnosticsStore: DiagnosticsStore(),
-            transcriptPostProcessor: postProcessor
+            transcriptPostProcessor: postProcessor,
+            transcriptCorrectionStore: correctionStore
         )
     }
     #endif
@@ -1075,7 +1166,8 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
 
-        let processedTranscript = transcriptPostProcessor.process(trimmed)
+        let postProcessor = stateLock.withLock { transcriptPostProcessor }
+        let processedTranscript = postProcessor.process(trimmed)
         let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)

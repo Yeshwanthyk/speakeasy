@@ -15,6 +15,7 @@ struct TranscriptCorrection: Codable, Equatable, Identifiable, Sendable {
 }
 
 enum TranscriptPostProcessorError: Error, Equatable {
+    case tooManyCorrections(Int)
     case tooManyEnabledCorrections(Int)
     case heardIsEmpty(index: Int)
     case writtenIsTooLong(index: Int, count: Int)
@@ -33,6 +34,7 @@ struct ProcessedTranscript: Equatable, Sendable {
 /// tokenizes the input and walks those indexes; it does not construct regular
 /// expressions, read settings, or recursively inspect replacement output.
 struct TranscriptPostProcessor: Sendable {
+    static let maxCorrections = 128
     static let maxEnabledCorrections = 128
     static let maxCorrectionCharacters = 128
 
@@ -45,6 +47,10 @@ struct TranscriptPostProcessor: Sendable {
     }
 
     init(corrections: [TranscriptCorrection]) throws {
+        guard corrections.count <= Self.maxCorrections else {
+            throw TranscriptPostProcessorError.tooManyCorrections(corrections.count)
+        }
+
         let enabledCount = corrections.reduce(into: 0) { count, correction in
             if correction.isEnabled {
                 count += 1
@@ -290,7 +296,8 @@ struct TranscriptPostProcessor: Sendable {
         }
 
         func rewrite(in text: String) -> String {
-            rewritePieces(in: text).reduce(into: "") { output, piece in
+            guard !rulesByFirstToken.isEmpty else { return text }
+            return rewritePieces(in: text).reduce(into: "") { output, piece in
                 if case .text(let value) = piece {
                     output += value
                 } else if case .command(let rule) = piece {
@@ -300,6 +307,7 @@ struct TranscriptPostProcessor: Sendable {
         }
 
         func rewritePieces(in text: String) -> [Piece] {
+            guard !rulesByFirstToken.isEmpty else { return [.text(text)] }
             let inputTokens = TranscriptPostProcessor.tokens(in: text)
             guard !inputTokens.isEmpty else { return [.text(text)] }
 

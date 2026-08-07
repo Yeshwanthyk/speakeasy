@@ -32,14 +32,14 @@ final class TranscriptCorrectionStore {
         corrections
     }
 
-    /// Replaces the complete correction set and schedules an atomic snapshot.
+    /// Persists a validated replacement set, then publishes it in memory.
+    /// A failed write leaves the last-known-good corrections active.
     @discardableResult
     func replace(_ corrections: [TranscriptCorrection]) throws -> Task<Bool, Never> {
         _ = try TranscriptPostProcessor(corrections: corrections)
-        self.corrections = corrections
         let document = TranscriptCorrectionDocument(corrections: corrections)
         let url = fileURL
-        return writer.enqueue {
+        let persistence = writer.enqueue {
             do {
                 let data = try JSONEncoder().encode(document)
                 try FileManager.default.createDirectory(
@@ -51,6 +51,14 @@ final class TranscriptCorrectionStore {
             } catch {
                 return false
             }
+        }
+
+        return Task { @MainActor [weak self] in
+            let didPersist = await persistence.value
+            if didPersist {
+                self?.corrections = corrections
+            }
+            return didPersist
         }
     }
 

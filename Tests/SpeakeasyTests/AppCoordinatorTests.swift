@@ -29,6 +29,10 @@ final class AppCoordinatorTests: XCTestCase {
         diagnosticsStore: DiagnosticsStore? = nil,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
+        transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
+        keyMonitor: DictationKeyMonitoring? = nil,
+        dictationShortcut: DictationShortcut = .defaultShortcut,
+        shortcutSelectionStore: @escaping DictationShortcutSelectionStore = { _ in },
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription"),
         deliveryTargetProvider: DeliveryTargetProviding = TestCoordinatorTargetProvider()
     ) -> AppCoordinator {
@@ -40,11 +44,14 @@ final class AppCoordinatorTests: XCTestCase {
             feedback: feedback,
             accessibilityChecker: accessibility,
             hallucinationFilter: hallucinationFilter,
+            dictationShortcut: dictationShortcut,
+            shortcutSelectionStore: shortcutSelectionStore,
             transcriptionTimeoutProvider: { _ in timeout },
-            keyMonitorFactory: { _ in nil },
+            keyMonitorFactory: { _ in keyMonitor },
             transcriptStore: transcriptStore,
             diagnosticsStore: diagnosticsStore,
             transcriptPostProcessor: transcriptPostProcessor,
+            transcriptCorrectionStore: transcriptCorrectionStore,
             transcriptionQueue: transcriptionQueue,
             deliveryTargetProvider: deliveryTargetProvider
         )
@@ -52,6 +59,71 @@ final class AppCoordinatorTests: XCTestCase {
             coordinator.skipWarmup()
         }
         return coordinator
+    }
+
+    func testShortcutUpdatePublishesOnlyAfterMonitorAcceptsIt() {
+        let monitor = KeyMonitorStub()
+        var persisted: [DictationShortcut] = []
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(),
+            keyMonitor: monitor,
+            shortcutSelectionStore: { persisted.append($0) }
+        )
+        let shortcut = DictationShortcut.keyCombination(
+            keyCode: 49,
+            modifiers: [.control, .option],
+            keyLabel: "space"
+        )
+
+        XCTAssertEqual(coordinator.setDictationShortcut(shortcut), .success)
+
+        XCTAssertEqual(monitor.shortcuts, [shortcut])
+        XCTAssertEqual(coordinator.selectedDictationShortcut(), shortcut)
+        XCTAssertEqual(persisted, [shortcut])
+    }
+
+    func testShortcutRegistrationFailurePreservesCurrentSelection() {
+        let monitor = KeyMonitorStub(updateError: KeyComboMonitorError.shortcutRegistrationFailed(-1))
+        var persisted: [DictationShortcut] = []
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(),
+            keyMonitor: monitor,
+            shortcutSelectionStore: { persisted.append($0) }
+        )
+        let shortcut = DictationShortcut.keyCombination(
+            keyCode: 49,
+            modifiers: [.command],
+            keyLabel: "space"
+        )
+
+        XCTAssertEqual(
+            coordinator.setDictationShortcut(shortcut),
+            .failure("That shortcut is already in use")
+        )
+        XCTAssertEqual(coordinator.selectedDictationShortcut(), .functionKey)
+        XCTAssertTrue(persisted.isEmpty)
+    }
+
+    func testShortcutCannotChangeDuringRecording() {
+        let monitor = KeyMonitorStub()
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(),
+            keyMonitor: monitor
+        )
+        coordinator.toggleRecording()
+
+        XCTAssertEqual(
+            coordinator.setDictationShortcut(.keyCombination(
+                keyCode: 1,
+                modifiers: [.control],
+                keyLabel: "s"
+            )),
+            .failure("Finish dictation before changing the shortcut")
+        )
+        XCTAssertTrue(monitor.shortcuts.isEmpty)
     }
 
     func testMicrophoneSelectionIsRejectedWhileTranscriptionOwnsCaptureResult() {
@@ -1170,6 +1242,42 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(decodedHistory(at: historyURL)?.map(\.finalText), ["hello, Wisp"])
     }
 
+    func testSavedCorrectionsApplyToTheNextDictationWithoutRelaunch() async throws {
+        let correctionsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-live-corrections-\(UUID().uuidString)")
+            .appendingPathComponent("corrections.json")
+        let correctionStore = TranscriptCorrectionStore(fileURL: correctionsURL)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("hello world"))
+        let paster = PasterStub()
+        let firstPaste = expectation(description: "uncorrected paste")
+        paster.onPaste = { firstPaste.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            transcriptCorrectionStore: correctionStore
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [firstPaste], timeout: 1)
+
+        let didSave = try await coordinator.replaceTranscriptCorrections([
+            TranscriptCorrection(heard: "world", written: "Wisp")
+        ]).value
+        XCTAssertTrue(didSave)
+
+        let secondPaste = expectation(description: "corrected paste")
+        paster.onPaste = { secondPaste.fulfill() }
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [secondPaste], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["hello world", "hello Wisp"])
+        XCTAssertEqual(coordinator.transcriptCorrections().map(\.written), ["Wisp"])
+    }
+
     func testCopyLastTranscriptUsesStoredTextWithoutRetranscription() {
         let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("speakeasy-copy-last-(UUID().uuidString)"))
@@ -1917,6 +2025,30 @@ private final class FlashStub: Flashing {
 
     func show(lineWidth: CGFloat) { showCount += 1 }
     func hide(completion: (() -> Void)?) { hideCount += 1; completion?() }
+}
+
+private final class KeyMonitorStub: DictationKeyMonitoring {
+    private(set) var modes: [DictationInvocationMode] = []
+    private(set) var shortcuts: [DictationShortcut] = []
+    private(set) var suspendedStates: [Bool] = []
+    var updateError: Error?
+
+    init(updateError: Error? = nil) {
+        self.updateError = updateError
+    }
+
+    func setInvocationMode(_ mode: DictationInvocationMode) throws {
+        modes.append(mode)
+    }
+
+    func updateShortcut(_ shortcut: DictationShortcut) throws {
+        if let updateError { throw updateError }
+        shortcuts.append(shortcut)
+    }
+
+    func setSuspended(_ isSuspended: Bool) {
+        suspendedStates.append(isSuspended)
+    }
 }
 
 private final class FeedbackStub: UserFeedback {

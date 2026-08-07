@@ -25,10 +25,32 @@ final class TranscriptCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(document.schemaVersion, TranscriptCorrectionDocument.currentSchemaVersion)
     }
 
-    func testInvalidReplacementDoesNotChangeInMemoryCorrections() throws {
+    func testFailedPersistenceLeavesLastKnownGoodCorrectionsActive() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-corrections-failure-\(UUID().uuidString)")
+        let validURL = directory.appendingPathComponent("corrections.json")
+        let store = TranscriptCorrectionStore(fileURL: validURL)
+        let original = [TranscriptCorrection(heard: "alpha", written: "beta")]
+        let didPersistOriginal = try await store.replace(original).value
+        XCTAssertTrue(didPersistOriginal)
+
+        try FileManager.default.removeItem(at: validURL)
+        try FileManager.default.removeItem(at: directory)
+        try Data("not-a-directory".utf8).write(to: directory)
+
+        let didPersistReplacement = try await store.replace([
+            TranscriptCorrection(heard: "alpha", written: "gamma")
+        ]).value
+
+        XCTAssertFalse(didPersistReplacement)
+        XCTAssertEqual(store.allCorrections(), original)
+    }
+
+    func testInvalidReplacementDoesNotChangeInMemoryCorrections() async throws {
         let store = TranscriptCorrectionStore(fileURL: temporaryURL())
         let original = [TranscriptCorrection(heard: "alpha", written: "beta")]
-        _ = try store.replace(original)
+        let didPersist = try await store.replace(original).value
+        XCTAssertTrue(didPersist)
 
         XCTAssertThrowsError(try store.replace([
             TranscriptCorrection(heard: "alpha", written: "one"),

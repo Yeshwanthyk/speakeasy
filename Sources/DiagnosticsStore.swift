@@ -100,14 +100,19 @@ struct AggregateStats: Codable, Equatable, Sendable {
     var deliveryCount = 0
     var wordCount = 0
     var characterCount = 0
+    var measuredWordCount = 0
+    var speakingDurationMs: Double = 0
     var outcomes = OutcomeCounters()
     var backends = BackendCounters()
+
+    init() {}
 
     mutating func record(
         backend: String,
         outcome: TranscriptionTrace.Outcome,
         wordCount: Int,
-        characterCount: Int
+        characterCount: Int,
+        speakingDurationMs: Double?
     ) {
         attemptCount += 1
         if outcome == .eventsPosted || outcome == .clipboardUpdated {
@@ -115,8 +120,50 @@ struct AggregateStats: Codable, Equatable, Sendable {
         }
         self.wordCount += wordCount
         self.characterCount += characterCount
+        if let speakingDurationMs,
+           speakingDurationMs.isFinite,
+           speakingDurationMs > 0,
+           wordCount > 0 {
+            measuredWordCount += wordCount
+            self.speakingDurationMs += speakingDurationMs
+        }
         outcomes.increment(outcome)
         backends.increment(backend)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case attemptCount
+        case deliveryCount
+        case wordCount
+        case characterCount
+        case measuredWordCount
+        case speakingDurationMs
+        case outcomes
+        case backends
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        attemptCount = try container.decodeIfPresent(Int.self, forKey: .attemptCount) ?? 0
+        deliveryCount = try container.decodeIfPresent(Int.self, forKey: .deliveryCount) ?? 0
+        wordCount = try container.decodeIfPresent(Int.self, forKey: .wordCount) ?? 0
+        characterCount = try container.decodeIfPresent(Int.self, forKey: .characterCount) ?? 0
+        measuredWordCount = try container.decodeIfPresent(Int.self, forKey: .measuredWordCount) ?? 0
+        speakingDurationMs = try container.decodeIfPresent(Double.self, forKey: .speakingDurationMs) ?? 0
+        outcomes = try container.decodeIfPresent(OutcomeCounters.self, forKey: .outcomes) ?? OutcomeCounters()
+        backends = try container.decodeIfPresent(BackendCounters.self, forKey: .backends) ?? BackendCounters()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(attemptCount, forKey: .attemptCount)
+        try container.encode(deliveryCount, forKey: .deliveryCount)
+        try container.encode(wordCount, forKey: .wordCount)
+        try container.encode(characterCount, forKey: .characterCount)
+        try container.encode(measuredWordCount, forKey: .measuredWordCount)
+        try container.encode(speakingDurationMs, forKey: .speakingDurationMs)
+        try container.encode(outcomes, forKey: .outcomes)
+        try container.encode(backends, forKey: .backends)
     }
 }
 
@@ -156,7 +203,7 @@ struct LatencySample: Codable, Equatable, Sendable {
 }
 
 struct DiagnosticsDocument: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     let schemaVersion: Int
     var lifetime: AggregateStats
@@ -176,33 +223,74 @@ struct DiagnosticsDocument: Codable, Equatable, Sendable {
     }
 }
 
+struct ProductivitySummary: Equatable, Sendable {
+    static let typingWordsPerMinute = 70.0
+    static let estimatedSpeakingWordsPerMinute = 150.0
+
+    let lifetimeWords: Int
+    let lifetimeDictations: Int
+    let todayWords: Int
+    let todayDictations: Int
+    let deliveryRate: Double?
+    let estimatedTypingDurationMs: Double
+    let speakingDurationMs: Double
+    let timeSavedMs: Double
+    let usesEstimatedSpeakingDuration: Bool
+    let releaseToTextP50Ms: Double?
+    let releaseToTextP95Ms: Double?
+}
+
 enum DiagnosticsFormatter {
-    static func report(document: DiagnosticsDocument, today: String) -> String {
+    static func summary(document: DiagnosticsDocument, today: String) -> ProductivitySummary {
         let todayStats = document.dailyBuckets.first(where: { $0.day == today })?.aggregate
             ?? AggregateStats()
-        let textP50 = percentile(
-            0.50,
-            values: document.latencySamples.compactMap(\.releaseToTextMs)
-        )
-        let textP95 = percentile(
-            0.95,
-            values: document.latencySamples.compactMap(\.releaseToTextMs)
-        )
+        let lifetime = document.lifetime
+        let measuredWords = min(max(lifetime.measuredWordCount, 0), lifetime.wordCount)
+        let unmeasuredWords = max(lifetime.wordCount - measuredWords, 0)
+        let estimatedUnmeasuredSpeechMs = Double(unmeasuredWords)
+            / ProductivitySummary.estimatedSpeakingWordsPerMinute
+            * 60_000
+        let speakingDurationMs = max(lifetime.speakingDurationMs, 0) + estimatedUnmeasuredSpeechMs
+        let typingDurationMs = Double(lifetime.wordCount)
+            / ProductivitySummary.typingWordsPerMinute
+            * 60_000
 
-        let successRate: String
-        if document.lifetime.attemptCount == 0 {
-            successRate = "—"
+        let deliveryRate: Double?
+        if lifetime.attemptCount == 0 {
+            deliveryRate = nil
         } else {
-            successRate = String(
-                format: "%.0f%%",
-                Double(document.lifetime.deliveryCount) / Double(document.lifetime.attemptCount) * 100
-            )
+            deliveryRate = Double(lifetime.deliveryCount) / Double(lifetime.attemptCount)
         }
 
+        return ProductivitySummary(
+            lifetimeWords: lifetime.wordCount,
+            lifetimeDictations: lifetime.attemptCount,
+            todayWords: todayStats.wordCount,
+            todayDictations: todayStats.attemptCount,
+            deliveryRate: deliveryRate,
+            estimatedTypingDurationMs: typingDurationMs,
+            speakingDurationMs: speakingDurationMs,
+            timeSavedMs: max(typingDurationMs - speakingDurationMs, 0),
+            usesEstimatedSpeakingDuration: unmeasuredWords > 0,
+            releaseToTextP50Ms: percentile(
+                0.50,
+                values: document.latencySamples.compactMap(\.releaseToTextMs)
+            ),
+            releaseToTextP95Ms: percentile(
+                0.95,
+                values: document.latencySamples.compactMap(\.releaseToTextMs)
+            )
+        )
+    }
+
+    static func report(document: DiagnosticsDocument, today: String) -> String {
+        let summary = summary(document: document, today: today)
+        let successRate = summary.deliveryRate.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+
         return [
-            "Today: \(todayStats.attemptCount) attempts, \(todayStats.deliveryCount) delivered",
-            "Lifetime: \(document.lifetime.attemptCount) attempts, \(successRate) delivered",
-            "Release to text: p50 \(formatted(textP50)) ms, p95 \(formatted(textP95)) ms"
+            "Today: \(summary.todayDictations) attempts, \(summary.todayWords) words",
+            "Lifetime: \(summary.lifetimeDictations) attempts, \(successRate) delivered",
+            "Release to text: p50 \(formatted(summary.releaseToTextP50Ms)) ms, p95 \(formatted(summary.releaseToTextP95Ms)) ms"
         ].joined(separator: "\n")
     }
 
@@ -250,6 +338,10 @@ final class DiagnosticsStore {
         DiagnosticsFormatter.report(document: document, today: Self.dayKey(for: now))
     }
 
+    func productivitySummary(now: Date = Date()) -> ProductivitySummary {
+        DiagnosticsFormatter.summary(document: document, today: Self.dayKey(for: now))
+    }
+
     /// Records one terminal trace. Repeated calls with the same trace ID are
     /// ignored, which protects counters from timeout/late-result races.
     @discardableResult
@@ -269,11 +361,20 @@ final class DiagnosticsStore {
 
         let wordCount = text?.split(whereSeparator: { $0.isWhitespace }).count ?? 0
         let characterCount = text?.count ?? 0
+        let timings = trace.timingSnapshot
+        let activeSpeakingDurationMs = max(
+            trace.utteranceDurationMs
+                - trace.prependedDurationMs
+                - (trace.graceDurationMs ?? 0),
+            0
+        )
+        let speakingDurationMs = wordCount > 0 ? activeSpeakingDurationMs : nil
         document.lifetime.record(
             backend: trace.backend,
             outcome: outcome,
             wordCount: wordCount,
-            characterCount: characterCount
+            characterCount: characterCount,
+            speakingDurationMs: speakingDurationMs
         )
 
         let day = Self.dayKey(for: Date())
@@ -282,7 +383,8 @@ final class DiagnosticsStore {
                 backend: trace.backend,
                 outcome: outcome,
                 wordCount: wordCount,
-                characterCount: characterCount
+                characterCount: characterCount,
+                speakingDurationMs: speakingDurationMs
             )
         } else {
             document.dailyBuckets.append(
@@ -292,7 +394,8 @@ final class DiagnosticsStore {
                         backend: trace.backend,
                         outcome: outcome,
                         wordCount: wordCount,
-                        characterCount: characterCount
+                        characterCount: characterCount,
+                        speakingDurationMs: speakingDurationMs
                     )
                 )
             )
@@ -301,7 +404,7 @@ final class DiagnosticsStore {
             }
         }
 
-        let sample = LatencySample(timings: trace.timingSnapshot)
+        let sample = LatencySample(timings: timings)
         if !sample.isEmpty {
             document.latencySamples.append(sample)
             if document.latencySamples.count > Self.maxLatencySamples {
@@ -318,14 +421,16 @@ final class DiagnosticsStore {
         backend: String,
         outcome: TranscriptionTrace.Outcome,
         wordCount: Int,
-        characterCount: Int
+        characterCount: Int,
+        speakingDurationMs: Double?
     ) -> AggregateStats {
         var aggregate = AggregateStats()
         aggregate.record(
             backend: backend,
             outcome: outcome,
             wordCount: wordCount,
-            characterCount: characterCount
+            characterCount: characterCount,
+            speakingDurationMs: speakingDurationMs
         )
         return aggregate
     }

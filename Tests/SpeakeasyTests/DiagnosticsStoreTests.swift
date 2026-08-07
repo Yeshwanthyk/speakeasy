@@ -20,6 +20,7 @@ final class DiagnosticsStoreTests: XCTestCase {
         if withTimings {
             trace.markCaptureStarted(at: 2_000_000)
             trace.markHotkeyReleased(at: 3_000_000)
+            trace.markStopReturned(sampleCount: 32_000, at: 3_500_000)
             trace.markTranscriptionStarted(at: 4_000_000)
             trace.markTranscriptionEnded(at: 8_000_000)
             trace.markPasteRequested(at: 9_000_000)
@@ -131,7 +132,7 @@ final class DiagnosticsStoreTests: XCTestCase {
         XCTAssertTrue(writeResult)
 
         let persisted = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(persisted.contains("\"schemaVersion\":2"))
+        XCTAssertTrue(persisted.contains("\"schemaVersion\":3"))
         XCTAssertTrue(persisted.contains("\"parakeet110M\":1"))
         XCTAssertFalse(persisted.contains("parakeetTDT"))
         XCTAssertFalse(persisted.contains("nemotron"))
@@ -174,5 +175,50 @@ final class DiagnosticsStoreTests: XCTestCase {
 
         XCTAssertTrue(report.contains("Lifetime: 2 attempts, 50% delivered"))
         XCTAssertTrue(report.contains("Release to text: p50 20.0 ms, p95 30.0 ms"))
+    }
+
+    func testProductivitySummaryComparesMeasuredSpeechWithSeventyWPMTyping() {
+        var document = DiagnosticsDocument()
+        document.lifetime.attemptCount = 10
+        document.lifetime.deliveryCount = 9
+        document.lifetime.wordCount = 140
+        document.lifetime.measuredWordCount = 70
+        document.lifetime.speakingDurationMs = 30_000
+
+        var today = AggregateStats()
+        today.attemptCount = 3
+        today.wordCount = 42
+        document.dailyBuckets = [DailyStats(day: "2026-08-07", aggregate: today)]
+        document.latencySamples = [
+            LatencySample(captureStartMs: nil, releaseToTextMs: 280, releaseToPasteMs: nil),
+            LatencySample(captureStartMs: nil, releaseToTextMs: 440, releaseToPasteMs: nil)
+        ]
+
+        let summary = DiagnosticsFormatter.summary(document: document, today: "2026-08-07")
+
+        XCTAssertEqual(summary.lifetimeWords, 140)
+        XCTAssertEqual(summary.todayWords, 42)
+        XCTAssertEqual(summary.deliveryRate, 0.9)
+        XCTAssertEqual(summary.estimatedTypingDurationMs, 120_000, accuracy: 0.001)
+        XCTAssertEqual(summary.speakingDurationMs, 58_000, accuracy: 0.001)
+        XCTAssertEqual(summary.timeSavedMs, 62_000, accuracy: 0.001)
+        XCTAssertTrue(summary.usesEstimatedSpeakingDuration)
+        XCTAssertEqual(summary.releaseToTextP50Ms, 440)
+        XCTAssertEqual(summary.releaseToTextP95Ms, 440)
+    }
+
+    func testRecordingDeliveredWordsAccumulatesMeasuredSpeakingDuration() async {
+        let store = DiagnosticsStore(fileURL: temporaryStatsURL())
+
+        _ = await store.record(
+            trace: trace(),
+            outcome: .eventsPosted,
+            text: "one two three four five"
+        ).value
+
+        let aggregate = store.snapshot().lifetime
+        XCTAssertEqual(aggregate.wordCount, 5)
+        XCTAssertEqual(aggregate.measuredWordCount, 5)
+        XCTAssertEqual(aggregate.speakingDurationMs, 2_000, accuracy: 0.001)
     }
 }

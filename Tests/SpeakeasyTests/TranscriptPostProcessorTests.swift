@@ -58,10 +58,15 @@ final class TranscriptPostProcessorTests: XCTestCase {
     }
 
     func testBoundsRejectOversizedConfigurations() {
-        let tooMany = (0...TranscriptPostProcessor.maxEnabledCorrections).map { index in
-            TranscriptCorrection(heard: "heard \(index)", written: "written")
+        let tooMany = (0...TranscriptPostProcessor.maxCorrections).map { index in
+            TranscriptCorrection(heard: "heard \(index)", written: "written", isEnabled: false)
         }
-        XCTAssertThrowsError(try TranscriptPostProcessor(corrections: tooMany))
+        XCTAssertThrowsError(try TranscriptPostProcessor(corrections: tooMany)) { error in
+            XCTAssertEqual(
+                error as? TranscriptPostProcessorError,
+                .tooManyCorrections(TranscriptPostProcessor.maxCorrections + 1)
+            )
+        }
 
         XCTAssertThrowsError(try TranscriptPostProcessor(corrections: [
             TranscriptCorrection(heard: String(repeating: "h", count: 129), written: "written")

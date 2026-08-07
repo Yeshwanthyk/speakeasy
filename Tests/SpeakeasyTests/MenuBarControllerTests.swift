@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class MenuBarControllerTests: XCTestCase {
-    func testMenuExposesLazyStatsAndDiagnosticsReport() {
+    func testMenuExposesReadableProductivityStatsWithTechnicalDetailsHidden() {
         let historyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("speakeasy-menu-history-\(UUID().uuidString)")
             .appendingPathComponent("history.json")
@@ -22,11 +22,16 @@ final class MenuBarControllerTests: XCTestCase {
 
         controller.menuNeedsUpdate(menu)
 
-        let item = menu.items.first(where: { $0.title == "Stats & Diagnostics" })
+        let item = menu.items.first(where: { $0.title == "Stats & Insights" })
         XCTAssertNotNil(item?.submenu)
-        XCTAssertEqual(item?.submenu?.items.count, 1)
-        XCTAssertTrue(item?.submenu?.items.first?.title.contains("Today: 0 attempts") == true)
-        XCTAssertFalse(item?.submenu?.items.first?.isEnabled ?? true)
+        XCTAssertEqual(item?.submenu?.items.count, 3)
+
+        let impact = item?.submenu?.items.first
+        XCTAssertEqual(impact?.title, "Dictation impact")
+        XCTAssertNotNil(impact?.view)
+
+        let technical = item?.submenu?.items.first(where: { $0.title == "Technical Details" })
+        XCTAssertEqual(technical?.submenu?.items.count, 4)
     }
 
     func testMenuExposesOnlyDefaultAndFallbackModels() {
@@ -102,6 +107,7 @@ final class MenuBarControllerTests: XCTestCase {
         )
         let controller = MenuBarController(
             store: store,
+            isRecording: { true },
             availableInputDevices: {
                 [
                     MicrophoneDevice(uid: "built-in", name: "Built-in"),
@@ -153,6 +159,28 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertEqual(allHistory?.items.first?.title, "Clear Transcript History…")
     }
 
+    func testMenuExposesCorrectionsEditorWithoutLoadingCorrections() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-corrections-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        var loadCount = 0
+        let controller = MenuBarController(
+            store: store,
+            loadCorrections: {
+                loadCount += 1
+                return []
+            }
+        )
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        XCTAssertNotNil(menu.items.first(where: { $0.title == "Corrections…" }))
+        XCTAssertEqual(loadCount, 0, "Building the menu must not load correction settings")
+    }
+
     func testMenuUsesBrandedHeaderAndConciseEmptyState() {
         let store = TranscriptStore(
             fileURL: FileManager.default.temporaryDirectory
@@ -167,7 +195,62 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertEqual(menu.items.first?.title, "Speakeasy")
         XCTAssertNotNil(menu.items.first?.view)
         XCTAssertNotNil(menu.items.first(where: {
-            $0.title == "Dictate with Hyper+S — transcripts appear here"
+            $0.title == "Dictate with fn — transcripts appear here"
         }))
+        XCTAssertFalse(menu.items.contains(where: { $0.title.hasPrefix("Microphone Level:") }))
+    }
+
+    func testMenuShowsDefaultShortcutAndDisablesRedundantReset() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-shortcut-default-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let controller = MenuBarController(store: store)
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let shortcut = menu.items.first(where: { $0.title.hasPrefix("Shortcut —") })
+        XCTAssertEqual(shortcut?.title, "Shortcut — fn")
+        XCTAssertTrue(shortcut?.submenu?.items.first(where: { $0.title == "Change Shortcut…" })?.isEnabled == true)
+        XCTAssertTrue(shortcut?.submenu?.items.first(where: { $0.title == "Reset to fn" })?.isEnabled == false)
+    }
+
+    func testMenuShowsCustomShortcutAndEnablesReset() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-shortcut-custom-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let customShortcut = DictationShortcut.keyCombination(
+            keyCode: 1,
+            modifiers: [.control, .option],
+            keyLabel: "s"
+        )
+        var updatedShortcut: DictationShortcut?
+        let controller = MenuBarController(
+            store: store,
+            currentDictationShortcut: { customShortcut },
+            setDictationShortcut: {
+                updatedShortcut = $0
+                return .success
+            }
+        )
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let shortcut = menu.items.first(where: { $0.title.hasPrefix("Shortcut —") })
+        XCTAssertEqual(shortcut?.title, "Shortcut — ⌃⌥S")
+        XCTAssertTrue(shortcut?.submenu?.items.first(where: { $0.title == "Change Shortcut…" })?.isEnabled == true)
+        let reset = shortcut?.submenu?.items.first(where: { $0.title == "Reset to fn" })
+        XCTAssertTrue(reset?.isEnabled == true)
+
+        guard let reset, let action = reset.action else {
+            return XCTFail("Expected an actionable reset item")
+        }
+        XCTAssertTrue(NSApplication.shared.sendAction(action, to: reset.target, from: reset))
+        XCTAssertEqual(updatedShortcut, .functionKey)
     }
 }

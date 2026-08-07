@@ -51,11 +51,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         pasteLastTranscript: { [weak coordinator] in
                             _ = coordinator?.pasteLastTranscript()
                         },
+                        loadCorrections: { [weak coordinator] in
+                            coordinator?.transcriptCorrections() ?? []
+                        },
+                        saveCorrections: { [weak coordinator] corrections in
+                            guard let coordinator else { return false }
+                            return try await coordinator.replaceTranscriptCorrections(corrections).value
+                        },
                         currentInvocationMode: { [weak coordinator] in
                             coordinator?.selectedInvocationMode() ?? .toggle
                         },
                         selectInvocationMode: { [weak coordinator] mode in
                             coordinator?.setInvocationMode(mode)
+                        },
+                        currentDictationShortcut: { [weak coordinator] in
+                            coordinator?.selectedDictationShortcut() ?? .defaultShortcut
+                        },
+                        setDictationShortcut: { [weak coordinator] shortcut in
+                            coordinator?.setDictationShortcut(shortcut)
+                                ?? .failure("Speakeasy is not ready to change shortcuts")
+                        },
+                        setShortcutCaptureActive: { [weak coordinator] isActive in
+                            coordinator?.setShortcutCaptureActive(isActive)
+                        },
+                        canChangeDictationShortcut: { [weak coordinator] in
+                            coordinator?.canChangeDictationShortcut() ?? false
                         },
                         cancelDictation: { [weak coordinator] in
                             coordinator?.handle(.cancel)
