@@ -135,10 +135,10 @@ The engine harness intentionally excludes microphones, Accessibility, paste, and
 1. Record one short dictation to establish first-use allocation behavior.
 2. Record 20 identical-duration dictations while collecting Allocations and Time Profiler traces.
 3. Filter stacks to `AudioCapture.consume`, `flushBackBuffer`, `beginRecording`, and `endRecording`.
-4. Confirm the audio callback performs no steady-state buffer growth after the first recording and its p99 duration remains below 5 ms.
+4. Confirm the audio callback's p99 duration remains below 5 ms and that stop-to-buffer-return stays bounded for long recordings.
 5. Compare hotkey-to-capture-ready and stop-to-buffer-return separately from engine inference.
 
-`AudioCaptureTests.testRecordingBufferCapacitySurvivesResultHandoff` protects the buffer-reuse contract. It does not replace an Instruments trace on real hardware.
+`endRecording()` transfers the completed buffer in O(1) rather than copying it under the capture lock. Validate allocation behavior with Instruments on real hardware; unit tests do not substitute for that trace.
 
 ## Baselines
 

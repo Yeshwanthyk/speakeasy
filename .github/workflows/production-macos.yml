@@ -13,6 +13,7 @@ on:
       - "build.sh"
       - "script/build_and_run.sh"
       - "script/atomic_replace_bundle.swift"
+      - "script/check_icon_edges.swift"
       - "script/verify_bundle.sh"
       - ".github/workflows/production-macos.yml"
   push:
@@ -28,6 +29,7 @@ on:
       - "build.sh"
       - "script/build_and_run.sh"
       - "script/atomic_replace_bundle.swift"
+      - "script/check_icon_edges.swift"
       - "script/verify_bundle.sh"
       - ".github/workflows/production-macos.yml"
 
