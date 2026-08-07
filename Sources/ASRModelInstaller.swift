@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import os
 
@@ -52,12 +51,12 @@ final class ASRModelInstaller {
 
         let targetURL = try ModelPathResolver.preferredInstallURL(kind: kind)
         try await install(kind: kind, at: targetURL)
-        return try ModelPathResolver.configuredASRModel(kind: kind)
+        return ASRModelConfiguration(kind: kind, url: targetURL, artifactVerified: true)
     }
 
     func install(kind: ASRModelKind, at targetURL: URL) async throws {
         let artifact = artifactProvider(kind)
-        if Self.isVerifiedArtifact(artifact, at: targetURL) {
+        if (try? ModelPathResolver.verifyArtifact(artifact, at: targetURL)) != nil {
             return
         }
 
@@ -86,20 +85,10 @@ final class ASRModelInstaller {
         }
 
         try fileManager.copyItem(at: downloadedURL, to: stagingURL)
-        let byteCount = try Self.fileSize(at: stagingURL)
-        guard byteCount == artifact.expectedByteCount else {
-            throw ASRModelInstallError.unexpectedFileSize(
-                expected: artifact.expectedByteCount,
-                actual: byteCount
-            )
-        }
-
-        let checksum = try Self.sha256(at: stagingURL)
-        guard checksum == artifact.sha256 else {
-            throw ASRModelInstallError.checksumMismatch(
-                expected: artifact.sha256,
-                actual: checksum
-            )
+        do {
+            try ModelPathResolver.verifyArtifact(artifact, at: stagingURL)
+        } catch let error as ModelArtifactVerificationError {
+            throw Self.installError(for: error)
         }
 
         if fileManager.fileExists(atPath: targetURL.path) {
@@ -111,38 +100,14 @@ final class ASRModelInstaller {
         logger.info("Installed and verified \(kind.displayName, privacy: .public)")
     }
 
-    private static func isVerifiedArtifact(_ artifact: ASRModelArtifact, at url: URL) -> Bool {
-        guard (try? fileSize(at: url)) == artifact.expectedByteCount,
-              let checksum = try? sha256(at: url) else {
-            return false
+    private static func installError(for error: ModelArtifactVerificationError) -> ASRModelInstallError {
+        switch error {
+        case .fileMissing(let path), .notRegularFile(let path):
+            return .downloadedFileMissing(path)
+        case .unexpectedFileSize(let expected, let actual):
+            return .unexpectedFileSize(expected: expected, actual: actual)
+        case .checksumMismatch(let expected, let actual):
+            return .checksumMismatch(expected: expected, actual: actual)
         }
-        return checksum == artifact.sha256
-    }
-
-    private static func fileSize(at url: URL) throws -> Int64 {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        return Int64(values.fileSize ?? 0)
-    }
-
-    private static func sha256(at url: URL) throws -> String {
-        guard let stream = InputStream(url: url) else {
-            throw ASRModelInstallError.downloadedFileMissing(url.lastPathComponent)
-        }
-        stream.open()
-        defer { stream.close() }
-
-        var hasher = SHA256()
-        var buffer = [UInt8](repeating: 0, count: 1_048_576)
-        while stream.hasBytesAvailable {
-            let count = stream.read(&buffer, maxLength: buffer.count)
-            if count < 0 {
-                throw stream.streamError ?? CocoaError(.fileReadUnknown)
-            }
-            if count == 0 {
-                break
-            }
-            hasher.update(data: Data(buffer[0..<count]))
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

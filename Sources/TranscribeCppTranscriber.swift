@@ -1,38 +1,10 @@
 import Foundation
 import os
 
-private struct AsrResult {
-    var text: UnsafeMutablePointer<CChar>?
-    var error: UnsafeMutablePointer<CChar>?
-}
-
-private struct AsrCreateResult {
-    var handle: UnsafeMutableRawPointer?
-    var error: UnsafeMutablePointer<CChar>?
-}
-
-@_silgen_name("asr_create")
-private func asr_create(_ path: UnsafePointer<CChar>) -> AsrCreateResult
-
-@_silgen_name("asr_create_result_free")
-private func asr_create_result_free(_ result: AsrCreateResult)
-
-@_silgen_name("asr_destroy")
-private func asr_destroy(_ handle: UnsafeMutableRawPointer?)
-
-@_silgen_name("asr_transcribe")
-private func asr_transcribe(
-    _ handle: UnsafeMutableRawPointer?,
-    _ samples: UnsafePointer<Float>?,
-    _ length: Int
-) -> AsrResult
-
-@_silgen_name("asr_result_free")
-private func asr_result_free(_ result: AsrResult)
-
 enum TranscribeCppError: Error {
     case modelLoadFailed(String)
     case transcriptionFailed(String)
+    case cancelled
     case emptyResult
 }
 
@@ -41,7 +13,7 @@ enum TranscribeCppError: Error {
 /// The Rust bridge serializes calls on the session, so this instance can move
 /// between the coordinator's worker tasks without external synchronization.
 final class TranscribeCppTranscriber {
-    private let handle: UnsafeMutableRawPointer
+    private let handle: OpaquePointer
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcribe-cpp")
 
     init(model: ASRModelConfiguration) throws {
@@ -71,14 +43,21 @@ final class TranscribeCppTranscriber {
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
+        try transcribe(samples: samples, runID: 0)
+    }
+
+    func transcribe(samples: ContiguousArray<Float>, runID: UInt64) throws -> String {
         guard !samples.isEmpty else {
             return ""
         }
 
         return try samples.withUnsafeBufferPointer { buffer in
-            let result = asr_transcribe(handle, buffer.baseAddress, buffer.count)
+            let result = asr_transcribe(handle, buffer.baseAddress, buffer.count, runID)
             defer { asr_result_free(result) }
 
+            if result.status == ASR_STATUS_CANCELLED {
+                throw TranscribeCppError.cancelled
+            }
             if let errorPointer = result.error {
                 throw TranscribeCppError.transcriptionFailed(String(cString: errorPointer))
             }
@@ -87,6 +66,10 @@ final class TranscribeCppTranscriber {
             }
             return String(cString: textPointer)
         }
+    }
+
+    func cancel(runID: UInt64) {
+        _ = asr_cancel(handle, runID)
     }
 
     func warmUp() async throws {

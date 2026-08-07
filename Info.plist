@@ -21,6 +21,6 @@
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Transcribe audio locally with Parakeet TDT or Nemotron ASR.</string>
+  <string>Transcribe audio locally with Parakeet ASR.</string>
 </dict>
 </plist>

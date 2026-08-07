@@ -3,4 +3,8 @@
 build/
 .build/
 **/.DS_Store
-rust/**/target/
+**/target/
+
+benchmarks/results/
+benchmarks/fixtures/audio/
+benchmarks/fixtures/manifest.json

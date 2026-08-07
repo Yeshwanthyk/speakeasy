@@ -19,14 +19,14 @@ final class TranscriptStoreTests: XCTestCase {
         return condition()
     }
 
-    private func decodedHistory(at url: URL) -> [String]? {
+    private func decodedHistory(at url: URL) -> [TranscriptRecord]? {
         guard
             let data = try? Data(contentsOf: url),
-            let decoded = try? JSONDecoder().decode([String].self, from: data)
+            let decoded = try? JSONDecoder().decode(TranscriptHistoryDocument.self, from: data)
         else {
             return nil
         }
-        return decoded
+        return decoded.records
     }
 
     func testAppendEvictsOldestEntriesPastCapacity() {
@@ -49,8 +49,30 @@ final class TranscriptStoreTests: XCTestCase {
         store.append("alpha")
         store.append("beta")
 
-        XCTAssertTrue(waitUntil { decodedHistory(at: url) == ["alpha", "beta"] })
+        XCTAssertTrue(waitUntil { decodedHistory(at: url)?.map(\.finalText) == ["alpha", "beta"] })
         XCTAssertEqual(TranscriptStore(fileURL: url).allEntries(), ["alpha", "beta"])
+    }
+
+    func testAppendResultCompletesAfterDiskWrite() async {
+        let url = temporaryHistoryURL()
+        let store = TranscriptStore(fileURL: url)
+
+        let persisted = await store.append("durable").value
+
+        XCTAssertTrue(persisted)
+        XCTAssertEqual(decodedHistory(at: url)?.map(\.finalText), ["durable"])
+    }
+
+    func testAppendReportsDiskFailureButRetainsInMemoryEntry() async throws {
+        let blockedParent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-transcript-store-blocker-\(UUID().uuidString)")
+        try Data("not-a-directory".utf8).write(to: blockedParent)
+        let store = TranscriptStore(fileURL: blockedParent.appendingPathComponent("history.json"))
+
+        let persisted = await store.append("recoverable").value
+
+        XCTAssertFalse(persisted)
+        XCTAssertEqual(store.allEntries(), ["recoverable"])
     }
 
     func testMalformedJSONLoadsAsEmptyHistory() throws {
@@ -77,7 +99,7 @@ final class TranscriptStoreTests: XCTestCase {
         let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
 
         XCTAssertEqual(store.allEntries(), legacyEntries)
-        XCTAssertTrue(waitUntil { decodedHistory(at: currentURL) == legacyEntries })
+        XCTAssertTrue(waitUntil { decodedHistory(at: currentURL)?.map(\.finalText) == legacyEntries })
     }
 
     func testLoadedHistoryIsTruncatedToCapacity() throws {
@@ -99,11 +121,92 @@ final class TranscriptStoreTests: XCTestCase {
         let store = TranscriptStore(fileURL: url)
 
         store.append("alpha")
-        XCTAssertTrue(waitUntil { decodedHistory(at: url) == ["alpha"] })
+        XCTAssertTrue(waitUntil { decodedHistory(at: url)?.map(\.finalText) == ["alpha"] })
 
         store.clear()
 
         XCTAssertTrue(store.allEntries().isEmpty)
-        XCTAssertTrue(waitUntil { decodedHistory(at: url) == [] })
+        XCTAssertTrue(waitUntil { decodedHistory(at: url)?.isEmpty == true })
+    }
+
+    func testLegacyMigrationPreservesRecordFieldsAndWritesEnvelope() throws {
+        let currentURL = temporaryHistoryURL()
+        let legacyURL = temporaryHistoryURL()
+        let legacyEntries = ["oldest", "newest"]
+        try FileManager.default.createDirectory(
+            at: legacyURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try JSONEncoder().encode(legacyEntries).write(to: legacyURL)
+
+        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
+
+        XCTAssertEqual(store.allRecords().map(\.finalText), legacyEntries)
+        XCTAssertEqual(store.allRecords().map(\.rawText), legacyEntries)
+        XCTAssertTrue(store.allRecords().allSatisfy { $0.backend == "unknown" })
+        XCTAssertTrue(store.allRecords().allSatisfy { $0.outcome == .eventsPosted })
+        XCTAssertTrue(waitUntil {
+            guard let data = try? Data(contentsOf: currentURL),
+                  let document = try? JSONDecoder().decode(TranscriptHistoryDocument.self, from: data)
+            else { return false }
+            return document.schemaVersion == 1 && document.records.count == 2
+        })
+    }
+
+    func testMalformedCanonicalDoesNotResurrectLegacyFallback() throws {
+        let currentURL = temporaryHistoryURL()
+        let legacyURL = temporaryHistoryURL()
+        try FileManager.default.createDirectory(
+            at: currentURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: legacyURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("not-json".utf8).write(to: currentURL)
+        try JSONEncoder().encode(["legacy must stay unused"]).write(to: legacyURL)
+
+        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
+
+        XCTAssertTrue(store.allEntries().isEmpty)
+        XCTAssertEqual(try Data(contentsOf: currentURL), Data("not-json".utf8))
+    }
+
+    func testRecordOutcomeAndTimingsUpdateDurably() async {
+        let url = temporaryHistoryURL()
+        let store = TranscriptStore(fileURL: url)
+        let timings = TimingSnapshot(
+            captureStartMs: 1,
+            releaseToStopMs: 2,
+            transcriptionMs: 3,
+            releaseToTextMs: 4,
+            releaseToPasteMs: nil,
+            transcriptionEndToPasteMs: nil,
+            utteranceMs: 5
+        )
+        let record = TranscriptRecord(
+            rawText: "raw",
+            finalText: "final",
+            backend: "parakeet-unified-en",
+            outcome: .transcriptPersisted,
+            timings: timings
+        )
+
+        let appendSucceeded = await store.append(record).value
+        let updateSucceeded = await store.update(
+            id: record.id,
+            outcome: .eventsPosted,
+            timings: timings
+        ).value
+        XCTAssertTrue(appendSucceeded)
+        XCTAssertTrue(updateSucceeded)
+
+        let reloaded = TranscriptStore(fileURL: url)
+        XCTAssertEqual(reloaded.allRecords().first?.rawText, "raw")
+        XCTAssertEqual(reloaded.allRecords().first?.finalText, "final")
+        XCTAssertEqual(reloaded.allRecords().first?.backend, "parakeet-unified-en")
+        XCTAssertEqual(reloaded.allRecords().first?.outcome, .eventsPosted)
+        XCTAssertEqual(reloaded.allRecords().first?.timings, timings)
     }
 }

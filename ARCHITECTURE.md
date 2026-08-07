@@ -32,9 +32,9 @@ The capture lifecycle observes `AVAudioEngineConfigurationChange` and wake event
 
 ## Model Lifecycle
 
-`ASRModelKind` selects one pinned Q8_0 GGUF artifact. Each artifact records an immutable Hugging Face revision, expected byte count, and SHA-256. `ASRModelInstaller` downloads into the destination filesystem, verifies it, and atomically promotes it. Existing ONNX directories are not consulted.
+`ASRModelKind` selects one pinned Q8_0 GGUF artifact. Each artifact records an immutable Hugging Face revision, expected byte count, SHA-256, and license. `ASRModelInstaller` downloads into the destination filesystem, verifies it, and atomically promotes it. Existing ONNX directories are not consulted.
 
-The default is Parakeet Unified EN. Parakeet TDT v3 and Nemotron 3.5 are alternative GGUF models. A model switch downloads if necessary, constructs and warms a replacement off-main, then atomically swaps the app's `Transcriber`; failed replacements do not change the persisted selection.
+The default is Parakeet TDT+CTC 110M Q8_0. Parakeet Unified EN 0.6B Q8_0 is the only fallback and user-visible alternative. Legacy Parakeet TDT v3 and Nemotron selections migrate to Unified. A model switch downloads if necessary, verifies, constructs, and warms a replacement off-main, then atomically swaps the app's `Transcriber` and persists the selection; any failure leaves the last-known-good transcriber and selection unchanged.
 
 ## Native Boundary
 

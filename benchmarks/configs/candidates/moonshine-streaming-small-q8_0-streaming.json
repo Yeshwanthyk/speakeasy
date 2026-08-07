@@ -1,0 +1,10 @@
+{
+  "schema": "speakeasy.speech-bench.config.v1",
+  "preset": "candidate-moonshine-streaming-small-q8_0-realtime",
+  "model": {"path": "~/.cache/wisp/benchmark-models/moonshine-streaming-small-Q8_0.gguf", "catalog_id": "moonshine-streaming-small-q8_0", "backend": "auto", "gpu_device": 0},
+  "session": {"threads": 0, "kv_type": "auto", "context": 0},
+  "run": {"task": "transcribe", "timestamps": "none", "punctuation": "default", "inverse_text_normalization": "default", "language": "en", "keep_special_tags": false, "speculative_drafts": -1},
+  "stream": {"commit_policy": "auto", "stable_prefix_agreement": 0, "feed_chunk_ms": 80, "family": "auto", "attention_context_right": null, "left_ms": null, "chunk_ms": null, "right_ms": null},
+  "execution": {"mode": "streaming_realtime", "repetitions": 5, "warmup_samples": 1, "timeout_seconds": 180, "order_seed": 20260806},
+  "corpus_manifest": "benchmarks/fixtures/manifest.json"
+}

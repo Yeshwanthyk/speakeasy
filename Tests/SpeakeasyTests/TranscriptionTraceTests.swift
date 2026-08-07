@@ -65,21 +65,4 @@ final class TranscriptionTraceTests: XCTestCase {
         XCTAssertNotNil(trace.stopReturnedAt)
     }
 
-    #if DEBUG
-    func testDebugSummaryRequiresCaptureAndReleaseToTextLatencies() {
-        let summary = TranscriptionDebugSummary()
-        var incomplete = TranscriptionTrace(hotkeyPressedAt: 1_000_000)
-
-        XCTAssertNil(summary.record(trace: incomplete))
-
-        incomplete.markCaptureStarted(at: 2_000_000)
-        incomplete.markHotkeyReleased(at: 3_000_000)
-        incomplete.markTranscriptionEnded(at: 8_000_000)
-
-        let line = summary.record(trace: incomplete)
-        XCTAssertTrue(line?.contains("debug_latency_summary count=1") == true)
-        XCTAssertTrue(line?.contains("capture_start_p50_ms=1.0") == true)
-        XCTAssertTrue(line?.contains("release_to_text_p50_ms=5.0") == true)
-    }
-    #endif
 }

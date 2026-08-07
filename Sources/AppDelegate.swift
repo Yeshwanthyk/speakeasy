@@ -35,12 +35,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let store = coordinator.transcriptStore {
                     let menuBarController = MenuBarController(
                         store: store,
-                        paster: coordinator.paster,
+                        diagnosticsStore: coordinator.diagnosticsStore,
+                        pasteTranscript: { [weak coordinator] text in
+                            _ = coordinator?.pasteTranscript(text)
+                        },
                         currentASRModelKind: { [weak coordinator] in
-                            coordinator?.selectedASRModelKind() ?? .parakeetUnified
+                            coordinator?.selectedASRModelKind() ?? .parakeet110M
                         },
                         selectASRModel: { [weak coordinator] kind in
                             coordinator?.switchASRModel(to: kind)
+                        },
+                        copyLastTranscript: { [weak coordinator] in
+                            _ = coordinator?.copyLastTranscript()
+                        },
+                        pasteLastTranscript: { [weak coordinator] in
+                            _ = coordinator?.pasteLastTranscript()
+                        },
+                        currentInvocationMode: { [weak coordinator] in
+                            coordinator?.selectedInvocationMode() ?? .toggle
+                        },
+                        selectInvocationMode: { [weak coordinator] mode in
+                            coordinator?.setInvocationMode(mode)
+                        },
+                        cancelDictation: { [weak coordinator] in
+                            coordinator?.handle(.cancel)
+                        },
+                        canCancelDictation: { [weak coordinator] in
+                            coordinator?.canCancelDictation() ?? false
+                        },
+                        retryLastFailedCapture: { [weak coordinator] in
+                            coordinator?.retryLastFailedCapture()
+                        },
+                        discardFailedCapture: { [weak coordinator] in
+                            coordinator?.discardFailedCapture()
+                        },
+                        canRetryFailedCapture: { [weak coordinator] in
+                            coordinator?.canRetryFailedCapture() ?? false
+                        },
+                        canDiscardFailedCapture: { [weak coordinator] in
+                            coordinator?.canDiscardFailedCapture() ?? false
+                        },
+                        availableInputDevices: { [weak coordinator] in
+                            coordinator?.availableInputDevices() ?? []
+                        },
+                        selectedInputDeviceUID: { [weak coordinator] in
+                            coordinator?.selectedInputDeviceUID()
+                        },
+                        selectInputDevice: { [weak coordinator] uid in
+                            coordinator?.selectInputDevice(uid: uid)
+                        },
+                        canSelectInputDevice: { [weak coordinator] in
+                            coordinator?.canSelectInputDevice() ?? false
+                        },
+                        microphoneLevelSnapshot: { [weak coordinator] in
+                            coordinator?.microphoneLevelSnapshot()
+                                ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

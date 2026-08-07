@@ -36,9 +36,15 @@ build_and_install() {
   ditto "$BUILD_APP" "$STAGING_APP"
   codesign --verify --deep --strict "$STAGING_APP"
   stop_app
-  rm -rf "$INSTALL_APP"
-  mv "$STAGING_APP" "$INSTALL_APP"
-  codesign --verify --deep --strict "$INSTALL_APP"
+  "$ROOT_DIR/script/atomic_replace_bundle.swift" "$INSTALL_APP" "$STAGING_APP"
+  if ! codesign --verify --deep --strict "$INSTALL_APP"; then
+    if [[ -d "$STAGING_APP" ]]; then
+      "$ROOT_DIR/script/atomic_replace_bundle.swift" "$INSTALL_APP" "$STAGING_APP" || true
+    fi
+    echo "Installed bundle verification failed; previous bundle restored" >&2
+    exit 1
+  fi
+  rm -rf "$STAGING_APP"
 }
 
 open_app() {

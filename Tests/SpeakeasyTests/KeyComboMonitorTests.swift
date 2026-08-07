@@ -18,4 +18,23 @@ final class KeyComboMonitorTests: XCTestCase {
 
         XCTAssertEqual(KeyComboMonitor.carbonModifiers(from: flags), UInt32(cmdKey))
     }
+
+    func testPushToTalkKeyStateIgnoresRepeatsAndDuplicateOrStaleKeyUps() {
+        var state = PushToTalkKeyState()
+
+        XCTAssertEqual(state.keyDown(isMatching: true, isRepeat: false), .pushToTalkBegan)
+        XCTAssertNil(state.keyDown(isMatching: true, isRepeat: true))
+        XCTAssertNil(state.keyDown(isMatching: true, isRepeat: false))
+        XCTAssertEqual(state.keyUp(), .pushToTalkEnded)
+        XCTAssertNil(state.keyUp())
+    }
+
+    func testPushToTalkKeyStateResetsStaleReleaseAcrossModeChanges() {
+        var state = PushToTalkKeyState()
+
+        XCTAssertEqual(state.keyDown(isMatching: true, isRepeat: false), .pushToTalkBegan)
+        state.reset()
+
+        XCTAssertNil(state.keyUp())
+    }
 }

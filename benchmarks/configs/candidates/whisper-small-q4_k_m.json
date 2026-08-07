@@ -1,0 +1,10 @@
+{
+  "schema": "speakeasy.speech-bench.config.v1",
+  "preset": "candidate-whisper-small-q4_k_m-warm",
+  "model": {"path": "~/.cache/wisp/benchmark-models/whisper-small-Q4_K_M.gguf", "catalog_id": "whisper-small-q4_k_m", "backend": "auto", "gpu_device": 0},
+  "session": {"threads": 0, "kv_type": "auto", "context": 0},
+  "run": {"task": "transcribe", "timestamps": "auto", "punctuation": "default", "inverse_text_normalization": "default", "language": null, "keep_special_tags": false, "speculative_drafts": -1},
+  "stream": {"commit_policy": "auto", "stable_prefix_agreement": 0, "feed_chunk_ms": 100, "family": "auto", "attention_context_right": null, "left_ms": null, "chunk_ms": null, "right_ms": null},
+  "execution": {"mode": "warm", "repetitions": 5, "warmup_samples": 1, "timeout_seconds": 300, "order_seed": 20260806},
+  "corpus_manifest": "benchmarks/fixtures/manifest.json"
+}

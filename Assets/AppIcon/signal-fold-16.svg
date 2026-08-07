@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Signal Fold 16-point optical master</title>
+  <desc id="desc">Four heavy horizontal bands with a straight, exaggerated central fold.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="#EDEBE3" shape-rendering="crispEdges"/>
+  <g fill="none" stroke="#1B1C19" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M184 260 H392 L464 340 H560 L632 260 H840"/>
+    <path d="M184 436 H392 L464 516 H560 L632 436 H840"/>
+    <path d="M184 612 H392 L464 692 H560 L632 612 H840"/>
+    <path d="M184 788 H392 L464 868 H560 L632 788 H840"/>
+  </g>
+</svg>

@@ -1,66 +1,115 @@
-# Speakeasy
+<div align="center">
+  <img src="Assets/AppIcon/signal-fold.svg" width="144" alt="Speakeasy Signal Fold icon">
+  <h1>Speakeasy</h1>
+  <p><strong>Fast, private dictation for macOS.</strong></p>
+  <p>Press a shortcut, speak, and keep writing. Transcription stays on your Mac.</p>
+</div>
 
-Minimal macOS dictation app using local GGUF speech models through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), with Metal acceleration on Apple Silicon.
+Speakeasy is a small menu-bar dictation app built around one fast path: prepared audio capture, a retained local speech model, deterministic cleanup, and reliable delivery into the app you were using.
 
-## Requirements
+## Why Speakeasy
 
-- macOS 12 or newer with Xcode command-line tools (`swiftc`, `iconutil`, `codesign`)
-- Rust toolchain; `rust/asr_bridge/rust-toolchain.toml` pins the build version
-- Approximately 1.5 GB free for the selected model download and staging copy
+- **Local after download.** Audio and transcription stay on-device.
+- **Fast by default.** Parakeet TDT+CTC 110M runs through Metal on Apple Silicon.
+- **Recoverable.** Accepted text is saved before paste; Copy Last, Paste Last, and one failed-capture retry are available from the menu.
+- **Predictable.** Spoken punctuation and personal corrections are deterministic—no second model rewrites your words.
+- **Small surface.** Two models, one menu-bar app, bounded history, and content-free diagnostics.
+
+## Performance
+
+On an M4 Pro, the default 110M model reproduced the following result against the previous Parakeet Unified default:
+
+| | Parakeet 110M | Parakeet Unified |
+|---|---:|---:|
+| Warm inference p50 | **22.34 ms** | 47.52 ms |
+| Warm inference p95 | **42.45 ms** | 95.23 ms |
+| Model load p50 | **60.82 ms** | 208.34 ms |
+| Peak RSS | **281.8 MiB** | 915.5 MiB |
+| Model artifact | **135 MB** | 731 MB |
+
+These are directional results from five synthetic English fixtures, repeated and interleaved on one machine. They explain the default choice; they are not a universal accuracy claim. The complete methodology and caveats are in [`docs/research/compact-model-benchmark-synthesis.md`](docs/research/compact-model-benchmark-synthesis.md).
+
+## Install from source
+
+### Requirements
+
+- macOS 12 or newer
+- Apple Silicon recommended for Metal acceleration
+- Xcode command-line tools
+- Rust toolchain (`rust/asr_bridge/rust-toolchain.toml` pins the version)
+- About 300 MB free for the default model plus download staging
+
+```bash
+git clone https://github.com/Yeshwanthyk/speakeasy.git
+cd speakeasy
+./script/build_and_run.sh run
+```
+
+The script builds, signs, verifies, installs to `~/Applications/Speakeasy.app`, and opens the app. On first launch, Speakeasy downloads the default model from a pinned Hugging Face revision and verifies its exact size and SHA-256 before loading it.
+
+To build without installing:
+
+```bash
+./build.sh
+open build/Speakeasy.app
+```
+
+## Use
+
+1. Grant microphone permission when prompted.
+2. Grant Accessibility permission if you want automatic paste.
+3. Press **Hyper+S**—Command+Control+Option+Shift+S—to start and stop dictation.
+4. Use the menu-bar icon to choose push-to-talk or hands-free mode, cancel, change microphones, inspect stats, or recover the last transcript.
+
+Speakeasy preserves the target application captured when recording begins. If automatic delivery is unavailable, the transcript remains in local history and on explicit recovery actions.
 
 ## Models
 
-On first launch Speakeasy downloads, verifies, loads, and warms Parakeet Unified EN 0.6B Q8_0:
+Speakeasy deliberately exposes only two verified Q8 models:
 
-```text
-~/Library/Application Support/com.speakeasy.app/models/parakeet-unified-en-0.6b-Q8_0.gguf
+| Role | Model | Artifact | License |
+|---|---|---:|---|
+| **Default** | Parakeet TDT+CTC 110M | 135 MB | CC-BY-4.0 |
+| Fallback | Parakeet Unified EN 0.6B | 731 MB | CC-BY-4.0 |
+
+Switching is transactional: download → verify → load → warm → persist. A failed replacement never displaces the last-known-good model.
+
+Optional launch selection:
+
+```bash
+export SPEAKEASY_ASR_MODEL="parakeet-tdt-ctc-110m" # default
+export SPEAKEASY_ASR_MODEL="parakeet-unified-en"    # fallback
 ```
 
-The menu bar `Audio Model` submenu also supports:
+Optional paths for an already-downloaded artifact still require an exact verification match:
 
-- Parakeet TDT v3 Q8_0: multilingual batch transcription
-- Nemotron Streaming 3.5 Q8_0: multilingual transcription
-
-Artifacts are downloaded from immutable Hugging Face revisions and must match their catalog byte count and SHA-256 before atomic promotion. The currently selected model is persisted only after it loads and warms successfully.
-
-Select a model before launch:
-
-```sh
-export SPEAKEASY_ASR_MODEL="parakeet-unified-en" # default
-export SPEAKEASY_ASR_MODEL="parakeet-tdt-v3"
-export SPEAKEASY_ASR_MODEL="nemotron-3.5-asr"
-```
-
-Override an artifact with an already-downloaded matching Q8_0 GGUF:
-
-```sh
+```bash
+export PARAKEET_110M_GGUF_PATH="/path/to/parakeet-tdt_ctc-110m-Q8_0.gguf"
 export PARAKEET_UNIFIED_GGUF_PATH="/path/to/parakeet-unified-en-0.6b-Q8_0.gguf"
-export PARAKEET_TDT_GGUF_PATH="/path/to/parakeet-tdt-0.6b-v3-Q8_0.gguf"
-export NEMOTRON_GGUF_PATH="/path/to/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
 ```
 
-Legacy `parakeet-tdt` and `nemotron-3.5-asr` selection values still map to their GGUF replacements. ONNX model directories are no longer used.
+## Privacy and storage
 
-## Build
+- Microphone audio is processed locally and is not retained on disk.
+- One failed capture may remain bounded in memory for explicit retry; it is cleared on success, discard, a new recording, or exit.
+- Transcript history is bounded and stored locally so delivery failures are recoverable.
+- Diagnostics contain timings, counters, backend information, and typed outcomes—not transcript text or audio.
+- Network access is used to download a selected model from its pinned source.
 
-```sh
+## Development
+
+```bash
+swift test
+cargo test --locked --manifest-path rust/asr_bridge/Cargo.toml
+./script/test_asr_bridge_abi.sh
+./script/test_benchmark.sh
 ./build.sh
 ```
 
-The app is written to `build/Speakeasy.app`. The build compiles `transcribe-cpp 0.1.3` with Metal and `GGML_NATIVE=OFF`, embeds `libasr_bridge.dylib`, and signs the dylib and app. Set `SPEAKEASY_SIGN_IDENTITY` to select a development identity; without one, the build falls back to ad-hoc signing.
+`swift test` covers the Swift library. The ABI smoke test exercises the real Swift↔Rust C boundary. `build.sh` also compiles app-only startup and native-transcriber wiring, embeds `libasr_bridge.dylib`, signs the bundle, and verifies its icon and structure.
 
-## Test
+For the execution path and state ownership, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For the standalone model harness, see [`benchmarks/README.md`](benchmarks/README.md).
 
-```sh
-swift test
-TRANSCRIBE_CMAKE_ARGS=-DGGML_NATIVE=OFF \
-  cargo test --manifest-path rust/asr_bridge/Cargo.toml --locked
-```
+---
 
-`swift test` exercises the Swift library target. `./build.sh` additionally compiles the app-only files (`AppDelegate.swift`, `TranscribeCppTranscriber.swift`, and `main.swift`) and verifies the signed bundle.
-
-## Runtime
-
-- Hotkey toggle: Hyper+S (Cmd+Ctrl+Opt+Shift+S)
-- Microphone permission is requested on first launch.
-- Accessibility permission is required for auto-paste.
+Speakeasy uses [`transcribe.cpp`](https://github.com/handy-computer/transcribe.cpp) for local GGUF inference. Model weights remain subject to their respective licenses and attribution requirements.
