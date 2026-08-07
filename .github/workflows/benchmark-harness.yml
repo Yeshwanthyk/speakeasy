@@ -1,0 +1,42 @@
+name: Benchmark harness correctness
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/**"
+      - "rust/asr_bridge/Cargo.toml"
+      - "rust/asr_bridge/Cargo.lock"
+      - "script/benchmark.sh"
+      - "script/test_benchmark.sh"
+      - ".github/workflows/benchmark-harness.yml"
+  push:
+    branches: [main]
+    paths:
+      - "benchmarks/**"
+      - "rust/asr_bridge/Cargo.toml"
+      - "rust/asr_bridge/Cargo.lock"
+      - "script/benchmark.sh"
+      - "script/test_benchmark.sh"
+      - ".github/workflows/benchmark-harness.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            benchmarks/speech-bench
+            rust/asr_bridge
+      - name: Test benchmark harness
+        run: ./script/test_benchmark.sh

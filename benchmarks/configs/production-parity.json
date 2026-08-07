@@ -1,0 +1,41 @@
+{
+  "schema": "speakeasy.speech-bench.config.v1",
+  "preset": "production-parity",
+  "model": {
+    "path": "~/Library/Application Support/com.speakeasy.app/models/parakeet-unified-en-0.6b-Q8_0.gguf",
+    "backend": "auto",
+    "gpu_device": 0
+  },
+  "session": {
+    "threads": 0,
+    "kv_type": "auto",
+    "context": 0
+  },
+  "run": {
+    "task": "transcribe",
+    "timestamps": "auto",
+    "punctuation": "default",
+    "inverse_text_normalization": "default",
+    "language": null,
+    "keep_special_tags": false,
+    "speculative_drafts": -1
+  },
+  "stream": {
+    "commit_policy": "auto",
+    "stable_prefix_agreement": 0,
+    "feed_chunk_ms": 100,
+    "family": "auto",
+    "attention_context_right": null,
+    "left_ms": null,
+    "chunk_ms": null,
+    "right_ms": null
+  },
+  "execution": {
+    "mode": "warm",
+    "repetitions": 1,
+    "warmup_samples": 1,
+    "timeout_seconds": 120,
+    "order_seed": 20260806
+  },
+  "corpus_manifest": "benchmarks/fixtures/manifest.json"
+}
