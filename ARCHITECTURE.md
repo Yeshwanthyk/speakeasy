@@ -4,15 +4,16 @@ Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it
 
 ## Data Flow
 
-1. `KeyComboMonitor` receives the Hyper+S hotkey.
+1. `KeyComboMonitor` receives the persisted dictation shortcut, which defaults to standalone fn.
 2. `AppCoordinator` moves through `startingCapture` and enters recording only after `AudioCapture` confirms a fresh input callback.
 3. On the next hotkey press, `AppCoordinator` moves to transcribing, hides the screen flash, and calls `AudioCapture.endRecording()` on the injected transcription queue.
 4. `AudioCapture` returns captured samples plus pre-roll and stop-grace metadata.
 5. `AppCoordinator` rejects empty, too-short, or silent audio before transcription.
 6. The `Transcriber` implementation pins the contiguous PCM buffer and calls the Rust ASR bridge.
 7. Rust borrows the 16 kHz mono samples and runs a retained transcribe.cpp GGUF session using Metal or CPU.
-8. `AppCoordinator` rejects empty or likely hallucinated transcription text before paste.
-9. Successful text is appended to `TranscriptStore` and pasted through `Pasting`.
+8. `AppCoordinator` rejects empty or likely hallucinated transcription text before correction.
+9. The accepted raw text passes through an immutable spoken-command and exact-correction matcher compiled when settings change.
+10. Raw and corrected text are appended to `TranscriptStore`; corrected text is pasted through `Pasting`.
 
 ## State Machine
 
@@ -23,6 +24,10 @@ idle -> startingCapture -> recording -> transcribing(token) -> idle
 Capture must confirm a running engine and a fresh converted input callback before `startingCapture` becomes `recording`. The token prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
 
 UI-affecting collaborators are main-actor isolated. Blocking capture stop and native inference run off the main thread.
+
+## Personal Corrections
+
+`TranscriptCorrectionStore` keeps a versioned, bounded JSON document under Application Support. The Corrections window validates and persists a replacement snapshot on a utility queue before `AppCoordinator` atomically publishes its precompiled `TranscriptPostProcessor`. The dictation path only snapshots the immutable processor and scans accepted text; it never reads settings, writes correction data, builds regular expressions, or recursively processes replacement output.
 
 ## Audio Capture
 

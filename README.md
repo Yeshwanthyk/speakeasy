@@ -58,10 +58,14 @@ open build/Speakeasy.app
 
 1. Grant microphone permission when prompted.
 2. Grant Accessibility permission if you want automatic paste.
-3. Press **Hyper+S**—Command+Control+Option+Shift+S—to start and stop dictation.
-4. Use the menu-bar icon to choose push-to-talk or hands-free mode, cancel, change microphones, inspect stats, or recover the last transcript.
+3. Tap **fn** to start and stop in Hands-Free mode, or hold **fn** to dictate in Push-to-Talk mode. Speakeasy ignores fn when you use it with another key.
+4. Use the menu-bar icon to change or reset the shortcut, choose a dictation mode, cancel, change microphones, edit personal corrections, inspect stats, or recover the last transcript.
 
 Speakeasy preserves the target application captured when recording begins. If automatic delivery is unavailable, the transcript remains in local history and on explicit recovery actions.
+
+## Personal corrections
+
+Choose **Corrections…** from the menu to add exact **Heard → Write** replacements. Corrections are whole-word or whole-phrase matches, ignore case and diacritics, and apply to the next dictation after Save without relaunching. Up to 128 rules are stored locally; matching performs no disk access or rule compilation during dictation.
 
 ## Models
 
