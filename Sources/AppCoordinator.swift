@@ -12,6 +12,8 @@ protocol AudioCapturing {
     func beginRecording() throws
     /// Stop accumulating; flush and return all captured samples plus capture metadata.
     func endRecording() -> AudioCaptureResult
+    /// Stop accumulating and discard the active recording without flushing audio.
+    func discardRecording()
     /// Stop the engine entirely. Call at app termination.
     func shutdown()
 }
@@ -41,7 +43,7 @@ protocol AccessibilityChecking {
     func hasAccessibilityAccess() -> Bool
 }
 
-typealias KeyMonitorFactory = (_ callback: @escaping () -> Void) -> KeyComboMonitor?
+typealias KeyMonitorFactory = (_ callback: @escaping (DictationIntent) -> Void) -> KeyComboMonitor?
 typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConfiguration
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
 typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
@@ -59,7 +61,7 @@ struct SystemAccessibilityChecker: AccessibilityChecking {
 final class AppCoordinator: @unchecked Sendable {
     private enum State {
         case idle
-        case startingCapture
+        case startingCapture(UUID)
         case recording
         case transcribing(UUID, runID: UInt64, didTimeOut: Bool, didCancel: Bool)
     }
@@ -84,8 +86,10 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     private enum Transition {
-        case start(TranscriptionTrace, TranscriptDeliveryTarget)
+        case start(UUID, TranscriptionTrace, TranscriptDeliveryTarget)
         case stop(UUID, UInt64, TranscriptionTrace, TranscriptDeliveryTarget)
+        case discardCapture(TranscriptionTrace?, notify: Bool)
+        case cancelTranscription(UInt64, TranscriptionTrace)
         case blocked(TranscriptionTrace, String)
         case ignore(String?)
     }
@@ -123,6 +127,7 @@ final class AppCoordinator: @unchecked Sendable {
     private let modelSelectionStore: ASRModelSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
+    private let intentLock = UnfairLock()
     private var state: State = .idle
     private var nextTranscriptionID: UInt64 = 0
     private var warmupState: WarmupState = .pending
@@ -136,6 +141,7 @@ final class AppCoordinator: @unchecked Sendable {
     /// Target captured before automatic recording starts. Recovery actions do
     /// not use this value; they resolve a fresh external target.
     private var activeDeliveryTarget: TranscriptDeliveryTarget?
+    private var invocationMode: DictationInvocationMode = .toggle
     private let transcriptionQueue: DispatchQueue
     private let flash: Flashing
     private var keyMonitor: KeyComboMonitor?
@@ -195,8 +201,8 @@ final class AppCoordinator: @unchecked Sendable {
             self?.handleAudioCaptureEvent(event)
         }
 
-        keyMonitor = keyMonitorFactory? { [weak self] in
-            self?.toggleRecording()
+        keyMonitor = keyMonitorFactory? { [weak self] intent in
+            self?.handle(intent)
         }
 
         logger.debug("AppCoordinator ready")
@@ -240,6 +246,26 @@ final class AppCoordinator: @unchecked Sendable {
 
     func selectedASRModelKind() -> ASRModelKind {
         stateLock.withLock { currentASRModelKind }
+    }
+
+    func selectedInvocationMode() -> DictationInvocationMode {
+        stateLock.withLock { invocationMode }
+    }
+
+    func setInvocationMode(_ mode: DictationInvocationMode) {
+        stateLock.withLock { invocationMode = mode }
+        keyMonitor?.setInvocationMode(mode)
+    }
+
+    func canCancelDictation() -> Bool {
+        stateLock.withLock {
+            switch state {
+            case .idle:
+                return false
+            case .startingCapture, .recording, .transcribing:
+                return true
+            }
+        }
     }
 
     func switchASRModel(to kind: ASRModelKind) {
@@ -374,9 +400,34 @@ final class AppCoordinator: @unchecked Sendable {
     // after a later session has already moved the state forward.
 
     func toggleRecording() {
+        handle(.toggle)
+    }
+
+    /// Accepts all external dictation input. Input monitors translate device
+    /// events into this intent surface; this coordinator remains the only
+    /// owner of recording and transcription state.
+    func handle(_ intent: DictationIntent) {
+        intentLock.withLock {
+            handleIntent(intent)
+        }
+    }
+
+    private func handleIntent(_ intent: DictationIntent) {
         let now = TranscriptionTrace.timestamp()
 
         let transition = stateLock.withLock { () -> Transition in
+            func start() -> Transition {
+                let captureID = UUID()
+                let trace = TranscriptionTrace(
+                    hotkeyPressedAt: now,
+                    backend: currentASRModelKind.preferenceValue
+                )
+                state = .startingCapture(captureID)
+                activeTrace = trace
+                activeDeliveryTarget = deliveryTargetProvider.currentTarget()
+                return .start(captureID, trace, activeDeliveryTarget ?? .unavailable)
+            }
+
             guard warmupState.isReady else {
                 return .blocked(
                     TranscriptionTrace(
@@ -387,19 +438,7 @@ final class AppCoordinator: @unchecked Sendable {
                 )
             }
 
-            switch state {
-            case .idle:
-                state = .startingCapture
-                return .start(
-                    TranscriptionTrace(
-                        hotkeyPressedAt: now,
-                        backend: currentASRModelKind.preferenceValue
-                    ),
-                    deliveryTargetProvider.currentTarget()
-                )
-            case .startingCapture:
-                return .ignore("Microphone reconnecting, please wait")
-            case .recording:
+            func stop() -> Transition {
                 let token = UUID()
                 nextTranscriptionID &+= 1
                 if nextTranscriptionID == 0 {
@@ -414,18 +453,72 @@ final class AppCoordinator: @unchecked Sendable {
                 activeDeliveryTarget = nil
                 activeTranscriptionTrace = trace
                 return .stop(token, runID, trace, target)
-            case .transcribing:
-                return .ignore(nil)
+            }
+
+            switch intent {
+            case .toggle:
+                switch state {
+                case .idle:
+                    return start()
+                case .startingCapture:
+                    return .ignore("Microphone reconnecting, please wait")
+                case .recording:
+                    return stop()
+                case .transcribing:
+                    return .ignore(nil)
+                }
+
+            case .pushToTalkBegan:
+                guard invocationMode == .pushToTalk else { return .ignore(nil) }
+                switch state {
+                case .idle:
+                    return start()
+                case .startingCapture, .recording, .transcribing:
+                    return .ignore(nil)
+                }
+
+            case .pushToTalkEnded:
+                guard invocationMode == .pushToTalk else { return .ignore(nil) }
+                switch state {
+                case .recording:
+                    return stop()
+                case .idle, .startingCapture, .transcribing:
+                    return .ignore(nil)
+                }
+
+            case .cancel:
+                switch state {
+                case .idle:
+                    return .ignore(nil)
+                case .startingCapture:
+                    let trace = activeTrace
+                    state = .idle
+                    activeTrace = nil
+                    activeDeliveryTarget = nil
+                    return .discardCapture(trace, notify: true)
+                case .recording:
+                    let trace = activeTrace
+                    state = .idle
+                    activeTrace = nil
+                    activeDeliveryTarget = nil
+                    return .discardCapture(trace, notify: true)
+                case .transcribing(let token, let runID, let didTimeOut, let didCancel):
+                    guard !didTimeOut, !didCancel, let trace = activeTranscriptionTrace else {
+                        return .ignore(nil)
+                    }
+                    state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: true)
+                    return .cancelTranscription(runID, trace)
+                }
             }
         }
 
         switch transition {
-        case .start(var trace, let target):
+        case .start(let captureID, var trace, let target):
             do {
                 try audioCapture.beginRecording()
                 trace.markCaptureStarted()
                 let didStart = stateLock.withLock { () -> Bool in
-                    guard case .startingCapture = state else {
+                    guard case .startingCapture(let currentID) = state, currentID == captureID else {
                         return false
                     }
                     state = .recording
@@ -434,6 +527,7 @@ final class AppCoordinator: @unchecked Sendable {
                     return true
                 }
                 guard didStart else {
+                    audioCapture.discardRecording()
                     return
                 }
 
@@ -458,6 +552,24 @@ final class AppCoordinator: @unchecked Sendable {
             }
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
 
+        case .discardCapture(let trace, let notify):
+            audioCapture.discardRecording()
+            Task { @MainActor [flash] in
+                flash.hide(completion: nil)
+            }
+            if let trace {
+                recordTerminal(trace: trace, outcome: .cancelled)
+            }
+            if notify {
+                feedback.notify(event: .error("Recording cancelled"))
+            }
+
+        case .cancelTranscription(let runID, let trace):
+            let transcriber = stateLock.withLock { self.transcriber }
+            transcriber.cancel(runID: runID)
+            recordTerminal(trace: trace, outcome: .cancelled)
+            feedback.notify(event: .error("Transcription cancelled"))
+
         case .blocked(let trace, let message):
             recordTerminal(trace: trace, outcome: .warmupBlocked)
             feedback.notify(event: .error(message))
@@ -476,23 +588,7 @@ final class AppCoordinator: @unchecked Sendable {
     /// coordinator remains transcribing until the native call settles, so a
     /// late completion cannot overlap a later session.
     func cancelTranscription() {
-        let cancellation = stateLock.withLock { () -> (runID: UInt64, trace: TranscriptionTrace)? in
-            guard case let .transcribing(token, runID, didTimeOut, didCancel) = state,
-                  !didTimeOut,
-                  !didCancel,
-                  let trace = activeTranscriptionTrace else {
-                return nil
-            }
-
-            state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: true)
-            return (runID, trace)
-        }
-
-        guard let cancellation else { return }
-        let transcriber = stateLock.withLock { self.transcriber }
-        transcriber.cancel(runID: cancellation.runID)
-        recordTerminal(trace: cancellation.trace, outcome: .cancelled)
-        feedback.notify(event: .error("Transcription cancelled"))
+        handle(.cancel)
     }
 
     private func handleAudioCaptureEvent(_ event: AudioCaptureEvent) {

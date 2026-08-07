@@ -50,6 +50,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         },
                         pasteLastTranscript: { [weak coordinator] in
                             _ = coordinator?.pasteLastTranscript()
+                        },
+                        currentInvocationMode: { [weak coordinator] in
+                            coordinator?.selectedInvocationMode() ?? .toggle
+                        },
+                        selectInvocationMode: { [weak coordinator] mode in
+                            coordinator?.setInvocationMode(mode)
+                        },
+                        cancelDictation: { [weak coordinator] in
+                            coordinator?.handle(.cancel)
+                        },
+                        canCancelDictation: { [weak coordinator] in
+                            coordinator?.canCancelDictation() ?? false
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

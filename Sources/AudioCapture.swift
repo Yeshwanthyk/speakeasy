@@ -418,6 +418,27 @@ final class AudioCapture: @unchecked Sendable {
         )
     }
 
+    func discardRecording() {
+        var shouldSignalGrace = false
+        stateLock.withLock {
+            shouldSignalGrace = awaitingGraceSignal
+            isRecording = false
+            graceDeadlineNs = nil
+            awaitingGraceSignal = false
+            prependedSampleCount = 0
+            recordingWasInterrupted = false
+        }
+
+        if shouldSignalGrace {
+            graceSemaphore.signal()
+        }
+
+        frontLock.withLock { frontBuffer.removeAll(keepingCapacity: true) }
+        backLock.withLock { backBuffer.removeAll(keepingCapacity: true) }
+        ringBuffer.clear()
+        logger.debug("Recording cancelled and audio discarded")
+    }
+
     func shutdown() {
         var shouldSignalGrace = false
         let shouldShutdown = stateLock.withLock { () -> Bool in

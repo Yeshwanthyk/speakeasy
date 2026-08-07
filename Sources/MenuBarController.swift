@@ -14,6 +14,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let pasteLastTranscript: () -> Void
     private let currentASRModelKind: () -> ASRModelKind
     private let selectASRModel: (ASRModelKind) -> Void
+    private let currentInvocationMode: () -> DictationInvocationMode
+    private let selectInvocationMode: (DictationInvocationMode) -> Void
+    private let cancelDictation: () -> Void
+    private let canCancelDictation: () -> Bool
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
@@ -27,7 +31,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         currentASRModelKind: @escaping () -> ASRModelKind = { .parakeetUnified },
         selectASRModel: @escaping (ASRModelKind) -> Void = { _ in },
         copyLastTranscript: @escaping () -> Void = {},
-        pasteLastTranscript: @escaping () -> Void = {}
+        pasteLastTranscript: @escaping () -> Void = {},
+        currentInvocationMode: @escaping () -> DictationInvocationMode = { .toggle },
+        selectInvocationMode: @escaping (DictationInvocationMode) -> Void = { _ in },
+        cancelDictation: @escaping () -> Void = {},
+        canCancelDictation: @escaping () -> Bool = { false }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -38,6 +46,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.pasteLastTranscript = pasteLastTranscript
         self.currentASRModelKind = currentASRModelKind
         self.selectASRModel = selectASRModel
+        self.currentInvocationMode = currentInvocationMode
+        self.selectInvocationMode = selectInvocationMode
+        self.cancelDictation = cancelDictation
+        self.canCancelDictation = canCancelDictation
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -118,6 +130,34 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 menu.addItem(item)
             }
         }
+
+        menu.addItem(.separator())
+
+        let modeItem = NSMenuItem(title: "Invocation Mode", action: nil, keyEquivalent: "")
+        let modeMenu = NSMenu(title: "Invocation Mode")
+        let selectedMode = currentInvocationMode()
+        for mode in DictationInvocationMode.allCases {
+            let item = NSMenuItem(
+                title: mode.displayName,
+                action: #selector(selectInvocationModeItem(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = mode == selectedMode ? .on : .off
+            modeMenu.addItem(item)
+        }
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
+        let cancel = NSMenuItem(
+            title: "Cancel Dictation",
+            action: #selector(cancelDictationAction),
+            keyEquivalent: ""
+        )
+        cancel.target = self
+        cancel.isEnabled = canCancelDictation()
+        menu.addItem(cancel)
 
         menu.addItem(.separator())
 
@@ -202,6 +242,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func clearHistory() {
         store.clear()
+    }
+
+    @objc private func cancelDictationAction() {
+        cancelDictation()
+    }
+
+    @objc private func selectInvocationModeItem(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String,
+              let mode = DictationInvocationMode(rawValue: value) else {
+            return
+        }
+
+        selectInvocationMode(mode)
     }
 
     @objc private func selectModelItem(_ sender: NSMenuItem) {

@@ -360,6 +360,79 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isRecording)
     }
 
+    func testPushToTalkIntentBeginsAndEndsOneRecording() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Push to talk"))
+        let paster = PasterStub()
+        let pasted = expectation(description: "push-to-talk paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.setInvocationMode(.pushToTalk)
+        coordinator.handle(.pushToTalkBegan)
+        coordinator.handle(.pushToTalkEnded)
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertEqual(audio.endCount, 1)
+        XCTAssertEqual(transcriber.callCount, 1)
+    }
+
+    func testPushToTalkIgnoresRepeatedBeginAndDuplicateEnd() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Once"))
+        let paster = PasterStub()
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.setInvocationMode(.pushToTalk)
+        coordinator.handle(.pushToTalkBegan)
+        coordinator.handle(.pushToTalkBegan)
+        coordinator.handle(.pushToTalkEnded)
+        coordinator.handle(.pushToTalkEnded)
+
+        XCTAssertTrue(waitUntil { transcriber.callCount == 1 })
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertEqual(audio.endCount, 1)
+    }
+
+    func testCancelRecordingDiscardsCaptureWithoutTranscribing() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Must not paste"))
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, feedback: feedback)
+
+        coordinator.handle(.cancel)
+        XCTAssertEqual(audio.discardCount, 0, "Idle cancel is a no-op")
+
+        coordinator.handle(.toggle)
+        XCTAssertTrue(coordinator.isRecording)
+        coordinator.handle(.cancel)
+
+        XCTAssertFalse(coordinator.isRecording)
+        XCTAssertEqual(audio.discardCount, 1)
+        XCTAssertEqual(audio.endCount, 0)
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertEqual(feedback.errors, ["Recording cancelled"])
+    }
+
+    func testCancelTranscriptionKeepsCoordinatorBusyUntilNativeRunSettles() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Late"), delay: 0.15)
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, timeout: 1.0)
+
+        coordinator.handle(.toggle)
+        coordinator.handle(.toggle)
+        XCTAssertTrue(waitUntil { transcriber.callCount == 1 })
+
+        coordinator.handle(.cancel)
+        XCTAssertTrue(coordinator.canCancelDictation())
+        coordinator.handle(.toggle)
+        XCTAssertEqual(audio.beginCount, 1, "A new run waits for native cancellation settlement")
+
+        XCTAssertTrue(waitUntil(timeout: 1.0) { !coordinator.canCancelDictation() })
+        XCTAssertEqual(transcriber.cancelledRunIDs, [1])
+    }
+
     func testSwitchASRModelLoadsSelectedTranscriberAndPersistsSelection() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let initialTranscriber = FakeTranscriber(result: .success("Parakeet text"))
@@ -1389,6 +1462,7 @@ private final class AudioCaptureStub: AudioCapturing {
     private var _prepareCount = 0
     private var _beginCount = 0
     private var _endCount = 0
+    private var _discardCount = 0
     private var _shutdownCount = 0
     private var _lastEndRecordingWasMainThread: Bool?
     private var _endRecordingUsedExpectedQueue: Bool?
@@ -1406,6 +1480,7 @@ private final class AudioCaptureStub: AudioCapturing {
     var prepareCount: Int { counterLock.withLock { _prepareCount } }
     var beginCount: Int { counterLock.withLock { _beginCount } }
     var endCount: Int { counterLock.withLock { _endCount } }
+    var discardCount: Int { counterLock.withLock { _discardCount } }
     var shutdownCount: Int { counterLock.withLock { _shutdownCount } }
     var lastEndRecordingWasMainThread: Bool? { counterLock.withLock { _lastEndRecordingWasMainThread } }
     var endRecordingUsedExpectedQueue: Bool? { counterLock.withLock { _endRecordingUsedExpectedQueue } }
@@ -1475,6 +1550,10 @@ private final class AudioCaptureStub: AudioCapturing {
             graceDurationMs: graceDurationMs,
             wasInterrupted: wasInterrupted
         )
+    }
+
+    func discardRecording() {
+        counterLock.withLock { _discardCount += 1 }
     }
 
     func shutdown() {
