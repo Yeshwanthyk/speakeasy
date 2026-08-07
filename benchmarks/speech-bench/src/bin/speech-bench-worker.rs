@@ -95,6 +95,11 @@ fn run() -> Result<(), String> {
                 manifest_sha256: corpus.manifest_sha256.clone(),
                 normalization_version: corpus.manifest.normalization_version.clone(),
                 fixture_count: corpus.fixtures.len(),
+                fixture_ids: corpus
+                    .fixtures
+                    .iter()
+                    .map(|fixture| fixture.definition.id.clone())
+                    .collect(),
             },
         })),
         &mut stdout,

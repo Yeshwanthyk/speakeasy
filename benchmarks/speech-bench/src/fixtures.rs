@@ -5,6 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::score::NORMALIZATION_VERSION;
+
 pub const FIXTURE_SCHEMA: &str = "speakeasy.fixtures.v1";
 pub const REQUIRED_SAMPLE_RATE_HZ: u32 = 16_000;
 pub const REQUIRED_CHANNELS: u16 = 1;
@@ -146,8 +148,11 @@ impl FixtureManifest {
         if self.corpus_id.trim().is_empty() {
             return Err("corpus_id must not be empty".into());
         }
-        if self.normalization_version.trim().is_empty() {
-            return Err("normalization_version must not be empty".into());
+        if self.normalization_version != NORMALIZATION_VERSION {
+            return Err(format!(
+                "unsupported normalization_version {:?}; expected {:?}",
+                self.normalization_version, NORMALIZATION_VERSION
+            ));
         }
         if self.fixtures.is_empty() {
             return Err("fixture manifest must contain at least one fixture".into());
@@ -335,6 +340,21 @@ mod tests {
         assert!(decode_wav(&wrong_rate)
             .unwrap_err()
             .contains("expected 16000 Hz"));
+    }
+
+    #[test]
+    fn rejects_normalization_version_mismatch_before_execution() {
+        let manifest = FixtureManifest {
+            schema: FIXTURE_SCHEMA.into(),
+            corpus_id: "test".into(),
+            normalization_version: "different-scorer".into(),
+            fixtures: Vec::new(),
+        };
+
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .contains(NORMALIZATION_VERSION));
     }
 
     #[test]

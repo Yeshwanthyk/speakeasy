@@ -13,6 +13,7 @@ use crate::config::{BenchmarkConfig, ExecutionMode};
 use crate::engine::resolve_path;
 use crate::environment::discover_repo_root;
 use crate::fixtures::Corpus;
+use crate::metrics::validate_evidence;
 use crate::protocol::{
     write_jsonl, DriverError, DriverErrorKind, Record, RunStatus, PROTOCOL_SCHEMA,
 };
@@ -72,7 +73,7 @@ pub fn run(request: &RunRequest) -> Result<RunResult, String> {
             Ok(mut outcome) => {
                 for record in &mut outcome.records {
                     if let Record::RunEnd(end) = record {
-                        end.peak_rss_bytes = Some(outcome.peak_rss_bytes);
+                        end.peak_rss_bytes = outcome.peak_rss_bytes;
                         if end.status != RunStatus::Ok {
                             had_failures = true;
                         }
@@ -98,6 +99,15 @@ pub fn run(request: &RunRequest) -> Result<RunResult, String> {
                 }));
             }
         }
+    }
+
+    let evidence_failures = validate_evidence(&records);
+    if !evidence_failures.is_empty() {
+        had_failures = true;
+        eprintln!(
+            "benchmark evidence rejected:\n{}",
+            evidence_failures.join("\n")
+        );
     }
 
     Ok(RunResult {
@@ -190,7 +200,7 @@ fn build_jobs(config: &BenchmarkConfig, corpus: &Corpus, timestamp: u64) -> Vec<
 struct ChildOutcome {
     records: Vec<Record>,
     stderr: String,
-    peak_rss_bytes: u64,
+    peak_rss_bytes: Option<u64>,
 }
 
 struct ChildFailure {
@@ -214,7 +224,13 @@ fn run_child(mut command: Command, timeout: Duration) -> Result<ChildOutcome, Ch
     let stderr_reader = thread::spawn(move || read_all(stderr));
     let stop_sampling = Arc::new(AtomicBool::new(false));
     let peak_rss = Arc::new(AtomicU64::new(0));
-    let sampler = spawn_rss_sampler(pid, Arc::clone(&stop_sampling), Arc::clone(&peak_rss));
+    let sampled_rss = Arc::new(AtomicBool::new(false));
+    let sampler = spawn_rss_sampler(
+        pid,
+        Arc::clone(&stop_sampling),
+        Arc::clone(&peak_rss),
+        Arc::clone(&sampled_rss),
+    );
 
     let status = child.wait_timeout(timeout).map_err(|error| ChildFailure {
         kind: DriverErrorKind::Crash,
@@ -277,7 +293,9 @@ fn run_child(mut command: Command, timeout: Duration) -> Result<ChildOutcome, Ch
     Ok(ChildOutcome {
         records,
         stderr,
-        peak_rss_bytes: peak_rss.load(Ordering::Relaxed),
+        peak_rss_bytes: sampled_rss
+            .load(Ordering::Relaxed)
+            .then(|| peak_rss.load(Ordering::Relaxed)),
     })
 }
 
@@ -305,11 +323,13 @@ fn spawn_rss_sampler(
     pid: u32,
     stop: Arc<AtomicBool>,
     peak: Arc<AtomicU64>,
+    sampled: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             if let Some(bytes) = process_rss_bytes(pid) {
                 peak.fetch_max(bytes, Ordering::Relaxed);
+                sampled.store(true, Ordering::Relaxed);
             }
             thread::sleep(Duration::from_millis(20));
         }

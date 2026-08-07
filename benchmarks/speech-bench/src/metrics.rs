@@ -1,7 +1,10 @@
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::protocol::{Record, RunStart, SampleStatus};
+use crate::config::ExecutionMode;
+use crate::protocol::{Record, RunStart, RunStatus, SampleStatus, PROTOCOL_SCHEMA};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +133,25 @@ pub fn compare_with_allowed_changes(
             failures: vec![error],
         };
     }
+    let mut evidence_failures = validate_evidence(candidate_records)
+        .into_iter()
+        .map(|failure| format!("candidate: {failure}"))
+        .collect::<Vec<_>>();
+    evidence_failures.extend(
+        validate_evidence(baseline_records)
+            .into_iter()
+            .map(|failure| format!("baseline: {failure}")),
+    );
+    if !evidence_failures.is_empty() {
+        return Comparison {
+            comparable: false,
+            candidate_key: candidate_start
+                .map(|start| comparison_key(start, allowed_config_changes)),
+            baseline_key: baseline_start.map(|start| comparison_key(start, allowed_config_changes)),
+            passed: false,
+            failures: evidence_failures,
+        };
+    }
     let candidate_key = candidate_start.map(|start| comparison_key(start, allowed_config_changes));
     let baseline_key = baseline_start.map(|start| comparison_key(start, allowed_config_changes));
     if candidate_key.is_none() || baseline_key.is_none() || candidate_key != baseline_key {
@@ -218,6 +240,177 @@ pub fn compare_with_allowed_changes(
     }
 }
 
+pub fn validate_evidence(records: &[Record]) -> Vec<String> {
+    let mut failures = Vec::new();
+    if records.is_empty() {
+        return vec!["result is empty".into()];
+    }
+
+    let mut starts: HashMap<&str, Vec<&RunStart>> = HashMap::new();
+    let mut ends = HashMap::<&str, Vec<&crate::protocol::RunEnd>>::new();
+    let mut samples = HashMap::<&str, Vec<&crate::protocol::SampleRecord>>::new();
+    for record in records {
+        let (schema, run_id) = match record {
+            Record::RunStart(value) => {
+                starts.entry(&value.run_id).or_default().push(value);
+                (&value.schema, value.run_id.as_str())
+            }
+            Record::Sample(value) => {
+                samples.entry(&value.run_id).or_default().push(value);
+                (&value.schema, value.run_id.as_str())
+            }
+            Record::RunEnd(value) => {
+                ends.entry(&value.run_id).or_default().push(value);
+                (&value.schema, value.run_id.as_str())
+            }
+            Record::DriverError(value) => {
+                failures.push(format!(
+                    "run {:?} has driver error: {}",
+                    value.run_id, value.message
+                ));
+                (&value.schema, value.run_id.as_str())
+            }
+        };
+        if schema != PROTOCOL_SCHEMA {
+            failures.push(format!("run {run_id:?} has unsupported schema {schema:?}"));
+        }
+    }
+
+    for run_id in starts.keys().chain(ends.keys()).chain(samples.keys()) {
+        let start_count = starts.get(run_id).map_or(0, Vec::len);
+        let end_count = ends.get(run_id).map_or(0, Vec::len);
+        if start_count != 1 {
+            failures.push(format!(
+                "run {run_id:?} has {start_count} start records; expected 1"
+            ));
+        }
+        if end_count != 1 {
+            failures.push(format!(
+                "run {run_id:?} has {end_count} end records; expected 1"
+            ));
+        }
+    }
+
+    let Some(first_start) = records.iter().find_map(|record| match record {
+        Record::RunStart(start) => Some(start.as_ref()),
+        _ => None,
+    }) else {
+        failures.push("result has no run start".into());
+        return failures;
+    };
+
+    for run_starts in starts.values() {
+        for start in run_starts {
+            if start.config_sha256 != first_start.config_sha256
+                || start.corpus != first_start.corpus
+                || start.config.execution.repetitions != first_start.config.execution.repetitions
+            {
+                failures.push("run starts do not share one config and corpus identity".into());
+            }
+        }
+    }
+
+    if first_start.corpus.fixture_count != first_start.corpus.fixture_ids.len()
+        || first_start
+            .corpus
+            .fixture_ids
+            .iter()
+            .collect::<HashSet<_>>()
+            .len()
+            != first_start.corpus.fixture_ids.len()
+    {
+        failures.push("corpus fixture identity is incomplete or duplicated".into());
+    }
+
+    let mut cells = HashSet::new();
+    for (run_id, run_samples) in &samples {
+        let Some(start) = starts
+            .get(run_id)
+            .and_then(|values| values.first())
+            .copied()
+        else {
+            continue;
+        };
+        for sample in run_samples {
+            if !start.corpus.fixture_ids.contains(&sample.fixture_id) {
+                failures.push(format!(
+                    "run {run_id:?} contains unexpected fixture {:?}",
+                    sample.fixture_id
+                ));
+            }
+            if sample.repetition >= start.config.execution.repetitions {
+                failures.push(format!(
+                    "run {run_id:?} contains unexpected repetition {}",
+                    sample.repetition
+                ));
+            }
+            if !cells.insert((sample.fixture_id.as_str(), sample.repetition)) {
+                failures.push(format!(
+                    "duplicate fixture/repetition cell {:?}/{}",
+                    sample.fixture_id, sample.repetition
+                ));
+            }
+            if let Some(score) = &sample.score {
+                if score.lexical.normalization_version != start.corpus.normalization_version
+                    || score.punctuation_sensitive.normalization_version
+                        != start.corpus.normalization_version
+                {
+                    failures.push(format!(
+                        "sample {:?} normalization does not match its corpus identity",
+                        sample.fixture_id
+                    ));
+                }
+            }
+            if sample.status == SampleStatus::Ok {
+                if sample.wall_ms.is_none()
+                    || sample.realtime_factor.is_none()
+                    || sample.native.is_none()
+                    || sample.text_sha256.is_none()
+                    || sample.score.is_none()
+                {
+                    failures.push(format!(
+                        "sample {:?} is missing required metrics",
+                        sample.fixture_id
+                    ));
+                }
+                if matches!(
+                    start.config.execution.mode,
+                    ExecutionMode::StreamingAccelerated | ExecutionMode::StreamingRealtime
+                ) && sample.stream.is_none()
+                {
+                    failures.push(format!(
+                        "streaming sample {:?} is missing stream metrics",
+                        sample.fixture_id
+                    ));
+                }
+            }
+        }
+        if let Some(end) = ends.get(run_id).and_then(|values| values.first()) {
+            if end.status != RunStatus::Ok {
+                failures.push(format!("run {run_id:?} ended with status {:?}", end.status));
+            }
+            if end.samples_completed != run_samples.len() as u64 {
+                failures.push(format!(
+                    "run {run_id:?} end count does not match sample records"
+                ));
+            }
+            if end.peak_rss_bytes.is_none() {
+                failures.push(format!("run {run_id:?} is missing peak RSS evidence"));
+            }
+        }
+    }
+
+    let expected_cells =
+        first_start.corpus.fixture_count * first_start.config.execution.repetitions as usize;
+    if cells.len() != expected_cells {
+        failures.push(format!(
+            "result has {} unique fixture/repetition cells; expected {expected_cells}",
+            cells.len()
+        ));
+    }
+    failures
+}
+
 fn first_start(records: &[Record]) -> Option<&RunStart> {
     records.iter().find_map(|record| match record {
         Record::RunStart(start) => Some(start.as_ref()),
@@ -255,6 +448,7 @@ fn comparison_key(start: &RunStart, allowed_config_changes: &[String]) -> String
             "stream": start.config.stream,
             "execution": {
                 "mode": start.config.execution.mode,
+                "repetitions": start.config.execution.repetitions,
                 "warmup_samples": start.config.execution.warmup_samples,
                 "order_seed": start.config.execution.order_seed,
             }
@@ -369,6 +563,18 @@ fn check_upper_regression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_evidence_cannot_pass_comparison() {
+        let comparison = compare(&[], &[]);
+
+        assert!(!comparison.comparable);
+        assert!(!comparison.passed);
+        assert!(comparison
+            .failures
+            .iter()
+            .any(|failure| failure.contains("result is empty")));
+    }
 
     #[test]
     fn percentile_uses_nearest_rank() {

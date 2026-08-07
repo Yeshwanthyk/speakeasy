@@ -40,6 +40,7 @@ pub struct CorpusIdentity {
     pub manifest_sha256: String,
     pub normalization_version: String,
     pub fixture_count: usize,
+    pub fixture_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
