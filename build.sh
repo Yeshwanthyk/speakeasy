@@ -65,6 +65,7 @@ mkdir -p "$BIN_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 
 swiftc -O \
   -target "$BUILD_ARCH-apple-macosx$DEPLOYMENT_TARGET" \
+  -import-objc-header "$RUST_DIR/include/asr_bridge.h" \
   -framework AppKit \
   -framework AVFoundation \
   -framework AudioToolbox \

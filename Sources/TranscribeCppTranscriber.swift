@@ -1,42 +1,6 @@
 import Foundation
 import os
 
-private struct AsrResult {
-    var text: UnsafeMutablePointer<CChar>?
-    var error: UnsafeMutablePointer<CChar>?
-    var status: Int32
-}
-
-private struct AsrCreateResult {
-    var handle: UnsafeMutableRawPointer?
-    var error: UnsafeMutablePointer<CChar>?
-}
-
-@_silgen_name("asr_create")
-private func asr_create(_ path: UnsafePointer<CChar>) -> AsrCreateResult
-
-@_silgen_name("asr_create_result_free")
-private func asr_create_result_free(_ result: AsrCreateResult)
-
-@_silgen_name("asr_destroy")
-private func asr_destroy(_ handle: UnsafeMutableRawPointer?)
-
-@_silgen_name("asr_transcribe")
-private func asr_transcribe(
-    _ handle: UnsafeMutableRawPointer?,
-    _ samples: UnsafePointer<Float>?,
-    _ length: Int,
-    _ runID: UInt64
-) -> AsrResult
-
-@_silgen_name("asr_result_free")
-private func asr_result_free(_ result: AsrResult)
-
-@_silgen_name("asr_cancel")
-private func asr_cancel(_ handle: UnsafeMutableRawPointer?, _ runID: UInt64) -> Bool
-
-private let asrStatusCancelled: Int32 = 2
-
 enum TranscribeCppError: Error {
     case modelLoadFailed(String)
     case transcriptionFailed(String)
@@ -49,7 +13,7 @@ enum TranscribeCppError: Error {
 /// The Rust bridge serializes calls on the session, so this instance can move
 /// between the coordinator's worker tasks without external synchronization.
 final class TranscribeCppTranscriber {
-    private let handle: UnsafeMutableRawPointer
+    private let handle: OpaquePointer
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcribe-cpp")
 
     init(model: ASRModelConfiguration) throws {
@@ -91,7 +55,7 @@ final class TranscribeCppTranscriber {
             let result = asr_transcribe(handle, buffer.baseAddress, buffer.count, runID)
             defer { asr_result_free(result) }
 
-            if result.status == asrStatusCancelled {
+            if result.status == ASR_STATUS_CANCELLED {
                 throw TranscribeCppError.cancelled
             }
             if let errorPointer = result.error {
