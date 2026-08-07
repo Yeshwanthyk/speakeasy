@@ -63,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         canCancelDictation: { [weak coordinator] in
                             coordinator?.canCancelDictation() ?? false
                         },
+                        isRecording: { [weak coordinator] in
+                            coordinator?.isRecording ?? false
+                        },
                         retryLastFailedCapture: { [weak coordinator] in
                             coordinator?.retryLastFailedCapture()
                         },
