@@ -26,7 +26,11 @@ final class AppCoordinatorTests: XCTestCase {
         timeout: TimeInterval = 1.0,
         skipWarmup: Bool = true,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription")
+        diagnosticsStore: DiagnosticsStore? = nil,
+        hallucinationFilter: HallucinationFilter = HallucinationFilter(),
+        transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription"),
+        deliveryTargetProvider: DeliveryTargetProviding = TestCoordinatorTargetProvider()
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -35,10 +39,14 @@ final class AppCoordinatorTests: XCTestCase {
             flash: flash ?? FlashStub(),
             feedback: feedback,
             accessibilityChecker: accessibility,
+            hallucinationFilter: hallucinationFilter,
             transcriptionTimeoutProvider: { _ in timeout },
             keyMonitorFactory: { _ in nil },
             transcriptStore: transcriptStore,
-            transcriptionQueue: transcriptionQueue
+            diagnosticsStore: diagnosticsStore,
+            transcriptPostProcessor: transcriptPostProcessor,
+            transcriptionQueue: transcriptionQueue,
+            deliveryTargetProvider: deliveryTargetProvider
         )
         if skipWarmup {
             coordinator.skipWarmup()
@@ -52,6 +60,16 @@ final class AppCoordinatorTests: XCTestCase {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
         return condition()
+    }
+
+    private func decodedHistory(at url: URL) -> [TranscriptRecord]? {
+        guard
+            let data = try? Data(contentsOf: url),
+            let decoded = try? JSONDecoder().decode(TranscriptHistoryDocument.self, from: data)
+        else {
+            return nil
+        }
+        return decoded.records
     }
 
     // MARK: - Existing behaviour
@@ -126,6 +144,40 @@ final class AppCoordinatorTests: XCTestCase {
 
         coordinator.toggleRecording()
         XCTAssertEqual(audio.beginCount, 2)
+    }
+
+    func testTimeoutAndLateResultProduceOneDiagnosticTerminalOutcome() {
+        let diagnostics = DiagnosticsStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-timeout-stats-\(UUID().uuidString)")
+                .appendingPathComponent("stats.json")
+        )
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("late private text"), delay: 0.15)
+        let feedback = FeedbackStub()
+        let timedOut = expectation(description: "timeout")
+        feedback.onError = { message in
+            if message == "Transcription timed out" { timedOut.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            feedback: feedback,
+            timeout: 0.02,
+            diagnosticsStore: diagnostics
+        )
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [timedOut], timeout: 1.0)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+
+        let snapshot = diagnostics.snapshot()
+        XCTAssertEqual(snapshot.lifetime.attemptCount, 1)
+        XCTAssertEqual(snapshot.lifetime.outcomes.timedOut, 1)
+        XCTAssertEqual(snapshot.lifetime.outcomes.eventsPosted, 0)
+        XCTAssertFalse(diagnostics.report().contains("late private text"))
     }
 
     func testEmptySamplesDoNotTriggerTranscription() {
@@ -294,6 +346,7 @@ final class AppCoordinatorTests: XCTestCase {
                 switchLock.withLock { factoryKinds.append(model.kind) }
                 return replacementTranscriber
             },
+            modelArtifactVerifier: { _ in },
             modelSelectionStore: { kind in
                 switchLock.withLock { persistedKinds.append(kind) }
             },
@@ -323,6 +376,105 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(switchLock.withLock { resolvedKinds }, [.nemotron])
         XCTAssertEqual(switchLock.withLock { factoryKinds }, [.nemotron])
         XCTAssertEqual(switchLock.withLock { persistedKinds }, [.nemotron])
+    }
+
+    func testSwitchASRModelRejectsCorruptArtifactBeforeLoadingAndPreservesPreviousModel() {
+        let initialTranscriber = FakeTranscriber(result: .success("Previous text"))
+        let candidateTranscriber = FakeTranscriber(result: .success("Candidate text"))
+        let feedback = FeedbackStub()
+        var factoryCallCount = 0
+        var persistedKinds: [ASRModelKind] = []
+
+        let coordinator = AppCoordinator(
+            audioCapture: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: initialTranscriber,
+            paster: PasterStub(),
+            flash: FlashStub(),
+            feedback: feedback,
+            accessibilityChecker: AccessibilityStub(allowed: true),
+            asrModelKind: .parakeetTDT,
+            asrModelResolver: { kind in
+                ASRModelConfiguration(
+                    kind: kind,
+                    url: FileManager.default.temporaryDirectory.appendingPathComponent("corrupt.gguf")
+                )
+            },
+            transcriberFactory: { _ in
+                factoryCallCount += 1
+                return candidateTranscriber
+            },
+            modelArtifactVerifier: { _ in
+                throw ModelArtifactVerificationError.checksumMismatch(
+                    expected: "expected",
+                    actual: "corrupt"
+                )
+            },
+            modelSelectionStore: { persistedKinds.append($0) },
+            transcriptionTimeoutProvider: { _ in 1.0 },
+            keyMonitorFactory: { _ in nil }
+        )
+        coordinator.skipWarmup()
+
+        coordinator.switchASRModel(to: .nemotron)
+
+        XCTAssertTrue(waitUntil { feedback.errors == ["Failed to switch audio model"] })
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertEqual(factoryCallCount, 0)
+        XCTAssertEqual(candidateTranscriber.warmUpCount, 0)
+        XCTAssertTrue(persistedKinds.isEmpty)
+    }
+
+    func testSwitchASRModelWarmupFailurePreservesPreviousBackendAndSelection() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let initialTranscriber = FakeTranscriber(result: .success("Previous text"))
+        let candidateTranscriber = FakeTranscriber(
+            result: .success("Candidate text"),
+            warmUpError: TestError()
+        )
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        var persistedKinds: [ASRModelKind] = []
+
+        let coordinator = AppCoordinator(
+            audioCapture: audio,
+            transcriber: initialTranscriber,
+            paster: paster,
+            flash: FlashStub(),
+            feedback: feedback,
+            accessibilityChecker: AccessibilityStub(allowed: true),
+            asrModelKind: .parakeetTDT,
+            asrModelResolver: { kind in
+                ASRModelConfiguration(
+                    kind: kind,
+                    url: FileManager.default.temporaryDirectory.appendingPathComponent("candidate.gguf")
+                )
+            },
+            transcriberFactory: { _ in candidateTranscriber },
+            modelArtifactVerifier: { _ in },
+            modelSelectionStore: { persistedKinds.append($0) },
+            transcriptionTimeoutProvider: { _ in 1.0 },
+            keyMonitorFactory: { _ in nil }
+        )
+        coordinator.skipWarmup()
+
+        coordinator.switchASRModel(to: .nemotron)
+
+        XCTAssertTrue(waitUntil {
+            candidateTranscriber.warmUpCount == 1
+                && feedback.errors == ["Failed to switch audio model"]
+        })
+        XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetTDT)
+        XCTAssertTrue(persistedKinds.isEmpty)
+
+        let pasted = expectation(description: "previous backend remains active")
+        paster.onPaste = { pasted.fulfill() }
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        wait(for: [pasted], timeout: 1.0)
+
+        XCTAssertEqual(paster.pastedTexts, ["Previous text"])
+        XCTAssertEqual(initialTranscriber.callCount, 1)
+        XCTAssertEqual(candidateTranscriber.callCount, 0)
     }
 
     func testSwitchASRModelIsRejectedWhileRecording() {
@@ -379,6 +531,63 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(paster.pastedTexts.isEmpty, "Hallucinated 'Yeah.' should not be pasted")
     }
 
+    func testCorrectionsDoNotRescueHallucinatedTranscription() throws {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Yeah."))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let postProcessor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "yeah", written: "accepted text")
+        ])
+        let notified = expectation(description: "no speech")
+        feedback.onError = { message in
+            if message == "No speech detected" { notified.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            transcriptPostProcessor: postProcessor
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [notified], timeout: 1.0)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
+    func testSilenceGuardUsesActiveSamplesWithoutPreRoll() {
+        let samples = ContiguousArray(
+            Array(repeating: Float(0.1), count: 100)
+                + Array(repeating: Float(0.0001), count: 8_000)
+        )
+        let audio = AudioCaptureStub(samples: samples, prependedSampleCount: 100)
+        let transcriber = FakeTranscriber(result: .success("Should not run"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let notified = expectation(description: "active audio is silent")
+        feedback.onError = { message in
+            if message == "No speech detected" { notified.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [notified], timeout: 1.0)
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
     func testRealTranscriptionPassesHallucinationFilter() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Yeah, that sounds good."))
@@ -396,12 +605,70 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(paster.pastedTexts, ["Yeah, that sounds good."])
     }
 
+    func testDegenerateDenseTranscriptionIsVetoedBeforeCorrectionsOrPaste() throws {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let text = (1...13).map(String.init).joined(separator: " ")
+        let transcriber = FakeTranscriber(result: .success(text))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let postProcessor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "1", written: "rescued")
+        ])
+        let notified = expectation(description: "dense transcription rejected")
+        feedback.onError = { message in
+            if message == "No speech detected" { notified.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            transcriptPostProcessor: postProcessor
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [notified], timeout: 1.0)
+        XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
+    func testRepeatedLoopTranscriptionIsVetoedAtTheDeliveryBoundary() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let text = Array(repeating: "one two three", count: 4).joined(separator: " ")
+        let transcriber = FakeTranscriber(result: .success(text))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let notified = expectation(description: "repeated loop rejected")
+        feedback.onError = { message in
+            if message == "No speech detected" { notified.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [notified], timeout: 1.0)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+    }
+
     func testAccessibilityDeniedPreventsPaste() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Hello"))
         let paster = PasterStub()
         let feedback = FeedbackStub()
         let accessibility = AccessibilityStub(allowed: false)
+        let historyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-accessibility-denied-\(UUID().uuidString)")
+        let store = TranscriptStore(fileURL: historyURL)
 
         let denied = expectation(description: "accessibility denied")
         feedback.onError = { message in
@@ -413,7 +680,8 @@ final class AppCoordinatorTests: XCTestCase {
             transcriber: transcriber,
             paster: paster,
             feedback: feedback,
-            accessibility: accessibility
+            accessibility: accessibility,
+            transcriptStore: store
         )
 
         coordinator.toggleRecording()
@@ -421,6 +689,71 @@ final class AppCoordinatorTests: XCTestCase {
 
         wait(for: [denied], timeout: 1.0)
         XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertEqual(decodedHistory(at: historyURL)?.map(\.finalText), ["Hello"])
+    }
+
+    func testPasteFailureReportsClipboardBoundaryAndDoesNotClaimEventsPosted() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let paster = PasterStub(pasteOutcome: .clipboardWriteFailed)
+        let feedback = FeedbackStub()
+
+        let failed = expectation(description: "paste failure")
+        feedback.onError = { message in
+            if message == "Could not update clipboard" { failed.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [failed], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["Hello"])
+        XCTAssertEqual(paster.pasteOutcomes, [.clipboardWriteFailed])
+    }
+
+    func testPersistenceFailureSkipsAccessibilityAndPaste() throws {
+        let blockedParent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-coordinator-blocker-\(UUID().uuidString)")
+        try Data("not-a-directory".utf8).write(to: blockedParent)
+        let store = TranscriptStore(fileURL: blockedParent.appendingPathComponent("history.json"))
+        let accessibility = AccessibilityProbe(allowed: true)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("Not pasted"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+
+        let failed = expectation(description: "persistence failure")
+        feedback.onError = { message in
+            if message == "Transcript could not be saved" { failed.fulfill() }
+        }
+
+        let coordinator = AppCoordinator(
+            audioCapture: audio,
+            transcriber: transcriber,
+            paster: paster,
+            flash: FlashStub(),
+            feedback: feedback,
+            accessibilityChecker: accessibility,
+            transcriptionTimeoutProvider: { _ in 1.0 },
+            keyMonitorFactory: { _ in nil },
+            transcriptStore: store
+        )
+        coordinator.skipWarmup()
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [failed], timeout: 1.0)
+        XCTAssertEqual(store.allEntries(), ["Not pasted"])
+        XCTAssertEqual(accessibility.checkCount, 0)
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
 
@@ -446,7 +779,9 @@ final class AppCoordinatorTests: XCTestCase {
     }
 
     func testSuccessfulTranscriptionIsStoredBeforePaste() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        let historyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-persist-before-paste-\(UUID().uuidString)")
+        let store = TranscriptStore(fileURL: historyURL)
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Stored text"))
         let paster = PasterStub()
@@ -454,6 +789,7 @@ final class AppCoordinatorTests: XCTestCase {
         let pasted = expectation(description: "paste")
         paster.onPaste = {
             XCTAssertEqual(store.allEntries(), ["Stored text"])
+            XCTAssertEqual(self.decodedHistory(at: historyURL)?.map(\.finalText), ["Stored text"])
             pasted.fulfill()
         }
 
@@ -469,6 +805,159 @@ final class AppCoordinatorTests: XCTestCase {
 
         wait(for: [pasted], timeout: 1.0)
         XCTAssertEqual(paster.pastedTexts, ["Stored text"])
+    }
+
+    func testAcceptedTranscriptionIsCorrectedBeforePersistenceAndPaste() throws {
+        let historyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-corrected-before-paste-\(UUID().uuidString)")
+        let store = TranscriptStore(fileURL: historyURL)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("hello comma world"))
+        let paster = PasterStub()
+        let postProcessor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "world", written: "Wisp")
+        ])
+
+        let pasted = expectation(description: "corrected paste")
+        paster.onPaste = { pasted.fulfill() }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            transcriptStore: store,
+            transcriptPostProcessor: postProcessor
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["hello, Wisp"])
+        XCTAssertEqual(store.allEntries(), ["hello, Wisp"])
+        XCTAssertEqual(decodedHistory(at: historyURL)?.map(\.finalText), ["hello, Wisp"])
+    }
+
+    func testCopyLastTranscriptUsesStoredTextWithoutRetranscription() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-copy-last-(UUID().uuidString)"))
+        store.append("Last transcript")
+        let transcriber = FakeTranscriber(result: .success("Should not run"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            transcriptStore: store
+        )
+
+        let outcome = coordinator.copyLastTranscript()
+
+        XCTAssertEqual(outcome, .clipboardUpdated)
+        XCTAssertEqual(paster.copiedTexts, ["Last transcript"])
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertEqual(feedback.events, [.status("Last transcript copied")])
+    }
+
+    func testPasteLastTranscriptUsesStoredTextWithoutRetranscription() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-paste-last-(UUID().uuidString)"))
+        store.append("Last transcript")
+        let transcriber = FakeTranscriber(result: .success("Should not run"))
+        let paster = PasterStub(pasteOutcome: .eventsPosted)
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: transcriber,
+            paster: paster,
+            transcriptStore: store
+        )
+
+        let outcome = coordinator.pasteLastTranscript()
+
+        XCTAssertEqual(outcome, .eventsPosted)
+        XCTAssertEqual(paster.pastedTexts, ["Last transcript"])
+        XCTAssertEqual(transcriber.callCount, 0)
+    }
+
+    func testAutomaticPasteUsesTargetCapturedAtRecordingStart() {
+        let firstTarget = TranscriptDeliveryApplication(
+            processIdentifier: 301,
+            bundleIdentifier: "com.example.first"
+        )
+        let secondTarget = TranscriptDeliveryApplication(
+            processIdentifier: 302,
+            bundleIdentifier: "com.example.second"
+        )
+        let targetProvider = TestCoordinatorTargetProvider(target: .external(firstTarget))
+        let paster = PasterStub()
+        let pasted = expectation(description: "automatic paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("Captured target")),
+            paster: paster,
+            deliveryTargetProvider: targetProvider
+        )
+
+        coordinator.toggleRecording()
+        targetProvider.target = .external(secondTarget)
+        coordinator.toggleRecording()
+
+        wait(for: [pasted], timeout: 1)
+        XCTAssertEqual(paster.pastedTargets, [.external(firstTarget)])
+    }
+
+    func testRecoveryPasteResolvesTheCurrentExternalTarget() {
+        let firstTarget = TranscriptDeliveryApplication(
+            processIdentifier: 401,
+            bundleIdentifier: "com.example.first"
+        )
+        let secondTarget = TranscriptDeliveryApplication(
+            processIdentifier: 402,
+            bundleIdentifier: "com.example.second"
+        )
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-current-target-(UUID().uuidString)"))
+        store.append("Stored text")
+        let targetProvider = TestCoordinatorTargetProvider(target: .external(firstTarget))
+        let paster = PasterStub()
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("Should not run")),
+            paster: paster,
+            transcriptStore: store,
+            deliveryTargetProvider: targetProvider
+        )
+
+        targetProvider.target = .external(secondTarget)
+        XCTAssertEqual(coordinator.pasteLastTranscript(), .eventsPosted)
+        XCTAssertEqual(paster.pastedTargets, [.external(secondTarget)])
+    }
+
+    func testPasteLastTranscriptHonorsAccessibilityWithoutRetranscription() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-paste-last-denied-(UUID().uuidString)"))
+        store.append("Last transcript")
+        let transcriber = FakeTranscriber(result: .success("Should not run"))
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            accessibility: AccessibilityStub(allowed: false),
+            transcriptStore: store
+        )
+
+        let outcome = coordinator.pasteLastTranscript()
+
+        XCTAssertNil(outcome)
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertEqual(transcriber.callCount, 0)
+        XCTAssertEqual(feedback.errors, ["Accessibility permission required"])
     }
 
     func testInjectedTranscriptionQueueRunsStopAndTranscribeWork() {
@@ -658,14 +1147,26 @@ final class AppCoordinatorTests: XCTestCase {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Hello"))
         let feedback = FeedbackStub()
+        let diagnostics = DiagnosticsStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-warmup-stats-\(UUID().uuidString)")
+                .appendingPathComponent("stats.json")
+        )
 
         // skipWarmup: false — coordinator starts in .warming / .pending
-        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, feedback: feedback, skipWarmup: false)
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            feedback: feedback,
+            skipWarmup: false,
+            diagnosticsStore: diagnostics
+        )
 
         coordinator.toggleRecording()
 
         // Audio must not start because warmup hasn't finished
         XCTAssertEqual(audio.startCount, 0)
+        XCTAssertEqual(diagnostics.snapshot().lifetime.outcomes.warmupBlocked, 1)
     }
 
     /// Hotkey during warmup must emit user-visible feedback.
@@ -986,12 +1487,54 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
 
 private final class PasterStub: Pasting {
     private(set) var pastedTexts: [String] = []
+    private(set) var copiedTexts: [String] = []
+    private(set) var pasteOutcomes: [TranscriptDeliveryOutcome] = []
+    private(set) var pastedTargets: [TranscriptDeliveryTarget?] = []
+    private(set) var copyOutcomes: [TranscriptDeliveryOutcome] = []
     var onPaste: (() -> Void)?
+    var pasteOutcome: TranscriptDeliveryOutcome
+    var copyOutcome: TranscriptDeliveryOutcome
 
-    func paste(_ text: String) {
+    init(
+        pasteOutcome: TranscriptDeliveryOutcome = .eventsPosted,
+        copyOutcome: TranscriptDeliveryOutcome = .clipboardUpdated
+    ) {
+        self.pasteOutcome = pasteOutcome
+        self.copyOutcome = copyOutcome
+    }
+
+    func copy(_ text: String) -> TranscriptDeliveryOutcome {
+        copiedTexts.append(text)
+        copyOutcomes.append(copyOutcome)
+        return copyOutcome
+    }
+
+    func paste(_ text: String) -> TranscriptDeliveryOutcome {
         pastedTexts.append(text)
         onPaste?()
+        pasteOutcomes.append(pasteOutcome)
+        return pasteOutcome
     }
+
+    func paste(
+        _ text: String,
+        target: TranscriptDeliveryTarget?
+    ) -> TranscriptDeliveryOutcome {
+        pastedTargets.append(target)
+        return paste(text)
+    }
+}
+
+private final class TestCoordinatorTargetProvider: DeliveryTargetProviding {
+    var target: TranscriptDeliveryTarget
+
+    init(target: TranscriptDeliveryTarget = .unavailable) {
+        self.target = target
+    }
+
+    func currentTarget() -> TranscriptDeliveryTarget { target }
+
+    func isRunning(_ application: TranscriptDeliveryApplication) -> Bool { true }
 }
 
 private final class FlashStub: Flashing {
@@ -1025,6 +1568,20 @@ private final class FeedbackStub: UserFeedback {
 private struct AccessibilityStub: AccessibilityChecking {
     let allowed: Bool
     func hasAccessibilityAccess() -> Bool { allowed }
+}
+
+private final class AccessibilityProbe: AccessibilityChecking {
+    let allowed: Bool
+    private(set) var checkCount = 0
+
+    init(allowed: Bool) {
+        self.allowed = allowed
+    }
+
+    func hasAccessibilityAccess() -> Bool {
+        checkCount += 1
+        return allowed
+    }
 }
 
 private struct TestError: Error {}

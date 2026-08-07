@@ -17,7 +17,18 @@ protocol AudioCapturing {
 }
 
 protocol Pasting {
-    func paste(_ text: String)
+    func copy(_ text: String) -> TranscriptDeliveryOutcome
+    func paste(_ text: String) -> TranscriptDeliveryOutcome
+    func paste(_ text: String, target: TranscriptDeliveryTarget?) -> TranscriptDeliveryOutcome
+}
+
+extension Pasting {
+    func paste(
+        _ text: String,
+        target: TranscriptDeliveryTarget?
+    ) -> TranscriptDeliveryOutcome {
+        paste(text)
+    }
 }
 
 @MainActor
@@ -33,6 +44,7 @@ protocol AccessibilityChecking {
 typealias KeyMonitorFactory = (_ callback: @escaping () -> Void) -> KeyComboMonitor?
 typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConfiguration
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
+typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
 
 extension AudioCapture: AudioCapturing {}
@@ -72,13 +84,14 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     private enum Transition {
-        case start(TranscriptionTrace)
-        case stop(UUID, TranscriptionTrace)
+        case start(TranscriptionTrace, TranscriptDeliveryTarget)
+        case stop(UUID, TranscriptionTrace, TranscriptDeliveryTarget)
+        case blocked(TranscriptionTrace, String)
         case ignore(String?)
     }
 
     private enum ModelSwitchStart {
-        case start(previousWarmupState: WarmupState)
+        case start(id: UUID, previousWarmupState: WarmupState)
         case alreadySelected
         case reject(String)
     }
@@ -97,20 +110,28 @@ final class AppCoordinator: @unchecked Sendable {
     private var transcriber: Transcriber
     let paster: Pasting
     let transcriptStore: TranscriptStore?
+    let diagnosticsStore: DiagnosticsStore?
     private let feedback: UserFeedback
     private let accessibilityChecker: AccessibilityChecking
+    private let deliveryTargetProvider: DeliveryTargetProviding
     private let hallucinationFilter: HallucinationFilter
+    private let transcriptPostProcessor: TranscriptPostProcessor
     private var currentASRModelKind: ASRModelKind
     private let asrModelResolver: ASRModelResolver?
     private let transcriberFactory: TranscriberFactory?
+    private let modelArtifactVerifier: ASRModelArtifactVerifier
     private let modelSelectionStore: ASRModelSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
     private var warmupState: WarmupState = .pending
+    private var activeModelSwitchID: UUID?
     private var suppressRecoverySuccessStatus = false
     /// Partial trace built during a recording session; nil when idle or transcribing.
     private var activeTrace: TranscriptionTrace?
+    /// Target captured before automatic recording starts. Recovery actions do
+    /// not use this value; they resolve a fresh external target.
+    private var activeDeliveryTarget: TranscriptDeliveryTarget?
     private let transcriptionQueue: DispatchQueue
     private let flash: Flashing
     private var keyMonitor: KeyComboMonitor?
@@ -124,10 +145,6 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    #if DEBUG
-    private let debugSummary = TranscriptionDebugSummary()
-    #endif
-
     init(
         audioCapture: AudioCapturing,
         transcriber: Transcriber,
@@ -139,11 +156,17 @@ final class AppCoordinator: @unchecked Sendable {
         asrModelKind: ASRModelKind = .parakeetUnified,
         asrModelResolver: ASRModelResolver? = nil,
         transcriberFactory: TranscriberFactory? = nil,
+        modelArtifactVerifier: @escaping ASRModelArtifactVerifier = { model in
+            try ModelPathResolver.verifyModelArtifact(kind: model.kind, at: model.url)
+        },
         modelSelectionStore: @escaping ASRModelSelectionStore = { _ in },
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
-        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive)
+        diagnosticsStore: DiagnosticsStore? = nil,
+        transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
+        transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
+        deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider()
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -151,13 +174,17 @@ final class AppCoordinator: @unchecked Sendable {
         self.flash = flash
         self.feedback = feedback
         self.accessibilityChecker = accessibilityChecker
+        self.deliveryTargetProvider = deliveryTargetProvider
         self.hallucinationFilter = hallucinationFilter
+        self.transcriptPostProcessor = transcriptPostProcessor
         self.currentASRModelKind = asrModelKind
         self.asrModelResolver = asrModelResolver
         self.transcriberFactory = transcriberFactory
+        self.modelArtifactVerifier = modelArtifactVerifier
         self.modelSelectionStore = modelSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.transcriptStore = transcriptStore
+        self.diagnosticsStore = diagnosticsStore
         self.transcriptionQueue = transcriptionQueue
 
         audioCapture.setEventHandler { [weak self] event in
@@ -223,6 +250,10 @@ final class AppCoordinator: @unchecked Sendable {
                 return .alreadySelected
             }
 
+            guard activeModelSwitchID == nil else {
+                return .reject("Model switching already in progress")
+            }
+
             guard warmupState.isReady else {
                 return .reject("Model warming up, please wait")
             }
@@ -230,8 +261,10 @@ final class AppCoordinator: @unchecked Sendable {
             switch state {
             case .idle:
                 let previousWarmupState = warmupState
+                let switchID = UUID()
+                activeModelSwitchID = switchID
                 warmupState = .warming
-                return .start(previousWarmupState: previousWarmupState)
+                return .start(id: switchID, previousWarmupState: previousWarmupState)
             case .startingCapture:
                 return .reject("Wait for microphone reconnection")
             case .recording:
@@ -249,12 +282,14 @@ final class AppCoordinator: @unchecked Sendable {
             logger.info("Ignoring ASR model switch to \(kind.displayName): \(message)")
             feedback.notify(event: .error(message))
 
-        case .start(let previousWarmupState):
-            Task(priority: .userInitiated) { [weak self] in
+        case .start(let switchID, let previousWarmupState):
+            Task.detached(priority: .userInitiated) { [asrModelResolver, transcriberFactory, modelArtifactVerifier] in
                 let result: Result<(ASRModelConfiguration, Transcriber), Error>
                 do {
                     let model = try await asrModelResolver(kind)
+                    try modelArtifactVerifier(model)
                     let transcriber = try transcriberFactory(model)
+                    try await transcriber.warmUp()
                     result = .success((model, transcriber))
                 } catch {
                     result = .failure(error)
@@ -262,6 +297,7 @@ final class AppCoordinator: @unchecked Sendable {
 
                 DispatchQueue.main.async { [weak self] in
                     self?.completeASRModelSwitch(
+                        id: switchID,
                         to: kind,
                         restoring: previousWarmupState,
                         result: result
@@ -286,8 +322,11 @@ final class AppCoordinator: @unchecked Sendable {
                 feedback.notify(event: .error("Recording limit reached (6 minutes)"))
             }
         )
-        let paster = PasteboardPaster(feedback: feedback)
+        let paster = PasteboardPaster()
         let flash = ScreenEdgeFlash()
+        let correctionStore = TranscriptCorrectionStore()
+        let postProcessor = (try? TranscriptPostProcessor(corrections: correctionStore.allCorrections()))
+            ?? TranscriptPostProcessor()
 
         let keyCode = CGKeyCode(kVK_ANSI_S)
         let requiredFlags: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
@@ -316,7 +355,9 @@ final class AppCoordinator: @unchecked Sendable {
             modelSelectionStore: { ModelPathResolver.persistSelectedModelKind($0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
-            transcriptStore: TranscriptStore()
+            transcriptStore: TranscriptStore(),
+            diagnosticsStore: DiagnosticsStore(),
+            transcriptPostProcessor: postProcessor
         )
     }
     #endif
@@ -333,13 +374,25 @@ final class AppCoordinator: @unchecked Sendable {
 
         let transition = stateLock.withLock { () -> Transition in
             guard warmupState.isReady else {
-                return .ignore("Model warming up, please wait")
+                return .blocked(
+                    TranscriptionTrace(
+                        hotkeyPressedAt: now,
+                        backend: currentASRModelKind.preferenceValue
+                    ),
+                    "Model warming up, please wait"
+                )
             }
 
             switch state {
             case .idle:
                 state = .startingCapture
-                return .start(TranscriptionTrace(hotkeyPressedAt: now))
+                return .start(
+                    TranscriptionTrace(
+                        hotkeyPressedAt: now,
+                        backend: currentASRModelKind.preferenceValue
+                    ),
+                    deliveryTargetProvider.currentTarget()
+                )
             case .startingCapture:
                 return .ignore("Microphone reconnecting, please wait")
             case .recording:
@@ -347,15 +400,17 @@ final class AppCoordinator: @unchecked Sendable {
                 state = .transcribing(token, didTimeOut: false)
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
+                let target = activeDeliveryTarget ?? .unavailable
                 activeTrace = nil
-                return .stop(token, trace)
+                activeDeliveryTarget = nil
+                return .stop(token, trace, target)
             case .transcribing:
                 return .ignore(nil)
             }
         }
 
         switch transition {
-        case .start(var trace):
+        case .start(var trace, let target):
             do {
                 try audioCapture.beginRecording()
                 trace.markCaptureStarted()
@@ -365,6 +420,7 @@ final class AppCoordinator: @unchecked Sendable {
                     }
                     state = .recording
                     activeTrace = trace
+                    activeDeliveryTarget = target
                     return true
                 }
                 guard didStart else {
@@ -380,16 +436,21 @@ final class AppCoordinator: @unchecked Sendable {
                         state = .idle
                     }
                     activeTrace = nil
+                    activeDeliveryTarget = nil
                 }
                 logger.error("Recording start rejected: audio capture unavailable")
                 feedback.notify(event: .error("Microphone reconnecting, try again shortly"))
             }
 
-        case .stop(let token, let trace):
+        case .stop(let token, let trace, let target):
             Task { @MainActor [flash] in
                 flash.hide(completion: nil)
             }
-            stopAndTranscribe(token: token, trace: trace)
+            stopAndTranscribe(token: token, trace: trace, target: target)
+
+        case .blocked(let trace, let message):
+            recordTerminal(trace: trace, outcome: .warmupBlocked)
+            feedback.notify(event: .error(message))
 
         case .ignore(let message):
             guard let message else {
@@ -425,10 +486,12 @@ final class AppCoordinator: @unchecked Sendable {
                 case .startingCapture:
                     state = .idle
                     activeTrace = nil
+                    activeDeliveryTarget = nil
                     return (true, false)
                 case .recording:
                     state = .idle
                     activeTrace = nil
+                    activeDeliveryTarget = nil
                     return (true, true)
                 case .transcribing:
                     // `endRecording()` still owns the capture buffers. Keep the
@@ -465,6 +528,7 @@ final class AppCoordinator: @unchecked Sendable {
                 case .startingCapture, .recording:
                     state = .idle
                     activeTrace = nil
+                    activeDeliveryTarget = nil
                 case .idle, .transcribing:
                     break
                 }
@@ -474,20 +538,28 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    private func stopAndTranscribe(token: UUID, trace: TranscriptionTrace) {
+    private func stopAndTranscribe(
+        token: UUID,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
         // `endRecording` blocks on a grace-window semaphore (up to ~220ms)
         // waiting for the trailing audio frame. Run it off-main so the UI
         // stays responsive during the wait.
         transcriptionQueue.async { [weak self] in
             guard let self else { return }
             let captureResult = self.audioCapture.endRecording()
-            let rms = Self.rms(of: captureResult.samples)
+            let rms = Self.rms(
+                of: captureResult.samples,
+                startingAt: captureResult.prependedSampleCount
+            )
             DispatchQueue.main.async { [weak self] in
                 self?.processCaptureResult(
                     token: token,
                     trace: trace,
                     captureResult: captureResult,
-                    rms: rms
+                    rms: rms,
+                    target: target
                 )
             }
         }
@@ -497,7 +569,8 @@ final class AppCoordinator: @unchecked Sendable {
         token: UUID,
         trace: TranscriptionTrace,
         captureResult: AudioCaptureResult,
-        rms: Float
+        rms: Float,
+        target: TranscriptDeliveryTarget
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         let samples = captureResult.samples
@@ -510,37 +583,40 @@ final class AppCoordinator: @unchecked Sendable {
         )
 
         guard !captureResult.wasInterrupted else {
-            trace.log(logger: logger, outcome: .captureInterrupted)
             if finishTranscription(token: token) {
+                recordTerminal(trace: trace, outcome: .captureInterrupted)
                 feedback.notify(event: .error("Recording interrupted by microphone change"))
             }
             return
         }
 
         guard !samples.isEmpty else {
-            trace.log(logger: logger, outcome: .emptyAudio)
-            _ = finishTranscription(token: token)
+            if finishTranscription(token: token) {
+                recordTerminal(trace: trace, outcome: .emptyAudio)
+            }
             return
         }
 
-        let activeSampleCount = samples.count - captureResult.prependedSampleCount
+        let activeSampleCount = max(0, samples.count - captureResult.prependedSampleCount)
         logger.info(
             "Audio stats: \(samples.count) samples (\(activeSampleCount) active, \(captureResult.prependedSampleCount) preroll), RMS=\(rms, format: .fixed(precision: 4))"
         )
 
         guard activeSampleCount >= Self.minActiveSamples else {
-            trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
             feedback.notify(event: .error("Recording too short"))
-            _ = finishTranscription(token: token)
+            if finishTranscription(token: token) {
+                recordTerminal(trace: trace, outcome: .noSpeech)
+            }
             return
         }
 
         guard rms > Self.silenceRmsThreshold else {
-            trace.log(logger: logger, outcome: .noSpeech)
             logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
             feedback.notify(event: .error("No speech detected"))
-            _ = finishTranscription(token: token)
+            if finishTranscription(token: token) {
+                recordTerminal(trace: trace, outcome: .noSpeech)
+            }
             return
         }
 
@@ -572,9 +648,15 @@ final class AppCoordinator: @unchecked Sendable {
 
                 switch result {
                 case .success(let text):
-                    self.handleTranscriptionResult(text, trace: trace)
+                    self.handleTranscriptionResult(
+                        text,
+                        trace: trace,
+                        activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
+                        activeRMS: rms,
+                        target: target
+                    )
                 case .failure(let error):
-                    trace.log(logger: self.logger, outcome: .transcriptionFailed)
+                    self.recordTerminal(trace: trace, outcome: .transcriptionFailed)
                     self.logger.error("Transcription failed: \(String(describing: error))")
                     self.feedback.notify(event: .error("Transcription failed"))
                 }
@@ -582,42 +664,215 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    private func handleTranscriptionResult(_ text: String, trace: TranscriptionTrace) {
+    private func handleTranscriptionResult(
+        _ text: String,
+        trace: TranscriptionTrace,
+        activeDurationSeconds: TimeInterval? = nil,
+        activeRMS: Float? = nil,
+        target: TranscriptDeliveryTarget = .unavailable
+    ) {
+        let trace = trace
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            trace.log(logger: logger, outcome: .noSpeech)
+            recordTerminal(trace: trace, outcome: .noSpeech)
             feedback.notify(event: .error("No speech detected"))
             return
         }
 
-        if hallucinationFilter.isLikelyHallucination(trimmed) {
-            trace.log(logger: logger, outcome: .noSpeech)
-            logger.debug("Filtered likely hallucination: '\(trimmed)'")
+        let hallucinationVerdict = hallucinationFilter.verdict(
+            for: trimmed,
+            activeDurationSeconds: activeDurationSeconds,
+            activeRMS: activeRMS
+        )
+        if case .rejected(let reason) = hallucinationVerdict {
+            logger.debug("Filtered transcript degeneration: \(String(describing: reason))")
+            recordTerminal(trace: trace, outcome: .noSpeech)
             feedback.notify(event: .error("No speech detected"))
             return
         }
 
+        let processedTranscript = transcriptPostProcessor.process(trimmed)
+        let record = TranscriptRecord(
+            id: trace.id,
+            rawText: processedTranscript.rawText,
+            finalText: processedTranscript.finalText,
+            backend: trace.backend,
+            outcome: .transcriptPersisted,
+            timings: trace.timingSnapshot
+        )
+
+        guard let transcriptStore else {
+            deliverPersistedTranscript(
+                processedTranscript,
+                trace: trace,
+                recordID: nil,
+                target: target
+            )
+            return
+        }
+
+        let persistence = MainActor.assumeIsolated {
+            transcriptStore.append(record)
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard await persistence.value else {
+                self.logger.error("Transcript could not be persisted; skipping paste")
+                self.recordTerminal(
+                    trace: trace,
+                    outcome: .transcriptPersistenceFailed,
+                    text: processedTranscript.finalText
+                )
+                self.feedback.notify(event: .error("Transcript could not be saved"))
+                return
+            }
+            self.deliverPersistedTranscript(
+                processedTranscript,
+                trace: trace,
+                recordID: record.id,
+                target: target
+            )
+        }
+    }
+
+    @discardableResult
+    private func deliverPersistedTranscript(
+        _ transcript: ProcessedTranscript,
+        trace: TranscriptionTrace,
+        recordID: UUID?,
+        target: TranscriptDeliveryTarget
+    ) -> TranscriptDeliveryOutcome? {
+        let text = transcript.finalText
         guard accessibilityChecker.hasAccessibilityAccess() else {
-            trace.log(logger: logger, outcome: .accessibilityDenied)
+            recordTerminal(trace: trace, outcome: .accessibilityDenied, text: text)
+            if let recordID {
+                MainActor.assumeIsolated {
+                    _ = transcriptStore?.update(
+                        id: recordID,
+                        outcome: .accessibilityDenied,
+                        timings: trace.timingSnapshot
+                    )
+                }
+            }
             logger.error("Accessibility permission missing")
             feedback.notify(event: .error("Accessibility permission required"))
-            return
+            return nil
         }
 
         var trace = trace
         trace.markPasteRequested()
-        trace.log(logger: logger, outcome: .pasted, textLength: trimmed.count)
-
-        #if DEBUG
-        if let summary = debugSummary.record(trace: trace) {
-            logger.debug("\(summary)")
+        let outcome = paster.paste(text, target: target)
+        recordTerminal(trace: trace, outcome: outcome.traceOutcome, text: text)
+        if let recordID {
+            MainActor.assumeIsolated {
+                _ = transcriptStore?.update(
+                    id: recordID,
+                    outcome: outcome.traceOutcome,
+                    timings: trace.timingSnapshot
+                )
+            }
         }
-        #endif
 
-        MainActor.assumeIsolated {
-            transcriptStore?.append(trimmed)
+        notifyDeliveryOutcome(outcome, operation: .paste, target: target)
+        return outcome
+    }
+
+    /// Copy the newest retained transcript without invoking ASR.
+    @MainActor
+    @discardableResult
+    func copyLastTranscript() -> TranscriptDeliveryOutcome? {
+        guard let text = lastTranscript() else {
+            feedback.notify(event: .error("No transcript available"))
+            return nil
         }
-        paster.paste(trimmed)
+
+        let outcome = paster.copy(text)
+        notifyDeliveryOutcome(outcome, operation: .copy, target: nil)
+        return outcome
+    }
+
+    /// Post a new paste request for the newest transcript without retranscribing it.
+    @MainActor
+    @discardableResult
+    func pasteLastTranscript() -> TranscriptDeliveryOutcome? {
+        guard let text = lastTranscript() else {
+            feedback.notify(event: .error("No transcript available"))
+            return nil
+        }
+
+        return pasteTranscript(
+            text,
+            operation: .pasteLast,
+            target: deliveryTargetProvider.currentTarget()
+        )
+    }
+
+    /// Paste a stored transcript without invoking ASR. Used for history rows
+    /// and by the explicit last-transcript recovery action.
+    @MainActor
+    @discardableResult
+    func pasteTranscript(_ text: String) -> TranscriptDeliveryOutcome? {
+        pasteTranscript(
+            text,
+            operation: .pasteLast,
+            target: deliveryTargetProvider.currentTarget()
+        )
+    }
+
+    @discardableResult
+    @MainActor
+    private func pasteTranscript(
+        _ text: String,
+        operation: DeliveryOperation,
+        target: TranscriptDeliveryTarget
+    ) -> TranscriptDeliveryOutcome? {
+        guard accessibilityChecker.hasAccessibilityAccess() else {
+            logger.error("Accessibility permission missing for last transcript")
+            feedback.notify(event: .error("Accessibility permission required"))
+            return nil
+        }
+
+        let outcome = paster.paste(text, target: target)
+        notifyDeliveryOutcome(outcome, operation: operation, target: target)
+        return outcome
+    }
+
+    private enum DeliveryOperation {
+        case copy
+        case paste
+        case pasteLast
+    }
+
+    @MainActor
+    private func lastTranscript() -> String? {
+        transcriptStore?.allEntries().last
+    }
+
+    private func notifyDeliveryOutcome(
+        _ outcome: TranscriptDeliveryOutcome,
+        operation: DeliveryOperation,
+        target: TranscriptDeliveryTarget?
+    ) {
+        switch (operation, outcome) {
+        case (.copy, .clipboardUpdated):
+            feedback.notify(event: .status("Last transcript copied"))
+        case (.pasteLast, .eventsPosted):
+            feedback.notify(event: .status("Paste events posted"))
+        case (_, .clipboardWriteFailed):
+            feedback.notify(event: .error("Could not update clipboard"))
+        case (.paste, .clipboardUpdated), (.pasteLast, .clipboardUpdated):
+            if case .external = target {
+                feedback.notify(event: .error("Clipboard updated, but paste could not be posted"))
+            } else {
+                feedback.notify(event: .status("Transcript copied; no external paste target"))
+            }
+        case (.copy, .eventsPosted):
+            // Copy operations do not post events, but handle this defensively
+            // if another Pasting implementation returns a broader outcome.
+            feedback.notify(event: .status("Last transcript copied"))
+        case (.paste, .eventsPosted):
+            break
+        }
     }
 
     /// Returns whether the completed result is still eligible for delivery.
@@ -650,44 +905,88 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard shouldNotify else { return }
 
-        trace.log(logger: logger, outcome: .timedOut)
+        recordTerminal(trace: trace, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
     }
 
+    private func recordTerminal(
+        trace: TranscriptionTrace,
+        outcome: TranscriptionTrace.Outcome,
+        text: String? = nil
+    ) {
+        trace.log(logger: logger, outcome: outcome)
+        MainActor.assumeIsolated {
+            _ = diagnosticsStore?.record(trace: trace, outcome: outcome, text: text)
+        }
+    }
+
     private func completeASRModelSwitch(
+        id switchID: UUID,
         to kind: ASRModelKind,
         restoring previousWarmupState: WarmupState,
         result: Result<(ASRModelConfiguration, Transcriber), Error>
     ) {
         switch result {
         case .success(let (model, newTranscriber)):
-            let previousTranscriber = stateLock.withLock {
+            let previousTranscriber = stateLock.withLock { () -> Transcriber? in
+                guard activeModelSwitchID == switchID,
+                      case .idle = state else {
+                    return nil
+                }
+
                 let previousTranscriber = transcriber
                 transcriber = newTranscriber
                 currentASRModelKind = kind
+                warmupState = .ready
+                activeModelSwitchID = nil
                 return previousTranscriber
             }
+
+            guard let previousTranscriber else {
+                logger.info("Ignoring stale ASR model switch to \(kind.displayName)")
+                return
+            }
+
             transcriptionQueue.async {
                 withExtendedLifetime(previousTranscriber) {}
             }
             modelSelectionStore(kind)
             logger.info("Switched ASR model to \(kind.displayName) at \(model.url.path)")
-            Task { [weak self] in
-                await self?.warmUpModel()
-            }
 
         case .failure(let error):
-            failASRModelSwitch(to: kind, restoring: previousWarmupState, error: error)
+            failASRModelSwitch(
+                id: switchID,
+                to: kind,
+                restoring: previousWarmupState,
+                error: error
+            )
         }
     }
 
     private func failASRModelSwitch(
+        id switchID: UUID,
         to kind: ASRModelKind,
         restoring previousWarmupState: WarmupState,
         error: Error
     ) {
-        stateLock.withLock { warmupState = previousWarmupState }
+        let didRestore = stateLock.withLock { () -> Bool in
+            guard activeModelSwitchID == switchID else {
+                return false
+            }
+
+            guard case .idle = state else {
+                return false
+            }
+            activeModelSwitchID = nil
+            warmupState = previousWarmupState
+            return true
+        }
+        guard didRestore else {
+            logger.info("Ignoring stale failed ASR model switch to \(kind.displayName)")
+            return
+        }
+
         logger.error("Failed to switch ASR model to \(kind.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
         feedback.notify(event: .error("Failed to switch audio model"))
     }
@@ -700,14 +999,16 @@ final class AppCoordinator: @unchecked Sendable {
         return min(scaled, maxTranscriptionTimeout)
     }
 
-    private static func rms(of samples: ContiguousArray<Float>) -> Float {
-        guard !samples.isEmpty else { return 0 }
+    private static func rms(of samples: ContiguousArray<Float>, startingAt start: Int = 0) -> Float {
+        let clampedStart = min(max(start, 0), samples.count)
+        let sampleCount = samples.count - clampedStart
+        guard sampleCount > 0 else { return 0 }
         var sumSquares: Float = 0
         samples.withUnsafeBufferPointer { buffer in
-            for sample in buffer {
+            for sample in buffer[clampedStart...] {
                 sumSquares += sample * sample
             }
         }
-        return (sumSquares / Float(samples.count)).squareRoot()
+        return (sumSquares / Float(sampleCount)).squareRoot()
     }
 }

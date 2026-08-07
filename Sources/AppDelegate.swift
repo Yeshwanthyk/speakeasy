@@ -35,12 +35,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let store = coordinator.transcriptStore {
                     let menuBarController = MenuBarController(
                         store: store,
-                        paster: coordinator.paster,
+                        diagnosticsStore: coordinator.diagnosticsStore,
+                        pasteTranscript: { [weak coordinator] text in
+                            _ = coordinator?.pasteTranscript(text)
+                        },
                         currentASRModelKind: { [weak coordinator] in
                             coordinator?.selectedASRModelKind() ?? .parakeetUnified
                         },
                         selectASRModel: { [weak coordinator] kind in
                             coordinator?.switchASRModel(to: kind)
+                        },
+                        copyLastTranscript: { [weak coordinator] in
+                            _ = coordinator?.copyLastTranscript()
+                        },
+                        pasteLastTranscript: { [weak coordinator] in
+                            _ = coordinator?.pasteLastTranscript()
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

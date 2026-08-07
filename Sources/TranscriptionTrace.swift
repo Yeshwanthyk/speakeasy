@@ -1,9 +1,13 @@
 import Foundation
 import os
 
-struct TranscriptionTrace {
-    enum Outcome: String {
-        case pasted
+struct TranscriptionTrace: Sendable {
+    enum Outcome: String, Codable, Sendable, CaseIterable {
+        case eventsPosted
+        case clipboardUpdated
+        case clipboardWriteFailed
+        case transcriptPersisted
+        case transcriptPersistenceFailed
         case noSpeech
         case emptyAudio
         case captureInterrupted
@@ -16,6 +20,7 @@ struct TranscriptionTrace {
     private static let transcriptionSampleRate: Double = 16_000
 
     let id: UUID
+    let backend: String
     let hotkeyPressedAt: UInt64
     var captureStartAt: UInt64?
     var hotkeyReleasedAt: UInt64?
@@ -27,8 +32,13 @@ struct TranscriptionTrace {
     var prependedSampleCount: Int
     var graceDurationMs: Double?
 
-    init(id: UUID = UUID(), hotkeyPressedAt: UInt64 = Self.timestamp()) {
+    init(
+        id: UUID = UUID(),
+        hotkeyPressedAt: UInt64 = Self.timestamp(),
+        backend: String = "unknown"
+    ) {
         self.id = id
+        self.backend = backend
         self.hotkeyPressedAt = hotkeyPressedAt
         self.sampleCount = 0
         self.prependedSampleCount = 0
@@ -102,12 +112,7 @@ struct TranscriptionTrace {
         pasteRequestedAt = at
     }
 
-    func log(
-        logger: Logger,
-        outcome: Outcome,
-        textLength: Int? = nil,
-        extra: String? = nil
-    ) {
+    func log(logger: Logger, outcome: Outcome) {
         var parts = [
             "trace_id=\(id.uuidString)",
             "outcome=\(outcome.rawValue)",
@@ -140,14 +145,19 @@ struct TranscriptionTrace {
         if let value = hotkeyReleaseToPasteRequestMs {
             parts.append(String(format: "release_to_paste_ms=%.1f", value))
         }
-        if let textLength {
-            parts.append("text_chars=\(textLength)")
-        }
-        if let extra, !extra.isEmpty {
-            parts.append(extra)
-        }
-
         logger.info("\(parts.joined(separator: " "), privacy: .public)")
+    }
+
+    var timingSnapshot: TimingSnapshot {
+        TimingSnapshot(
+            captureStartMs: hotkeyPressToCaptureStartMs,
+            releaseToStopMs: hotkeyReleaseToStopReturnMs,
+            transcriptionMs: transcriptionDurationMs,
+            releaseToTextMs: hotkeyReleaseToTextMs,
+            releaseToPasteMs: hotkeyReleaseToPasteRequestMs,
+            transcriptionEndToPasteMs: transcriptionEndToPasteRequestMs,
+            utteranceMs: utteranceDurationMs
+        )
     }
 
     private static func durationMs(from start: UInt64?, to end: UInt64?) -> Double? {
@@ -158,50 +168,3 @@ struct TranscriptionTrace {
         return Double(end - start) / 1_000_000
     }
 }
-
-#if DEBUG
-final class TranscriptionDebugSummary {
-    private let lock = UnfairLock()
-    private var captureStartLatenciesMs: [Double] = []
-    private var releaseToTextLatenciesMs: [Double] = []
-
-    func record(trace: TranscriptionTrace) -> String? {
-        guard
-            let captureStart = trace.hotkeyPressToCaptureStartMs,
-            let releaseToText = trace.hotkeyReleaseToTextMs
-        else {
-            return nil
-        }
-
-        return lock.withLock {
-            captureStartLatenciesMs.append(captureStart)
-            releaseToTextLatenciesMs.append(releaseToText)
-
-            let captureP50 = Self.percentile(0.5, values: captureStartLatenciesMs)
-            let captureP95 = Self.percentile(0.95, values: captureStartLatenciesMs)
-            let releaseP50 = Self.percentile(0.5, values: releaseToTextLatenciesMs)
-            let releaseP95 = Self.percentile(0.95, values: releaseToTextLatenciesMs)
-
-            return String(
-                format: "debug_latency_summary count=%d capture_start_p50_ms=%.1f capture_start_p95_ms=%.1f release_to_text_p50_ms=%.1f release_to_text_p95_ms=%.1f",
-                captureStartLatenciesMs.count,
-                captureP50,
-                captureP95,
-                releaseP50,
-                releaseP95
-            )
-        }
-    }
-
-    private static func percentile(_ percentile: Double, values: [Double]) -> Double {
-        guard !values.isEmpty else {
-            return 0
-        }
-
-        let sorted = values.sorted()
-        let rawIndex = Int((Double(sorted.count - 1) * percentile).rounded())
-        let boundedIndex = min(sorted.count - 1, max(0, rawIndex))
-        return sorted[boundedIndex]
-    }
-}
-#endif

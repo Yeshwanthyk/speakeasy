@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 enum ModelPathError: Error {
@@ -5,6 +6,13 @@ enum ModelPathError: Error {
     case unsupportedModel(String)
     case modelNotFound(String)
     case modelInvalid(String, reason: String)
+}
+
+enum ModelArtifactVerificationError: Error, Equatable {
+    case fileMissing(String)
+    case notRegularFile(String)
+    case unexpectedFileSize(expected: Int64, actual: Int64)
+    case checksumMismatch(expected: String, actual: String)
 }
 
 struct ASRModelArtifact: Equatable, Sendable {
@@ -139,6 +147,8 @@ struct ASRModelConfiguration: Equatable, Sendable {
 }
 
 enum ModelPathResolver {
+    typealias ArtifactProvider = (ASRModelKind) -> ASRModelArtifact
+
     private static let canonicalBundleIdentifier = "com.speakeasy.app"
     private static let legacyBundleIdentifier = "com.wisp.app"
     private static let modelKindEnvironmentKey = "SPEAKEASY_ASR_MODEL"
@@ -200,7 +210,8 @@ enum ModelPathResolver {
         appSupport: URL,
         bundleIdentifier: String?,
         environment: [String: String],
-        preferences: [String: String] = [:]
+        preferences: [String: String] = [:],
+        artifactProvider: @escaping ArtifactProvider = { $0.artifact }
     ) throws -> ASRModelConfiguration {
         let kind = try configuredASRModelKind(
             environment: environment,
@@ -211,7 +222,8 @@ enum ModelPathResolver {
             appSupport: appSupport,
             bundleIdentifier: bundleIdentifier,
             environment: environment,
-            preferences: preferences
+            preferences: preferences,
+            artifactProvider: artifactProvider
         )
     }
 
@@ -220,7 +232,8 @@ enum ModelPathResolver {
         appSupport: URL,
         bundleIdentifier: String?,
         environment: [String: String],
-        preferences: [String: String] = [:]
+        preferences: [String: String] = [:],
+        artifactProvider: @escaping ArtifactProvider = { $0.artifact }
     ) throws -> ASRModelConfiguration {
         ASRModelConfiguration(
             kind: kind,
@@ -229,7 +242,8 @@ enum ModelPathResolver {
                 appSupport: appSupport,
                 bundleIdentifier: bundleIdentifier,
                 environment: environment,
-                preferences: preferences
+                preferences: preferences,
+                artifactProvider: artifactProvider
             )
         )
     }
@@ -272,12 +286,60 @@ enum ModelPathResolver {
         )
     }
 
-    static func isModelInstalled(kind: ASRModelKind, at url: URL) -> Bool {
+    static func isModelInstalled(
+        kind: ASRModelKind,
+        at url: URL,
+        artifactProvider: @escaping ArtifactProvider = { $0.artifact }
+    ) -> Bool {
+        (try? verifyArtifact(artifactProvider(kind), at: url)) != nil
+    }
+
+    static func verifyModelArtifact(kind: ASRModelKind, at url: URL) throws {
+        try verifyArtifact(kind.artifact, at: url)
+    }
+
+    static func verifyArtifact(_ artifact: ASRModelArtifact, at url: URL) throws {
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else {
-            return false
+            throw ModelArtifactVerificationError.fileMissing(url.path)
         }
-        return values.isRegularFile == true
-            && Int64(values.fileSize ?? 0) == kind.artifact.expectedByteCount
+        guard values.isRegularFile == true else {
+            throw ModelArtifactVerificationError.notRegularFile(url.path)
+        }
+
+        let actualByteCount = Int64(values.fileSize ?? 0)
+        guard actualByteCount == artifact.expectedByteCount else {
+            throw ModelArtifactVerificationError.unexpectedFileSize(
+                expected: artifact.expectedByteCount,
+                actual: actualByteCount
+            )
+        }
+
+        guard let stream = InputStream(url: url) else {
+            throw ModelArtifactVerificationError.fileMissing(url.path)
+        }
+        stream.open()
+        defer { stream.close() }
+
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 1_048_576)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 {
+                throw stream.streamError ?? CocoaError(.fileReadUnknown)
+            }
+            if count == 0 {
+                break
+            }
+            hasher.update(data: Data(buffer[0..<count]))
+        }
+
+        let actualChecksum = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actualChecksum == artifact.sha256 else {
+            throw ModelArtifactVerificationError.checksumMismatch(
+                expected: artifact.sha256,
+                actual: actualChecksum
+            )
+        }
     }
 
     private static func modelPath(
@@ -285,11 +347,16 @@ enum ModelPathResolver {
         appSupport: URL,
         bundleIdentifier: String?,
         environment: [String: String],
-        preferences: [String: String]
+        preferences: [String: String],
+        artifactProvider: @escaping ArtifactProvider
     ) throws -> URL {
         if let override = (environment[kind.overrideEnvironmentKey]
             ?? preferences[kind.overridePreferenceKey])?.nilIfEmpty {
-            return try validateModel(kind: kind, at: URL(fileURLWithPath: override))
+            return try validateModel(
+                kind: kind,
+                at: URL(fileURLWithPath: override),
+                artifactProvider: artifactProvider
+            )
         }
 
         let bundleIdentifier = bundleIdentifier ?? canonicalBundleIdentifier
@@ -298,7 +365,7 @@ enum ModelPathResolver {
             bundleIdentifier: bundleIdentifier,
             kind: kind
         )
-        if isModelInstalled(kind: kind, at: modelURL) {
+        if isModelInstalled(kind: kind, at: modelURL, artifactProvider: artifactProvider) {
             return modelURL
         }
 
@@ -308,7 +375,7 @@ enum ModelPathResolver {
                 bundleIdentifier: legacyBundleIdentifier,
                 kind: kind
             )
-            if isModelInstalled(kind: kind, at: legacyURL) {
+            if isModelInstalled(kind: kind, at: legacyURL, artifactProvider: artifactProvider) {
                 return legacyURL
             }
         }
@@ -316,23 +383,56 @@ enum ModelPathResolver {
         if FileManager.default.fileExists(atPath: modelURL.path) {
             throw ModelPathError.modelInvalid(
                 modelURL.path,
-                reason: "expected \(kind.artifact.expectedByteCount) bytes"
+                reason: validationFailureReason(
+                    artifact: artifactProvider(kind),
+                    at: modelURL
+                )
             )
         }
         throw ModelPathError.modelNotFound(modelURL.path)
     }
 
-    private static func validateModel(kind: ASRModelKind, at url: URL) throws -> URL {
-        if isModelInstalled(kind: kind, at: url) {
+    private static func validateModel(
+        kind: ASRModelKind,
+        at url: URL,
+        artifactProvider: @escaping ArtifactProvider
+    ) throws -> URL {
+        if isModelInstalled(kind: kind, at: url, artifactProvider: artifactProvider) {
             return url
         }
         if FileManager.default.fileExists(atPath: url.path) {
             throw ModelPathError.modelInvalid(
                 url.path,
-                reason: "expected \(kind.artifact.expectedByteCount) bytes"
+                reason: validationFailureReason(
+                    artifact: artifactProvider(kind),
+                    at: url
+                )
             )
         }
         throw ModelPathError.modelNotFound(url.path)
+    }
+
+    private static func validationFailureReason(
+        artifact: ASRModelArtifact,
+        at url: URL
+    ) -> String {
+        do {
+            try verifyArtifact(artifact, at: url)
+            return "artifact verification failed"
+        } catch let error as ModelArtifactVerificationError {
+            switch error {
+            case .fileMissing:
+                return "file is missing"
+            case .notRegularFile:
+                return "path is not a regular file"
+            case .unexpectedFileSize(let expected, let actual):
+                return "expected \(expected) bytes, found \(actual)"
+            case .checksumMismatch(let expected, let actual):
+                return "SHA-256 mismatch (expected \(expected), found \(actual))"
+            }
+        } catch {
+            return "could not read artifact: \(error)"
+        }
     }
 
     private static func makeModelURL(

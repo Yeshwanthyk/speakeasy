@@ -8,7 +8,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private static let titleMaxLength = 60
 
     private let store: TranscriptStore
-    private let paster: Pasting
+    private let diagnosticsStore: DiagnosticsStore?
+    private let pasteTranscript: (String) -> Void
+    private let copyLastTranscript: () -> Void
+    private let pasteLastTranscript: () -> Void
     private let currentASRModelKind: () -> ASRModelKind
     private let selectASRModel: (ASRModelKind) -> Void
     private let statusItem: NSStatusItem
@@ -18,12 +21,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     init(
         store: TranscriptStore,
-        paster: Pasting,
+        diagnosticsStore: DiagnosticsStore? = nil,
+        paster: Pasting? = nil,
+        pasteTranscript: ((String) -> Void)? = nil,
         currentASRModelKind: @escaping () -> ASRModelKind = { .parakeetUnified },
-        selectASRModel: @escaping (ASRModelKind) -> Void = { _ in }
+        selectASRModel: @escaping (ASRModelKind) -> Void = { _ in },
+        copyLastTranscript: @escaping () -> Void = {},
+        pasteLastTranscript: @escaping () -> Void = {}
     ) {
         self.store = store
-        self.paster = paster
+        self.diagnosticsStore = diagnosticsStore
+        self.pasteTranscript = pasteTranscript ?? { text in
+            _ = paster?.paste(text)
+        }
+        self.copyLastTranscript = copyLastTranscript
+        self.pasteLastTranscript = pasteLastTranscript
         self.currentASRModelKind = currentASRModelKind
         self.selectASRModel = selectASRModel
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -109,6 +121,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let copyLast = NSMenuItem(
+            title: "Copy Last Transcript",
+            action: #selector(copyLastTranscriptAction),
+            keyEquivalent: ""
+        )
+        copyLast.target = self
+        copyLast.isEnabled = !history.isEmpty
+        menu.addItem(copyLast)
+
+        let pasteLast = NSMenuItem(
+            title: "Paste Last Transcript",
+            action: #selector(pasteLastTranscriptAction),
+            keyEquivalent: ""
+        )
+        pasteLast.target = self
+        pasteLast.isEnabled = !history.isEmpty
+        menu.addItem(pasteLast)
+
         let clear = NSMenuItem(
             title: "Clear History",
             action: #selector(clearHistory),
@@ -136,6 +166,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         modelItem.submenu = modelMenu
         menu.addItem(modelItem)
+
+        let diagnosticsItem = NSMenuItem(title: "Stats & Diagnostics", action: nil, keyEquivalent: "")
+        let diagnosticsMenu = NSMenu(title: "Stats & Diagnostics")
+        let report = diagnosticsStore?.report() ?? "Diagnostics unavailable"
+        let reportItem = NSMenuItem(title: report, action: nil, keyEquivalent: "")
+        reportItem.isEnabled = false
+        diagnosticsMenu.addItem(reportItem)
+        diagnosticsItem.submenu = diagnosticsMenu
+        menu.addItem(diagnosticsItem)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(
@@ -150,7 +189,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func pasteHistoryItem(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
-        paster.paste(text)
+        pasteTranscript(text)
+    }
+
+    @objc private func copyLastTranscriptAction() {
+        copyLastTranscript()
+    }
+
+    @objc private func pasteLastTranscriptAction() {
+        pasteLastTranscript()
     }
 
     @objc private func clearHistory() {
