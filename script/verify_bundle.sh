@@ -50,7 +50,17 @@ for spec in "${icon_specs[@]}"; do
     echo "$filename has dimensions ${width}x${height}; expected $expected_size" >&2
     exit 1
   fi
+
+  has_alpha="$(sips -g hasAlpha "$image_path" | awk '/hasAlpha:/ { print $2 }')"
+  if [[ "$has_alpha" != "yes" ]]; then
+    echo "$filename must preserve transparent rounded corners" >&2
+    exit 1
+  fi
 done
+
+"$ROOT_DIR/script/check_icon_edges.swift" \
+  "$ICONSET_DIR/icon_16x16.png" \
+  "$ICONSET_DIR/icon_32x32.png"
 
 roundtrip_root="$(mktemp -d "${TMPDIR:-/tmp}/speakeasy-icon-roundtrip.XXXXXX")"
 trap 'rm -rf "$roundtrip_root"' EXIT

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Signal Fold app icon</title>
+  <desc id="desc">Seven horizontal contour lines bend through a single central fold on a warm-white rounded square.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="220" fill="#EDEBE3" shape-rendering="crispEdges"/>
+  <g fill="none" stroke="#1B1C19" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M176 272 C296 272 356 272 400 282 C444 292 460 338 512 338 C564 338 580 292 624 282 C668 272 728 272 848 272"/>
+    <path d="M176 352 C296 352 356 352 400 362 C444 372 460 418 512 418 C564 418 580 372 624 362 C668 352 728 352 848 352"/>
+    <path d="M176 432 C296 432 356 432 400 442 C444 452 460 498 512 498 C564 498 580 452 624 442 C668 432 728 432 848 432"/>
+    <path d="M176 512 C296 512 356 512 400 522 C444 532 460 578 512 578 C564 578 580 532 624 522 C668 512 728 512 848 512"/>
+    <path d="M176 592 C296 592 356 592 400 602 C444 612 460 658 512 658 C564 658 580 612 624 602 C668 592 728 592 848 592"/>
+    <path d="M176 672 C296 672 356 672 400 682 C444 692 460 738 512 738 C564 738 580 692 624 682 C668 672 728 672 848 672"/>
+    <path d="M176 752 C296 752 356 752 400 762 C444 772 460 818 512 818 C564 818 580 772 624 762 C668 752 728 752 848 752"/>
+  </g>
+</svg>
