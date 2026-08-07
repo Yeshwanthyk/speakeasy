@@ -3,10 +3,15 @@ import XCTest
 @testable import Speakeasy
 
 final class AppInstanceSelectorTests: XCTestCase {
+    private let installedURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Applications/Speakeasy.app")
+    private let buildURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("speakeasy-build/Speakeasy.app")
+
     func testProceedWhenNoOtherInstancesAreRunning() {
         let current = AppInstanceSelector.Descriptor(
             pid: 100,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Applications/Speakeasy.app")
+            bundleURL: installedURL
         )
 
         XCTAssertEqual(
@@ -18,11 +23,11 @@ final class AppInstanceSelectorTests: XCTestCase {
     func testInstalledCopyTerminatesNonInstalledCompetitors() {
         let current = AppInstanceSelector.Descriptor(
             pid: 200,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Applications/Speakeasy.app")
+            bundleURL: installedURL
         )
         let other = AppInstanceSelector.Descriptor(
             pid: 100,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Documents/personal/wisp/build/Speakeasy.app")
+            bundleURL: buildURL
         )
 
         XCTAssertEqual(
@@ -34,11 +39,11 @@ final class AppInstanceSelectorTests: XCTestCase {
     func testNonInstalledCopyExitsWhenInstalledCopyIsAlreadyRunning() {
         let current = AppInstanceSelector.Descriptor(
             pid: 200,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Documents/personal/wisp/build/Speakeasy.app")
+            bundleURL: buildURL
         )
         let other = AppInstanceSelector.Descriptor(
             pid: 100,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Applications/Speakeasy.app")
+            bundleURL: installedURL
         )
 
         XCTAssertEqual(
@@ -50,7 +55,7 @@ final class AppInstanceSelectorTests: XCTestCase {
     func testLaterNonInstalledCopyExitsWhenAnotherNonInstalledCopyIsRunning() {
         let current = AppInstanceSelector.Descriptor(
             pid: 200,
-            bundleURL: URL(fileURLWithPath: "/Users/yesh/Documents/personal/wisp/build/Speakeasy.app")
+            bundleURL: buildURL
         )
         let other = AppInstanceSelector.Descriptor(
             pid: 100,
