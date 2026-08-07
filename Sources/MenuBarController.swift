@@ -18,6 +18,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let selectInvocationMode: (DictationInvocationMode) -> Void
     private let cancelDictation: () -> Void
     private let canCancelDictation: () -> Bool
+    private let retryLastFailedCapture: () -> Void
+    private let discardFailedCapture: () -> Void
+    private let canRetryFailedCapture: () -> Bool
+    private let canDiscardFailedCapture: () -> Bool
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
@@ -35,7 +39,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         currentInvocationMode: @escaping () -> DictationInvocationMode = { .toggle },
         selectInvocationMode: @escaping (DictationInvocationMode) -> Void = { _ in },
         cancelDictation: @escaping () -> Void = {},
-        canCancelDictation: @escaping () -> Bool = { false }
+        canCancelDictation: @escaping () -> Bool = { false },
+        retryLastFailedCapture: @escaping () -> Void = {},
+        discardFailedCapture: @escaping () -> Void = {},
+        canRetryFailedCapture: @escaping () -> Bool = { false },
+        canDiscardFailedCapture: @escaping () -> Bool = { false }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -50,6 +58,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.selectInvocationMode = selectInvocationMode
         self.cancelDictation = cancelDictation
         self.canCancelDictation = canCancelDictation
+        self.retryLastFailedCapture = retryLastFailedCapture
+        self.discardFailedCapture = discardFailedCapture
+        self.canRetryFailedCapture = canRetryFailedCapture
+        self.canDiscardFailedCapture = canDiscardFailedCapture
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -159,6 +171,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cancel.isEnabled = canCancelDictation()
         menu.addItem(cancel)
 
+        let retry = NSMenuItem(
+            title: "Retry Last Failed Capture",
+            action: #selector(retryLastFailedCaptureAction),
+            keyEquivalent: ""
+        )
+        retry.target = self
+        retry.isEnabled = canRetryFailedCapture()
+        menu.addItem(retry)
+
+        let discardFailed = NSMenuItem(
+            title: "Discard Failed Capture",
+            action: #selector(discardFailedCaptureAction),
+            keyEquivalent: ""
+        )
+        discardFailed.target = self
+        discardFailed.isEnabled = canDiscardFailedCapture()
+        menu.addItem(discardFailed)
+
         menu.addItem(.separator())
 
         let copyLast = NSMenuItem(
@@ -246,6 +276,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func cancelDictationAction() {
         cancelDictation()
+    }
+
+    @objc private func retryLastFailedCaptureAction() {
+        retryLastFailedCapture()
+    }
+
+    @objc private func discardFailedCaptureAction() {
+        discardFailedCapture()
     }
 
     @objc private func selectInvocationModeItem(_ sender: NSMenuItem) {

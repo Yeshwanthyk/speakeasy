@@ -94,6 +94,13 @@ final class AppCoordinator: @unchecked Sendable {
         case ignore(String?)
     }
 
+    private enum TranscriptionSettlement {
+        case eligible
+        case timedOut
+        case cancelled
+        case stale
+    }
+
     private enum ModelSwitchStart {
         case start(id: UUID, previousWarmupState: WarmupState)
         case alreadySelected
@@ -126,6 +133,7 @@ final class AppCoordinator: @unchecked Sendable {
     private let modelArtifactVerifier: ASRModelArtifactVerifier
     private let modelSelectionStore: ASRModelSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
+    private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
     private let intentLock = UnfairLock()
     private var state: State = .idle
@@ -138,6 +146,9 @@ final class AppCoordinator: @unchecked Sendable {
     /// Trace retained while native work is settling so user cancellation can
     /// record the terminal outcome before the completion callback arrives.
     private var activeTranscriptionTrace: TranscriptionTrace?
+    /// Owns a replay lease while a retry's native call is settling.
+    private var activeReplayLease: FailedCaptureReplayBuffer.Lease?
+    private var isShuttingDown = false
     /// Target captured before automatic recording starts. Recovery actions do
     /// not use this value; they resolve a fresh external target.
     private var activeDeliveryTarget: TranscriptDeliveryTarget?
@@ -176,7 +187,8 @@ final class AppCoordinator: @unchecked Sendable {
         diagnosticsStore: DiagnosticsStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
-        deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider()
+        deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
+        failedCaptureReplayBuffer: FailedCaptureReplayBuffer = FailedCaptureReplayBuffer()
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -193,6 +205,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.modelArtifactVerifier = modelArtifactVerifier
         self.modelSelectionStore = modelSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
+        self.failedCaptureReplayBuffer = failedCaptureReplayBuffer
         self.transcriptStore = transcriptStore
         self.diagnosticsStore = diagnosticsStore
         self.transcriptionQueue = transcriptionQueue
@@ -235,6 +248,15 @@ final class AppCoordinator: @unchecked Sendable {
 
     /// Shut down the audio engine. Call from `applicationWillTerminate`.
     func shutdown() {
+        stateLock.withLock {
+            isShuttingDown = true
+            state = .idle
+            activeTrace = nil
+            activeTranscriptionTrace = nil
+            activeReplayLease = nil
+            activeDeliveryTarget = nil
+        }
+        failedCaptureReplayBuffer.clear()
         audioCapture.shutdown()
     }
 
@@ -259,6 +281,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     func canCancelDictation() -> Bool {
         stateLock.withLock {
+            guard !isShuttingDown else { return false }
             switch state {
             case .idle:
                 return false
@@ -266,6 +289,77 @@ final class AppCoordinator: @unchecked Sendable {
                 return true
             }
         }
+    }
+
+    func canRetryFailedCapture() -> Bool {
+        stateLock.withLock {
+            guard !isShuttingDown, warmupState.isReady, case .idle = state else {
+                return false
+            }
+            return failedCaptureReplayBuffer.hasCapture
+        }
+    }
+
+    func canDiscardFailedCapture() -> Bool {
+        stateLock.withLock {
+            guard !isShuttingDown, case .idle = state else { return false }
+            return failedCaptureReplayBuffer.hasCapture
+        }
+    }
+
+    /// Retry the one retained failed capture without touching AudioCapture.
+    func retryLastFailedCapture() {
+        let retry = stateLock.withLock { () -> (
+            lease: FailedCaptureReplayBuffer.Lease,
+            token: UUID,
+            runID: UInt64,
+            trace: TranscriptionTrace,
+            target: TranscriptDeliveryTarget
+        )? in
+            guard !isShuttingDown, warmupState.isReady, case .idle = state,
+                  let lease = failedCaptureReplayBuffer.acquireLease() else {
+                return nil
+            }
+
+            let token = UUID()
+            let runID = nextRunID()
+            var trace = TranscriptionTrace(
+                hotkeyPressedAt: TranscriptionTrace.timestamp(),
+                backend: currentASRModelKind.preferenceValue
+            )
+            trace.markStopReturned(sampleCount: lease.samples.count)
+            let target = deliveryTargetProvider.currentTarget()
+            state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
+            activeTranscriptionTrace = trace
+            activeReplayLease = lease
+            return (lease, token, runID, trace, target)
+        }
+
+        guard let retry else {
+            feedback.notify(event: .error("No failed capture available"))
+            return
+        }
+
+        beginNativeTranscription(
+            samples: retry.lease.samples,
+            activeSampleCount: retry.lease.samples.count,
+            rms: Self.rms(of: retry.lease.samples),
+            token: retry.token,
+            runID: retry.runID,
+            trace: retry.trace,
+            target: retry.target
+        )
+    }
+
+    func discardFailedCapture() {
+        let didDiscard = stateLock.withLock { () -> Bool in
+            guard !isShuttingDown, case .idle = state else { return false }
+            activeReplayLease = nil
+            return failedCaptureReplayBuffer.hasCapture
+        }
+        guard didDiscard else { return }
+        failedCaptureReplayBuffer.clear()
+        feedback.notify(event: .status("Failed capture discarded"))
     }
 
     func switchASRModel(to kind: ASRModelKind) {
@@ -416,7 +510,11 @@ final class AppCoordinator: @unchecked Sendable {
         let now = TranscriptionTrace.timestamp()
 
         let transition = stateLock.withLock { () -> Transition in
+            guard !isShuttingDown else { return .ignore(nil) }
+
             func start() -> Transition {
+                failedCaptureReplayBuffer.clear()
+                activeReplayLease = nil
                 let captureID = UUID()
                 let trace = TranscriptionTrace(
                     hotkeyPressedAt: now,
@@ -428,7 +526,7 @@ final class AppCoordinator: @unchecked Sendable {
                 return .start(captureID, trace, activeDeliveryTarget ?? .unavailable)
             }
 
-            guard warmupState.isReady else {
+            guard warmupState.isReady || intent == .cancel else {
                 return .blocked(
                     TranscriptionTrace(
                         hotkeyPressedAt: now,
@@ -440,11 +538,7 @@ final class AppCoordinator: @unchecked Sendable {
 
             func stop() -> Transition {
                 let token = UUID()
-                nextTranscriptionID &+= 1
-                if nextTranscriptionID == 0 {
-                    nextTranscriptionID = 1
-                }
-                let runID = nextTranscriptionID
+                let runID = nextRunID()
                 state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
@@ -487,6 +581,8 @@ final class AppCoordinator: @unchecked Sendable {
                 }
 
             case .cancel:
+                failedCaptureReplayBuffer.clear()
+                activeReplayLease = nil
                 switch state {
                 case .idle:
                     return .ignore(nil)
@@ -731,7 +827,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         guard !captureResult.wasInterrupted else {
-            if finishTranscription(token: token) {
+            if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .captureInterrupted)
                 feedback.notify(event: .error("Recording interrupted by microphone change"))
             }
@@ -739,7 +835,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         guard !samples.isEmpty else {
-            if finishTranscription(token: token) {
+            if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .emptyAudio)
             }
             return
@@ -753,7 +849,7 @@ final class AppCoordinator: @unchecked Sendable {
         guard activeSampleCount >= Self.minActiveSamples else {
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
             feedback.notify(event: .error("Recording too short"))
-            if finishTranscription(token: token) {
+            if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
             return
@@ -762,21 +858,62 @@ final class AppCoordinator: @unchecked Sendable {
         guard rms > Self.silenceRmsThreshold else {
             logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
             feedback.notify(event: .error("No speech detected"))
-            if finishTranscription(token: token) {
+            if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
             return
         }
 
+        beginNativeTranscription(
+            samples: samples,
+            activeSampleCount: activeSampleCount,
+            rms: rms,
+            token: token,
+            runID: runID,
+            trace: trace,
+            target: target
+        )
+    }
+
+    private func beginNativeTranscription(
+        samples: ContiguousArray<Float>,
+        activeSampleCount: Int,
+        rms: Float,
+        token: UUID,
+        runID: UInt64,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
+        let timeoutTrace = trace
+        var trace = trace
         let timeout = transcriptionTimeoutProvider(samples)
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
-            self?.handleTranscriptionTimeout(token: token, timeout: timeout, trace: trace)
+            self?.handleTranscriptionTimeout(token: token, timeout: timeout, trace: timeoutTrace)
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
 
         transcriptionQueue.async { [weak self] in
             guard let self else { return }
+
+            let canStart = self.stateLock.withLock {
+                guard case let .transcribing(current, currentRunID, didTimeOut, didCancel) = self.state,
+                      current == token,
+                      currentRunID == runID,
+                      !didTimeOut,
+                      !didCancel,
+                      !self.isShuttingDown else {
+                    return false
+                }
+                return true
+            }
+            guard canStart else {
+                DispatchQueue.main.async {
+                    timeoutWorkItem.cancel()
+                    _ = self.finishTranscription(token: token)
+                }
+                return
+            }
 
             trace.markTranscriptionStarted()
             let result: Result<String, Error>
@@ -792,21 +929,30 @@ final class AppCoordinator: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 timeoutWorkItem.cancel()
-                guard self.finishTranscription(token: token) else { return }
+                let settlement = self.finishTranscription(token: token)
 
-                switch result {
-                case .success(let text):
-                    self.handleTranscriptionResult(
-                        text,
-                        trace: trace,
-                        activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
-                        activeRMS: rms,
-                        target: target
-                    )
-                case .failure(let error):
-                    self.recordTerminal(trace: trace, outcome: .transcriptionFailed)
-                    self.logger.error("Transcription failed: \(String(describing: error))")
-                    self.feedback.notify(event: .error("Transcription failed"))
+                switch settlement {
+                case .eligible:
+                    switch result {
+                    case .success(let text):
+                        self.failedCaptureReplayBuffer.clear()
+                        self.handleTranscriptionResult(
+                            text,
+                            trace: trace,
+                            activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
+                            activeRMS: rms,
+                            target: target
+                        )
+                    case .failure(let error):
+                        self.retainFailedCapture(samples: samples, reason: .transcriptionFailed)
+                        self.recordTerminal(trace: trace, outcome: .transcriptionFailed)
+                        self.logger.error("Transcription failed: \(String(describing: error))")
+                        self.feedback.notify(event: .error("Transcription failed"))
+                    }
+                case .timedOut:
+                    self.retainFailedCapture(samples: samples, reason: .timedOut)
+                case .cancelled, .stale:
+                    break
                 }
             }
         }
@@ -1027,17 +1173,39 @@ final class AppCoordinator: @unchecked Sendable {
     /// A cancelled native inference keeps ownership of the serial worker until
     /// it settles; only then does the app become idle.
     @discardableResult
-    private func finishTranscription(token: UUID) -> Bool {
+    private func finishTranscription(token: UUID) -> TranscriptionSettlement {
         stateLock.withLock {
             guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
                   current == token else {
-                return false
+                return .stale
             }
 
             state = .idle
             activeTranscriptionTrace = nil
-            return !didTimeOut && !didCancel
+            activeReplayLease = nil
+            if didTimeOut { return .timedOut }
+            if didCancel { return .cancelled }
+            return .eligible
         }
+    }
+
+    private func retainFailedCapture(
+        samples: ContiguousArray<Float>,
+        reason: FailedCaptureReplayReason
+    ) {
+        guard !stateLock.withLock({ isShuttingDown }) else { return }
+        guard failedCaptureReplayBuffer.install(samples: samples, reason: reason) else {
+            logger.error("Failed capture exceeded the in-memory replay bound")
+            return
+        }
+    }
+
+    private func nextRunID() -> UInt64 {
+        nextTranscriptionID &+= 1
+        if nextTranscriptionID == 0 {
+            nextTranscriptionID = 1
+        }
+        return nextTranscriptionID
     }
 
     private func handleTranscriptionTimeout(token: UUID, timeout: TimeInterval, trace: TranscriptionTrace) {

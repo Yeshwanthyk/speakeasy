@@ -62,6 +62,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         },
                         canCancelDictation: { [weak coordinator] in
                             coordinator?.canCancelDictation() ?? false
+                        },
+                        retryLastFailedCapture: { [weak coordinator] in
+                            coordinator?.retryLastFailedCapture()
+                        },
+                        discardFailedCapture: { [weak coordinator] in
+                            coordinator?.discardFailedCapture()
+                        },
+                        canRetryFailedCapture: { [weak coordinator] in
+                            coordinator?.canRetryFailedCapture() ?? false
+                        },
+                        canDiscardFailedCapture: { [weak coordinator] in
+                            coordinator?.canDiscardFailedCapture() ?? false
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

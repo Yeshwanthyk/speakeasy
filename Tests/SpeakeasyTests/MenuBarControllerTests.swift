@@ -54,4 +54,23 @@ final class MenuBarControllerTests: XCTestCase {
         let cancelItem = menu.items.first(where: { $0.title == "Cancel Dictation" })
         XCTAssertTrue(cancelItem?.isEnabled == true)
     }
+
+    func testMenuExposesFailedCaptureActionsWithTruthfulEnabledState() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-replay-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let controller = MenuBarController(
+            store: store,
+            canRetryFailedCapture: { true },
+            canDiscardFailedCapture: { false }
+        )
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        XCTAssertTrue(menu.items.first(where: { $0.title == "Retry Last Failed Capture" })?.isEnabled == true)
+        XCTAssertFalse(menu.items.first(where: { $0.title == "Discard Failed Capture" })?.isEnabled == true)
+    }
 }

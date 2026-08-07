@@ -116,6 +116,93 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(paster.pastedTexts.isEmpty)
     }
 
+    func testFailedTranscriptionCanRetryExactCaptureWithoutEndingRecordingAgain() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .failure(TestError()))
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { coordinator.canRetryFailedCapture() })
+
+        coordinator.retryLastFailedCapture()
+        XCTAssertTrue(waitUntil { transcriber.callCount == 2 })
+        XCTAssertEqual(audio.endCount, 1)
+        XCTAssertEqual(transcriber.sampleInputs, [Self.validSamples, Self.validSamples])
+        XCTAssertTrue(coordinator.canRetryFailedCapture(), "A settled retry failure remains explicitly retryable")
+    }
+
+    func testTimedOutCaptureIsRetryableOnlyAfterNativeSettlement() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("late"), delay: 0.15)
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            feedback: feedback,
+            timeout: 0.02
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { feedback.errors.contains("Transcription timed out") })
+        XCTAssertFalse(coordinator.canRetryFailedCapture())
+
+        XCTAssertTrue(waitUntil(timeout: 1.0) { coordinator.canRetryFailedCapture() })
+        coordinator.retryLastFailedCapture()
+        XCTAssertTrue(waitUntil(timeout: 1.0) { transcriber.callCount == 2 })
+        XCTAssertEqual(audio.endCount, 1)
+    }
+
+    func testSuccessfulRetryClearsFailedCapture() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(
+            results: [.failure(TestError()), .success("retried")]
+        )
+        let paster = PasterStub()
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { coordinator.canRetryFailedCapture() })
+
+        coordinator.retryLastFailedCapture()
+        XCTAssertTrue(waitUntil { paster.pastedTexts == ["retried"] })
+        XCTAssertFalse(coordinator.canRetryFailedCapture())
+        XCTAssertEqual(audio.endCount, 1)
+    }
+
+    func testNewRecordingAndUserCancelClearFailedCapture() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .failure(TestError()))
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { coordinator.canRetryFailedCapture() })
+
+        coordinator.toggleRecording()
+        XCTAssertFalse(coordinator.canRetryFailedCapture())
+        coordinator.handle(.cancel)
+        XCTAssertFalse(coordinator.canRetryFailedCapture())
+    }
+
+    func testExplicitDiscardClearsFailedCapture() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .failure(TestError()))
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, feedback: feedback)
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { coordinator.canDiscardFailedCapture() })
+
+        coordinator.discardFailedCapture()
+
+        XCTAssertFalse(coordinator.canRetryFailedCapture())
+        XCTAssertTrue(feedback.events.contains(.status("Failed capture discarded")))
+    }
+
     func testTimeoutDropsLateResultsAndBlocksNewCaptureUntilWorkerReturns() {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Late"), delay: 0.2)
@@ -1572,23 +1659,28 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     private var _transcribeUsedExpectedQueue: Bool?
     private var _runIDs: [UInt64] = []
     private var _cancelledRunIDs: [UInt64] = []
+    private var remainingResults: [Result<String, Error>]
 
     var callCount: Int { counterLock.withLock { _callCount } }
     var warmUpCount: Int { counterLock.withLock { _warmUpCount } }
     var transcribeUsedExpectedQueue: Bool? { counterLock.withLock { _transcribeUsedExpectedQueue } }
     var runIDs: [UInt64] { counterLock.withLock { _runIDs } }
     var cancelledRunIDs: [UInt64] { counterLock.withLock { _cancelledRunIDs } }
+    var sampleInputs: [ContiguousArray<Float>] { counterLock.withLock { _sampleInputs } }
+    private var _sampleInputs: [ContiguousArray<Float>] = []
 
     init(
-        result: Result<String, Error>,
+        result: Result<String, Error> = .success(""),
         delay: TimeInterval = 0,
         warmUpError: Error? = nil,
-        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil
+        expectedQueue: (key: DispatchSpecificKey<String>, value: String)? = nil,
+        results: [Result<String, Error>]? = nil
     ) {
         self.result = result
         self.delay = delay
         self.warmUpError = warmUpError
         self.expectedQueue = expectedQueue
+        self.remainingResults = results ?? []
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
@@ -1599,11 +1691,15 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
         counterLock.withLock {
             _callCount += 1
             _runIDs.append(runID)
+            _sampleInputs.append(samples)
             if let expectedQueue {
                 _transcribeUsedExpectedQueue = DispatchQueue.getSpecific(key: expectedQueue.key) == expectedQueue.value
             }
         }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+        let result = counterLock.withLock {
+            remainingResults.isEmpty ? self.result : remainingResults.removeFirst()
+        }
         switch result {
         case .success(let text): return text
         case .failure(let error): throw error
