@@ -40,7 +40,7 @@ final class MenuBarControllerTests: XCTestCase {
 
         controller.menuNeedsUpdate(menu)
 
-        let modelItems = menu.items.first(where: { $0.title == "Audio Model" })?.submenu?.items
+        let modelItems = menu.items.first(where: { $0.title.hasPrefix("Speech Model —") })?.submenu?.items
         XCTAssertEqual(
             modelItems?.map(\.title),
             ["Parakeet TDT+CTC 110M Q8_0", "Parakeet Unified EN 0.6B Q8_0"]
@@ -63,14 +63,15 @@ final class MenuBarControllerTests: XCTestCase {
 
         controller.menuNeedsUpdate(menu)
 
-        let modeItem = menu.items.first(where: { $0.title == "Invocation Mode" })
+        let modeItem = menu.items.first(where: { $0.title.hasPrefix("Dictation Mode —") })
+        XCTAssertEqual(modeItem?.title, "Dictation Mode — Push to Talk")
         XCTAssertEqual(modeItem?.submenu?.items.count, DictationInvocationMode.allCases.count)
         XCTAssertEqual(
             modeItem?.submenu?.items.first(where: { $0.representedObject as? String == DictationInvocationMode.pushToTalk.rawValue })?.state,
             .on
         )
 
-        let cancelItem = menu.items.first(where: { $0.title == "Cancel Dictation" })
+        let cancelItem = menu.items.first(where: { $0.title == "Cancel Transcription" })
         XCTAssertTrue(cancelItem?.isEnabled == true)
     }
 
@@ -89,8 +90,8 @@ final class MenuBarControllerTests: XCTestCase {
 
         controller.menuNeedsUpdate(menu)
 
-        XCTAssertTrue(menu.items.first(where: { $0.title == "Retry Last Failed Capture" })?.isEnabled == true)
-        XCTAssertFalse(menu.items.first(where: { $0.title == "Discard Failed Capture" })?.isEnabled == true)
+        XCTAssertTrue(menu.items.first(where: { $0.title == "Retry Failed Capture" })?.isEnabled == true)
+        XCTAssertNil(menu.items.first(where: { $0.title == "Discard Failed Capture" }))
     }
 
     func testMenuBuildsLazyMicrophoneControlsAndLevelPreview() {
@@ -116,12 +117,57 @@ final class MenuBarControllerTests: XCTestCase {
 
         controller.menuNeedsUpdate(menu)
 
-        let microphone = menu.items.first(where: { $0.title == "Microphone" })
+        let microphone = menu.items.first(where: { $0.title.hasPrefix("Microphone —") })
+        XCTAssertEqual(microphone?.title, "Microphone — USB")
         XCTAssertEqual(microphone?.submenu?.items.count, 2)
         XCTAssertEqual(
             microphone?.submenu?.items.first(where: { $0.representedObject as? String == "usb" })?.state,
             .on
         )
         XCTAssertTrue(menu.items.contains(where: { $0.title == "Microphone Level: 42%" }))
+        XCTAssertNotNil(menu.items.first(where: { $0.title == "Microphone Level: 42%" })?.view)
+    }
+
+    func testMenuCapsVisibleRecentsAndMovesFullHistoryIntoSubmenu() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-history-layout-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        for index in 1...8 {
+            store.append("Transcript \(index)")
+        }
+        let controller = MenuBarController(store: store)
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let visibleTranscripts = menu.items.filter { $0.representedObject is String }
+        XCTAssertEqual(visibleTranscripts.map(\.title), [
+            "Transcript 8", "Transcript 7", "Transcript 6",
+            "Transcript 5", "Transcript 4", "Transcript 3"
+        ])
+
+        let allHistory = menu.items.first(where: { $0.title == "All Transcripts (8)" })?.submenu
+        XCTAssertEqual(allHistory?.items.filter { $0.representedObject is String }.count, 8)
+        XCTAssertEqual(allHistory?.items.first?.title, "Clear Transcript History…")
+    }
+
+    func testMenuUsesBrandedHeaderAndConciseEmptyState() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-empty-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let controller = MenuBarController(store: store)
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        XCTAssertEqual(menu.items.first?.title, "Speakeasy")
+        XCTAssertNotNil(menu.items.first?.view)
+        XCTAssertNotNil(menu.items.first(where: {
+            $0.title == "Dictate with Hyper+S — transcripts appear here"
+        }))
     }
 }
