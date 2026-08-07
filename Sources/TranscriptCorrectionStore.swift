@@ -20,7 +20,7 @@ struct TranscriptCorrectionDocument: Codable, Equatable, Sendable {
 @MainActor
 final class TranscriptCorrectionStore {
     private let fileURL: URL
-    private let writeQueue = DispatchQueue(label: "com.speakeasy.corrections.write", qos: .utility)
+    private let writer = OrderedSnapshotWriter(label: "com.speakeasy.corrections.write")
     private var corrections: [TranscriptCorrection]
 
     init(fileURL: URL? = nil) {
@@ -39,21 +39,17 @@ final class TranscriptCorrectionStore {
         self.corrections = corrections
         let document = TranscriptCorrectionDocument(corrections: corrections)
         let url = fileURL
-        return Task { [writeQueue] in
-            await withCheckedContinuation { continuation in
-                writeQueue.async {
-                    do {
-                        let data = try JSONEncoder().encode(document)
-                        try FileManager.default.createDirectory(
-                            at: url.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                        try data.write(to: url, options: .atomic)
-                        continuation.resume(returning: true)
-                    } catch {
-                        continuation.resume(returning: false)
-                    }
-                }
+        return writer.enqueue {
+            do {
+                let data = try JSONEncoder().encode(document)
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: url, options: .atomic)
+                return true
+            } catch {
+                return false
             }
         }
     }

@@ -49,6 +49,7 @@ pub struct AsrHandle {
 #[derive(Default)]
 struct CancellationState {
     active: Option<ActiveRun>,
+    pending: Option<u64>,
 }
 
 struct ActiveRun {
@@ -59,6 +60,9 @@ struct ActiveRun {
 impl CancellationState {
     fn begin(&mut self, id: u64) -> CancelToken {
         let token = CancelToken::new();
+        if self.pending.take() == Some(id) {
+            token.cancel();
+        }
         self.active = Some(ActiveRun {
             id,
             token: token.clone(),
@@ -66,14 +70,19 @@ impl CancellationState {
         token
     }
 
-    fn cancel(&self, id: u64) -> bool {
-        let Some(active) = self.active.as_ref() else {
-            return false;
-        };
-        if active.id != id {
-            return false;
+    fn cancel(&mut self, id: u64) -> bool {
+        if let Some(active) = self.active.as_ref() {
+            if active.id != id {
+                return false;
+            }
+            active.token.cancel();
+            return true;
         }
-        active.token.cancel();
+
+        // A timeout may arrive while this run is queued, before the native
+        // entry point publishes its token. Preserve that cancellation until
+        // begin(id) consumes it.
+        self.pending = Some(id);
         true
     }
 
@@ -220,7 +229,7 @@ pub unsafe extern "C" fn asr_cancel(handle: *mut AsrHandle, run_id: u64) -> bool
         // SAFETY: guaranteed by the caller contract and checked for null above.
         let handle = unsafe { &*handle };
         match handle.cancellation.lock() {
-            Ok(cancellation) => cancellation.cancel(run_id),
+            Ok(mut cancellation) => cancellation.cancel(run_id),
             Err(_) => false,
         }
     }))
@@ -408,6 +417,17 @@ mod tests {
         assert!(!second.is_cancelled());
         assert!(state.cancel(8));
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_before_registration_is_consumed_by_matching_run() {
+        let mut state = CancellationState::default();
+
+        assert!(state.cancel(42));
+        let token = state.begin(42);
+
+        assert!(token.is_cancelled());
+        assert_eq!(state.pending, None);
     }
 
     #[test]

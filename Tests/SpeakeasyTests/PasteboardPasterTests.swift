@@ -184,6 +184,8 @@ final class PasteboardPasterTests: XCTestCase {
             paster.paste("text", target: .unavailable),
             .clipboardWriteFailed
         )
+        XCTAssertEqual(access.restoredSnapshot, access.initialSnapshot)
+        XCTAssertEqual(access.restoreAttemptCount, 1)
     }
 
     private static let application = TranscriptDeliveryApplication(

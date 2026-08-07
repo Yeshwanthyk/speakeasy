@@ -61,7 +61,7 @@ final class TranscriptStore {
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcripts")
     private let fileURL: URL
-    private let writeQueue = DispatchQueue(label: "com.speakeasy.app.transcripts.write", qos: .utility)
+    private let writer = OrderedSnapshotWriter(label: "com.speakeasy.app.transcripts.write")
     private var records: [TranscriptRecord]
 
     func allRecords() -> [TranscriptRecord] {
@@ -131,10 +131,11 @@ final class TranscriptStore {
         return scheduleWrite()
     }
 
-    func clear() {
-        guard !records.isEmpty else { return }
+    @discardableResult
+    func clear() -> Task<Bool, Never> {
+        guard !records.isEmpty else { return Task { true } }
         records.removeAll()
-        scheduleWrite()
+        return scheduleWrite()
     }
 
     private func trimToCapacity() {
@@ -147,22 +148,18 @@ final class TranscriptStore {
     private func scheduleWrite() -> Task<Bool, Never> {
         let snapshot = TranscriptHistoryDocument(records: records)
         let url = fileURL
-        return Task { [writeQueue, logger] in
-            await withCheckedContinuation { continuation in
-                writeQueue.async {
-                    do {
-                        let data = try JSONEncoder().encode(snapshot)
-                        try FileManager.default.createDirectory(
-                            at: url.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                        try data.write(to: url, options: .atomic)
-                        continuation.resume(returning: true)
-                    } catch {
-                        logger.error("Failed to persist transcripts: \(String(describing: error))")
-                        continuation.resume(returning: false)
-                    }
-                }
+        return writer.enqueue { [logger] in
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: url, options: .atomic)
+                return true
+            } catch {
+                logger.error("Failed to persist transcripts: \(String(describing: error))")
+                return false
             }
         }
     }

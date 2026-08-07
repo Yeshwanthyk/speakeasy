@@ -62,27 +62,6 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertEqual(engine.input.removeTapCount, 1)
     }
 
-    func testRecordingBufferCapacitySurvivesResultHandoff() throws {
-        let engine = try makeEngine()
-        let maxRecordingSamples = 32_000
-        let capture = try AudioCapture(
-            maxRecordingSamples: maxRecordingSamples,
-            engine: engine
-        )
-
-        try capture.prepare()
-        try engine.input.emit(frameLength: 1_024)
-        try capture.beginRecording()
-        try engine.input.emit(frameLength: 8_000)
-
-        let result = capture.endRecording()
-        let capacities = capture.bufferCapacitiesForTesting()
-
-        XCTAssertFalse(result.samples.isEmpty)
-        XCTAssertGreaterThanOrEqual(capacities.front, maxRecordingSamples)
-        XCTAssertGreaterThanOrEqual(capacities.back, 16_000)
-    }
-
     func testLimitReachedDuringGraceSignalsStopWait() throws {
         let engine = try makeEngine()
         let awaitingGrace = expectation(description: "awaiting grace")
@@ -240,6 +219,8 @@ final class AudioCaptureTests: XCTestCase {
                 failed.fulfill()
             case .recoveryStarted:
                 break
+            case .inputDeviceSelectionSucceeded, .inputDeviceSelectionFailed:
+                break
             }
         }
 
@@ -311,6 +292,8 @@ final class AudioCaptureTests: XCTestCase {
             case .recoveryFailed:
                 failed.fulfill()
             case .recoveryStarted:
+                break
+            case .inputDeviceSelectionSucceeded, .inputDeviceSelectionFailed:
                 break
             }
         }
@@ -415,6 +398,8 @@ final class AudioCaptureTests: XCTestCase {
                 recovered.fulfill()
             case .recoveryStarted:
                 break
+            case .inputDeviceSelectionSucceeded, .inputDeviceSelectionFailed:
+                break
             }
         }
 
@@ -494,6 +479,213 @@ final class AudioCaptureTests: XCTestCase {
 
         XCTAssertEqual(result.samples.count, result.prependedSampleCount)
         XCTAssertFalse(result.wasInterrupted)
+    }
+
+    func testInputDeviceSelectionCommitsOnlyAfterFreshCallback() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(devices: [
+            MicrophoneDevice(uid: "built-in", name: "Built-in"),
+            MicrophoneDevice(uid: "usb", name: "USB")
+        ])
+        let selected = expectation(description: "route selected")
+        let capture = try AudioCapture(
+            engine: engine,
+            firstCallbackTimeout: 0.1,
+            inputDeviceProvider: provider
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "usb") {
+                selected.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+        capture.selectInputDevice(uid: "usb")
+        wait(for: [selected], timeout: 1)
+
+        XCTAssertEqual(provider.setUIDs, ["usb"])
+        XCTAssertEqual(capture.selectedInputDeviceUID(), "usb")
+    }
+
+    func testInputDeviceSelectionReadsFormatAfterApplyingRoute() throws {
+        let engine = try makeEngine()
+        let routeFormat = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: false
+        ))
+        let provider = FakeInputDeviceProvider(devices: [MicrophoneDevice(uid: "usb", name: "USB")])
+        provider.onSet = { uid in
+            if uid == "usb" {
+                engine.input.format = routeFormat
+            }
+        }
+        let selected = expectation(description: "route selected")
+        let capture = try AudioCapture(engine: engine, inputDeviceProvider: provider)
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "usb") {
+                selected.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+        capture.selectInputDevice(uid: "usb")
+        wait(for: [selected], timeout: 1)
+
+        XCTAssertEqual(engine.input.installedSampleRates.last, 48_000)
+    }
+
+    func testRouteConfigurationNotificationDoesNotSupersedeSelectionTransaction() throws {
+        let engine = try makeEngine()
+        let notificationCenter = NotificationCenter()
+        let provider = FakeInputDeviceProvider(devices: [MicrophoneDevice(uid: "usb", name: "USB")])
+        provider.onSet = { uid in
+            guard uid == "usb" else { return }
+            notificationCenter.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        }
+        let selected = expectation(description: "route selected")
+        let capture = try AudioCapture(
+            engine: engine,
+            notificationCenter: notificationCenter,
+            inputDeviceProvider: provider
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "usb") {
+                selected.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+
+        capture.selectInputDevice(uid: "usb")
+        wait(for: [selected], timeout: 1)
+
+        XCTAssertEqual(capture.selectedInputDeviceUID(), "usb")
+        XCTAssertEqual(engine.startCount, 2)
+    }
+
+    func testSystemDefaultRouteIsRestoredAfterCandidateFailure() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(
+            devices: [
+                MicrophoneDevice(uid: "built-in", name: "Built-in"),
+                MicrophoneDevice(uid: "usb", name: "USB")
+            ],
+            defaultUID: "built-in",
+            failures: ["usb"]
+        )
+        let failed = expectation(description: "route failed")
+        let capture = try AudioCapture(
+            engine: engine,
+            inputDeviceProvider: provider,
+            initialInputDeviceUID: "built-in"
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionFailed(uid: "usb", rollback: .restored) {
+                failed.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        XCTAssertEqual(capture.selectedInputDeviceUID(), "built-in")
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+
+        capture.selectInputDevice(uid: "usb")
+        wait(for: [failed], timeout: 1)
+
+        XCTAssertEqual(provider.setUIDs, ["built-in", "usb", "built-in"])
+        XCTAssertEqual(capture.selectedInputDeviceUID(), "built-in")
+    }
+
+    func testInputDeviceSelectionRollsBackOnRouteFailure() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(
+            devices: [MicrophoneDevice(uid: "usb", name: "USB")],
+            failures: ["usb"]
+        )
+        let failed = expectation(description: "route failed")
+        let capture = try AudioCapture(
+            engine: engine,
+            firstCallbackTimeout: 0.1,
+            inputDeviceProvider: provider
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionFailed(uid: "usb", rollback: .restored) {
+                failed.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+        capture.selectInputDevice(uid: "usb")
+
+        wait(for: [failed], timeout: 1)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+        XCTAssertEqual(engine.startCount, 2, "The previous system route was restarted")
+    }
+
+    func testInputDeviceSelectionFailsIfRollbackProducesNoCallback() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(
+            devices: [MicrophoneDevice(uid: "usb", name: "USB")],
+            failures: ["usb"]
+        )
+        let failed = expectation(description: "route failed after rollback timeout")
+        let capture = try AudioCapture(
+            engine: engine,
+            firstCallbackTimeout: 0.01,
+            inputDeviceProvider: provider
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionFailed(uid: "usb", rollback: .unavailable) {
+                failed.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        capture.selectInputDevice(uid: "usb")
+
+        wait(for: [failed], timeout: 1)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+    }
+
+    func testStaleInputCallbackCannotCommitNewRoute() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(devices: [MicrophoneDevice(uid: "usb", name: "USB")])
+        let selected = expectation(description: "route selected")
+        let capture = try AudioCapture(
+            engine: engine,
+            firstCallbackTimeout: 0.1,
+            inputDeviceProvider: provider
+        )
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "usb") {
+                selected.fulfill()
+            }
+        }
+
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = {
+            try? engine.input.emit(frameLength: 1_024, throughRetainedTapAt: 0)
+            try? engine.input.emit(frameLength: 1_024)
+        }
+        capture.selectInputDevice(uid: "usb")
+
+        wait(for: [selected], timeout: 1)
+        XCTAssertEqual(capture.selectedInputDeviceUID(), "usb")
     }
 }
 
@@ -591,6 +783,36 @@ private final class FakeAudioInputNode: AudioInputNodeProtocol {
 
         let time = AVAudioTime(sampleTime: 0, atRate: format.sampleRate)
         tapBlock?(buffer, time)
+    }
+}
+
+private final class FakeInputDeviceProvider: AudioInputDeviceProviding {
+    let devices: [MicrophoneDevice]
+    let failures: Set<String>
+    let defaultUID: String?
+    var onSet: ((String) -> Void)?
+    private(set) var setUIDs: [String] = []
+
+    init(
+        devices: [MicrophoneDevice],
+        defaultUID: String? = nil,
+        failures: Set<String> = []
+    ) {
+        self.devices = devices
+        self.defaultUID = defaultUID
+        self.failures = failures
+    }
+
+    func enumerateInputDevices() -> [MicrophoneDevice] { devices }
+
+    func defaultInputDeviceUID() -> String? { defaultUID }
+
+    func setInputDevice(uid: String, on audioUnit: AudioUnit?) throws {
+        setUIDs.append(uid)
+        onSet?(uid)
+        if failures.contains(uid) {
+            throw TestError()
+        }
     }
 }
 

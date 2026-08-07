@@ -16,6 +16,10 @@ protocol AudioCapturing {
     func discardRecording()
     /// Stop the engine entirely. Call at app termination.
     func shutdown()
+    func availableInputDevices() -> [MicrophoneDevice]
+    func selectedInputDeviceUID() -> String?
+    func selectInputDevice(uid: String)
+    func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot
 }
 
 protocol Pasting {
@@ -48,6 +52,7 @@ typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConf
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
 typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
+typealias InputDeviceSelectionStore = (_ uid: String) -> Void
 
 extension AudioCapture: AudioCapturing {}
 extension ScreenEdgeFlash: Flashing {}
@@ -132,6 +137,7 @@ final class AppCoordinator: @unchecked Sendable {
     private let transcriberFactory: TranscriberFactory?
     private let modelArtifactVerifier: ASRModelArtifactVerifier
     private let modelSelectionStore: ASRModelSelectionStore
+    private let inputDeviceSelectionStore: InputDeviceSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
@@ -140,6 +146,7 @@ final class AppCoordinator: @unchecked Sendable {
     private var nextTranscriptionID: UInt64 = 0
     private var warmupState: WarmupState = .pending
     private var activeModelSwitchID: UUID?
+    private var activeInputDeviceSwitchUID: String?
     private var suppressRecoverySuccessStatus = false
     /// Partial trace built during a recording session; nil when idle or transcribing.
     private var activeTrace: TranscriptionTrace?
@@ -181,6 +188,7 @@ final class AppCoordinator: @unchecked Sendable {
             try ModelPathResolver.verifyModelArtifact(kind: model.kind, at: model.url)
         },
         modelSelectionStore: @escaping ASRModelSelectionStore = { _ in },
+        inputDeviceSelectionStore: @escaping InputDeviceSelectionStore = { _ in },
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
@@ -204,6 +212,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.transcriberFactory = transcriberFactory
         self.modelArtifactVerifier = modelArtifactVerifier
         self.modelSelectionStore = modelSelectionStore
+        self.inputDeviceSelectionStore = inputDeviceSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.failedCaptureReplayBuffer = failedCaptureReplayBuffer
         self.transcriptStore = transcriptStore
@@ -272,6 +281,50 @@ final class AppCoordinator: @unchecked Sendable {
 
     func selectedInvocationMode() -> DictationInvocationMode {
         stateLock.withLock { invocationMode }
+    }
+
+    func availableInputDevices() -> [MicrophoneDevice] {
+        audioCapture.availableInputDevices()
+    }
+
+    func selectedInputDeviceUID() -> String? {
+        audioCapture.selectedInputDeviceUID()
+    }
+
+    func selectInputDevice(uid: String) {
+        let rejection = stateLock.withLock { () -> String? in
+            guard !isShuttingDown else { return "Microphone selection unavailable" }
+            guard activeInputDeviceSwitchUID == nil else { return "Microphone change already in progress" }
+            guard activeModelSwitchID == nil else { return "Wait for model switching to finish" }
+            guard case .idle = state else { return "Finish dictation before changing microphones" }
+            guard audioCapture.selectedInputDeviceUID() != uid else { return nil }
+            activeInputDeviceSwitchUID = uid
+            return nil
+        }
+        if let rejection {
+            feedback.notify(event: .error(rejection))
+            return
+        }
+        guard stateLock.withLock({ activeInputDeviceSwitchUID == uid }) else {
+            return
+        }
+        audioCapture.selectInputDevice(uid: uid)
+    }
+
+    func canSelectInputDevice() -> Bool {
+        stateLock.withLock {
+            guard !isShuttingDown,
+                  activeInputDeviceSwitchUID == nil,
+                  activeModelSwitchID == nil,
+                  case .idle = state else {
+                return false
+            }
+            return true
+        }
+    }
+
+    func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
+        audioCapture.microphoneLevelSnapshot()
     }
 
     func setInvocationMode(_ mode: DictationInvocationMode) {
@@ -378,6 +431,10 @@ final class AppCoordinator: @unchecked Sendable {
                 return .reject("Model switching already in progress")
             }
 
+            guard activeInputDeviceSwitchUID == nil else {
+                return .reject("Wait for microphone change to finish")
+            }
+
             guard warmupState.isReady else {
                 return .reject("Model warming up, please wait")
             }
@@ -411,7 +468,9 @@ final class AppCoordinator: @unchecked Sendable {
                 let result: Result<(ASRModelConfiguration, Transcriber), Error>
                 do {
                     let model = try await asrModelResolver(kind)
-                    try modelArtifactVerifier(model)
+                    if !model.artifactVerified {
+                        try modelArtifactVerifier(model)
+                    }
                     let transcriber = try transcriberFactory(model)
                     try await transcriber.warmUp()
                     result = .success((model, transcriber))
@@ -444,7 +503,8 @@ final class AppCoordinator: @unchecked Sendable {
         let audioCapture = try AudioCapture(
             onLimitReached: { [feedback] in
                 feedback.notify(event: .error("Recording limit reached (6 minutes)"))
-            }
+            },
+            initialInputDeviceUID: MicrophoneSelectionStore.selectedUID()
         )
         let paster = PasteboardPaster()
         let flash = ScreenEdgeFlash()
@@ -477,6 +537,7 @@ final class AppCoordinator: @unchecked Sendable {
             },
             transcriberFactory: { try TranscribeCppTranscriber(model: $0) },
             modelSelectionStore: { ModelPathResolver.persistSelectedModelKind($0) },
+            inputDeviceSelectionStore: { MicrophoneSelectionStore.persist(uid: $0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
             transcriptStore: TranscriptStore(),
@@ -511,6 +572,9 @@ final class AppCoordinator: @unchecked Sendable {
 
         let transition = stateLock.withLock { () -> Transition in
             guard !isShuttingDown else { return .ignore(nil) }
+            if activeInputDeviceSwitchUID != nil, intent != .cancel {
+                return .ignore("Microphone changing, please wait")
+            }
 
             func start() -> Transition {
                 failedCaptureReplayBuffer.clear()
@@ -760,6 +824,30 @@ final class AppCoordinator: @unchecked Sendable {
             }
             logger.error("Microphone reconnection failed")
             feedback.notify(event: .error("Microphone reconnection failed"))
+
+        case .inputDeviceSelectionSucceeded(let uid):
+            let isCurrent = stateLock.withLock { () -> Bool in
+                guard activeInputDeviceSwitchUID == uid else { return false }
+                activeInputDeviceSwitchUID = nil
+                return true
+            }
+            guard isCurrent else { return }
+            inputDeviceSelectionStore(uid)
+            feedback.notify(event: .status("Microphone changed"))
+
+        case .inputDeviceSelectionFailed(let uid, let rollback):
+            let isCurrent = stateLock.withLock { () -> Bool in
+                guard activeInputDeviceSwitchUID == uid else { return false }
+                activeInputDeviceSwitchUID = nil
+                return true
+            }
+            guard isCurrent else { return }
+            switch rollback {
+            case .restored:
+                feedback.notify(event: .error("Microphone selection failed; previous microphone kept"))
+            case .unavailable:
+                feedback.notify(event: .error("Microphone selection failed; audio capture unavailable"))
+            }
         }
     }
 
@@ -910,7 +998,9 @@ final class AppCoordinator: @unchecked Sendable {
             guard canStart else {
                 DispatchQueue.main.async {
                     timeoutWorkItem.cancel()
-                    _ = self.finishTranscription(token: token)
+                    if case .timedOut = self.finishTranscription(token: token) {
+                        self.retainFailedCapture(samples: samples, reason: .timedOut)
+                    }
                 }
                 return
             }
@@ -986,10 +1076,20 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         let processedTranscript = transcriptPostProcessor.process(trimmed)
+        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalText.isEmpty else {
+            recordTerminal(trace: trace, outcome: .noSpeech)
+            feedback.notify(event: .error("No speech detected"))
+            return
+        }
+        let settledTranscript = ProcessedTranscript(
+            rawText: processedTranscript.rawText,
+            finalText: finalText
+        )
         let record = TranscriptRecord(
             id: trace.id,
-            rawText: processedTranscript.rawText,
-            finalText: processedTranscript.finalText,
+            rawText: settledTranscript.rawText,
+            finalText: settledTranscript.finalText,
             backend: trace.backend,
             outcome: .transcriptPersisted,
             timings: trace.timingSnapshot
@@ -997,7 +1097,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard let transcriptStore else {
             deliverPersistedTranscript(
-                processedTranscript,
+                settledTranscript,
                 trace: trace,
                 recordID: nil,
                 target: target
@@ -1015,13 +1115,13 @@ final class AppCoordinator: @unchecked Sendable {
                 self.recordTerminal(
                     trace: trace,
                     outcome: .transcriptPersistenceFailed,
-                    text: processedTranscript.finalText
+                    text: settledTranscript.finalText
                 )
                 self.feedback.notify(event: .error("Transcript could not be saved"))
                 return
             }
             self.deliverPersistedTranscript(
-                processedTranscript,
+                settledTranscript,
                 trace: trace,
                 recordID: record.id,
                 target: target

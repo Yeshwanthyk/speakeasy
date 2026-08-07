@@ -200,7 +200,7 @@ final class DiagnosticsStore {
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "diagnostics")
     private let fileURL: URL
-    private let writeQueue = DispatchQueue(label: "com.speakeasy.diagnostics.write", qos: .utility)
+    private let writer = OrderedSnapshotWriter(label: "com.speakeasy.diagnostics.write")
     private var document: DiagnosticsDocument
     private var recordedTraceIDs: Set<UUID> = []
     private var recordedTraceOrder: [UUID] = []
@@ -306,22 +306,18 @@ final class DiagnosticsStore {
     private func scheduleWrite() -> Task<Bool, Never> {
         let snapshot = document
         let url = fileURL
-        return Task { [writeQueue, logger] in
-            await withCheckedContinuation { continuation in
-                writeQueue.async {
-                    do {
-                        let data = try JSONEncoder().encode(snapshot)
-                        try FileManager.default.createDirectory(
-                            at: url.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                        try data.write(to: url, options: .atomic)
-                        continuation.resume(returning: true)
-                    } catch {
-                        logger.error("Failed to persist diagnostics: \(String(describing: error))")
-                        continuation.resume(returning: false)
-                    }
-                }
+        return writer.enqueue { [logger] in
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try data.write(to: url, options: .atomic)
+                return true
+            } catch {
+                logger.error("Failed to persist diagnostics: \(String(describing: error))")
+                return false
             }
         }
     }

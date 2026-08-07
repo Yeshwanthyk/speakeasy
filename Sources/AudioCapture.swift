@@ -10,13 +10,21 @@ enum AudioCaptureError: Error {
     case unavailable
 }
 
+enum MicrophoneRollbackOutcome: Equatable, Sendable {
+    case restored
+    case unavailable
+}
+
 enum AudioCaptureEvent: Equatable, Sendable {
     case recoveryStarted(interruptedRecording: Bool)
     case recoverySucceeded
     case recoveryFailed
+    case inputDeviceSelectionSucceeded(uid: String)
+    case inputDeviceSelectionFailed(uid: String, rollback: MicrophoneRollbackOutcome)
 }
 
 protocol AudioInputNodeProtocol {
+    var audioUnit: AudioUnit? { get }
     func inputFormat(forBus bus: AVAudioNodeBus) -> AVAudioFormat
     func installTap(
         onBus bus: AVAudioNodeBus,
@@ -25,6 +33,10 @@ protocol AudioInputNodeProtocol {
         block tapBlock: @escaping AVAudioNodeTapBlock
     )
     func removeTap(onBus bus: AVAudioNodeBus)
+}
+
+extension AudioInputNodeProtocol {
+    var audioUnit: AudioUnit? { nil }
 }
 
 protocol AudioEngineProtocol: AnyObject {
@@ -39,11 +51,6 @@ extension AVAudioInputNode: AudioInputNodeProtocol {}
 
 extension AVAudioEngine: AudioEngineProtocol {
     var captureInputNode: AudioInputNodeProtocol { inputNode }
-}
-
-struct AudioCaptureBufferCapacities: Equatable {
-    let front: Int
-    let back: Int
 }
 
 struct AudioCaptureResult {
@@ -74,6 +81,7 @@ final class AudioCapture: @unchecked Sendable {
         let sampleRateRatio: Double
         let recoveryAttempt: Int?
         let configuredRecoveryRevision: UInt64
+        let inputDeviceUID: String?
 
         private let lock = UnfairLock()
         private var outputBuffer: AVAudioPCMBuffer?
@@ -84,7 +92,8 @@ final class AudioCapture: @unchecked Sendable {
             targetFormat: AVAudioFormat,
             converter: AVAudioConverter,
             recoveryAttempt: Int?,
-            configuredRecoveryRevision: UInt64
+            configuredRecoveryRevision: UInt64,
+            inputDeviceUID: String?
         ) {
             self.generation = generation
             self.inputFormat = inputFormat
@@ -93,6 +102,7 @@ final class AudioCapture: @unchecked Sendable {
             self.sampleRateRatio = targetFormat.sampleRate / inputFormat.sampleRate
             self.recoveryAttempt = recoveryAttempt
             self.configuredRecoveryRevision = configuredRecoveryRevision
+            self.inputDeviceUID = inputDeviceUID
         }
 
         func withConvertedSamples(
@@ -185,6 +195,8 @@ final class AudioCapture: @unchecked Sendable {
     private let clock: () -> UInt64
     private let callbackFreshnessNs: UInt64
     private let firstCallbackTimeout: TimeInterval
+    private let inputDeviceProvider: AudioInputDeviceProviding
+    private let levelPreview: LatestMicrophoneLevel
     private let ringBuffer = FloatRingBuffer(capacity: AudioCapture.ringBufferCapacity)
     private let graceSemaphore = DispatchSemaphore(value: 0)
 
@@ -211,6 +223,12 @@ final class AudioCapture: @unchecked Sendable {
     private var graceDeadlineNs: UInt64?
     private var awaitingGraceSignal = false
     private var prependedSampleCount = 0
+    private var activeInputDeviceUID: String?
+    private let initialInputDeviceUID: String?
+    private var inputDeviceSwitchGeneration: Int?
+    private var inputDeviceSwitchCandidateUID: String?
+    private var inputDeviceSwitchPreviousUID: String?
+    private var inputDeviceSwitchIsRollback = false
 
     // Accessed only from lifecycleQueue.
     private var tapInstalled = false
@@ -227,7 +245,9 @@ final class AudioCapture: @unchecked Sendable {
         wakeNotificationCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
         clock: @escaping () -> UInt64 = TranscriptionTrace.timestamp,
         callbackFreshnessNs: UInt64 = AudioCapture.defaultCallbackFreshnessNs,
-        firstCallbackTimeout: TimeInterval = AudioCapture.defaultFirstCallbackTimeout
+        firstCallbackTimeout: TimeInterval = AudioCapture.defaultFirstCallbackTimeout,
+        inputDeviceProvider: AudioInputDeviceProviding = CoreAudioInputDeviceProvider(),
+        initialInputDeviceUID: String? = nil
     ) throws {
         self.maxRecordingSamples = maxRecordingSamples
         self.onLimitReached = onLimitReached
@@ -239,6 +259,10 @@ final class AudioCapture: @unchecked Sendable {
         self.clock = clock
         self.callbackFreshnessNs = callbackFreshnessNs
         self.firstCallbackTimeout = firstCallbackTimeout
+        self.inputDeviceProvider = inputDeviceProvider
+        self.levelPreview = LatestMicrophoneLevel()
+        self.activeInputDeviceUID = nil
+        self.initialInputDeviceUID = initialInputDeviceUID
 
         configurationObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -273,10 +297,26 @@ final class AudioCapture: @unchecked Sendable {
         }
     }
 
-    func bufferCapacitiesForTesting() -> AudioCaptureBufferCapacities {
-        let front = frontLock.withLock { frontBuffer.capacity }
-        let back = backLock.withLock { backBuffer.capacity }
-        return AudioCaptureBufferCapacities(front: front, back: back)
+    func availableInputDevices() -> [MicrophoneDevice] {
+        inputDeviceProvider.enumerateInputDevices()
+    }
+
+    func selectedInputDeviceUID() -> String? {
+        if let activeInputDeviceUID = stateLock.withLock({ activeInputDeviceUID }) {
+            return activeInputDeviceUID
+        }
+        guard engine.captureInputNode.audioUnit != nil else { return nil }
+        return inputDeviceProvider.defaultInputDeviceUID()
+    }
+
+    func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
+        levelPreview.latest()
+    }
+
+    func selectInputDevice(uid: String) {
+        lifecycleQueue.async { [weak self] in
+            self?.beginInputDeviceSwitch(to: uid)
+        }
     }
 
     func prepare() throws {
@@ -304,9 +344,30 @@ final class AudioCapture: @unchecked Sendable {
                 try configureAndStartGraph(
                     generation: generation,
                     recoveryTrigger: nil,
-                    recoveryAttempt: nil
+                    recoveryAttempt: nil,
+                    inputDeviceUID: initialInputDeviceUID
                 )
             } catch {
+                if initialInputDeviceUID != nil {
+                    logger.info("Saved microphone is unavailable; starting on the system route")
+                    teardownGraph()
+                    stateLock.withLock {
+                        guard lifecycleState.generation == generation else { return }
+                        lifecycleState = .starting(generation)
+                        lastSuccessfulCallbackNs = nil
+                    }
+                    do {
+                        try configureAndStartGraph(
+                            generation: generation,
+                            recoveryTrigger: nil,
+                            recoveryAttempt: nil,
+                            inputDeviceUID: nil
+                        )
+                        return
+                    } catch {
+                        logger.error("Failed to start engine on the system route: \(String(describing: error))")
+                    }
+                }
                 logger.error("Failed to start engine: \(String(describing: error))")
                 throw error
             }
@@ -393,9 +454,7 @@ final class AudioCapture: @unchecked Sendable {
 
         let samples = frontLock.withLock { () -> ContiguousArray<Float> in
             var result = ContiguousArray<Float>()
-            result.reserveCapacity(frontBuffer.count)
-            result.append(contentsOf: frontBuffer)
-            frontBuffer.removeAll(keepingCapacity: true)
+            swap(&result, &frontBuffer)
             return result
         }
 
@@ -586,6 +645,35 @@ final class AudioCapture: @unchecked Sendable {
             return
         }
 
+        levelPreview.publish(samples: samples)
+
+        var routeEvent: AudioCaptureEvent?
+        stateLock.withLock {
+            if inputDeviceSwitchGeneration == context.generation {
+                if inputDeviceSwitchIsRollback {
+                    activeInputDeviceUID = inputDeviceSwitchPreviousUID
+                    routeEvent = .inputDeviceSelectionFailed(
+                        uid: inputDeviceSwitchCandidateUID ?? "",
+                        rollback: .restored
+                    )
+                } else {
+                    activeInputDeviceUID = inputDeviceSwitchCandidateUID
+                    routeEvent = .inputDeviceSelectionSucceeded(uid: inputDeviceSwitchCandidateUID ?? "")
+                }
+                inputDeviceSwitchGeneration = nil
+                inputDeviceSwitchCandidateUID = nil
+                inputDeviceSwitchPreviousUID = nil
+                inputDeviceSwitchIsRollback = false
+            } else if activeInputDeviceUID == nil, let inputDeviceUID = context.inputDeviceUID {
+                // A persisted route is not considered selected until this
+                // generation has delivered a converted callback.
+                activeInputDeviceUID = inputDeviceUID
+            }
+        }
+        if let routeEvent {
+            emit(event: routeEvent)
+        }
+
         if becameReadyAfterRecovery {
             let generation = context.generation
             let recoveryAttempt = context.recoveryAttempt ?? 1
@@ -773,6 +861,14 @@ final class AudioCapture: @unchecked Sendable {
                 return
             }
 
+            // A deliberate route switch already owns graph teardown, startup,
+            // freshness validation, and rollback. CoreAudio commonly emits a
+            // configuration-change notification for that same operation; do
+            // not let the recovery worker supersede its transaction generation.
+            if inputDeviceSwitchGeneration != nil {
+                return
+            }
+
             recoveryRequestRevision &+= 1
             interruptedRecording = isRecording || awaitingGraceSignal
             if interruptedRecording {
@@ -842,7 +938,8 @@ final class AudioCapture: @unchecked Sendable {
             try configureAndStartGraph(
                 generation: initialGeneration,
                 recoveryTrigger: trigger,
-                recoveryAttempt: attempt
+                recoveryAttempt: attempt,
+                inputDeviceUID: currentInputDeviceUID()
             )
         } catch {
             logger.error("Audio capture recovery attempt failed: \(String(describing: error), privacy: .public)")
@@ -922,7 +1019,8 @@ final class AudioCapture: @unchecked Sendable {
     private func configureAndStartGraph(
         generation: Int,
         recoveryTrigger: RecoveryTrigger?,
-        recoveryAttempt: Int?
+        recoveryAttempt: Int?,
+        inputDeviceUID: String?
     ) throws {
         let configuredRecoveryRevision = stateLock.withLock { () -> UInt64? in
             guard lifecycleState.generation == generation else {
@@ -940,6 +1038,18 @@ final class AudioCapture: @unchecked Sendable {
         // Keep voice processing disabled here. This graph intentionally runs while idle
         // to preserve pre-roll and start latency; enabling its ducking would therefore
         // lower other apps for the entire lifetime of the prepared capture graph.
+        if let inputDeviceUID {
+            do {
+                try inputDeviceProvider.setInputDevice(uid: inputDeviceUID, on: inputNode.audioUnit)
+            } catch {
+                markStartFailed(generation: generation)
+                throw error
+            }
+        }
+
+        // The selected device owns the input format. Read it only after applying
+        // the route so the tap and converter cannot retain the previous device's
+        // sample rate or channel layout.
         let newInputFormat = inputNode.inputFormat(forBus: 0)
         guard newInputFormat.sampleRate > 0, newInputFormat.channelCount > 0 else {
             markStartFailed(generation: generation)
@@ -966,7 +1076,8 @@ final class AudioCapture: @unchecked Sendable {
             targetFormat: newTargetFormat,
             converter: newConverter,
             recoveryAttempt: recoveryAttempt,
-            configuredRecoveryRevision: configuredRecoveryRevision
+            configuredRecoveryRevision: configuredRecoveryRevision,
+            inputDeviceUID: inputDeviceUID
         )
         inputNode.installTap(
             onBus: 0,
@@ -1018,6 +1129,22 @@ final class AudioCapture: @unchecked Sendable {
                 }
             }
             guard didTimeOut else {
+                return
+            }
+
+            let isRouteSwitch = self.stateLock.withLock {
+                self.inputDeviceSwitchGeneration == generation
+            }
+            if isRouteSwitch {
+                self.teardownGraph()
+                let isRollback = self.stateLock.withLock {
+                    self.inputDeviceSwitchIsRollback
+                }
+                if isRollback {
+                    self.failInputDeviceSwitch(generation: generation)
+                } else {
+                    self.rollbackInputDeviceSwitch(generation: generation)
+                }
                 return
             }
 
@@ -1074,5 +1201,126 @@ final class AudioCapture: @unchecked Sendable {
 
     private func drainGraceSignal() {
         while graceSemaphore.wait(timeout: .now()) == .success {}
+    }
+
+    private func currentInputDeviceUID() -> String? {
+        selectedInputDeviceUID()
+    }
+
+    private func beginInputDeviceSwitch(to uid: String) {
+        guard inputDeviceProvider.enumerateInputDevices().contains(where: { $0.uid == uid }) else {
+            emit(event: .inputDeviceSelectionFailed(uid: uid, rollback: .restored))
+            return
+        }
+
+        let systemDefaultUID = engine.captureInputNode.audioUnit != nil
+            ? inputDeviceProvider.defaultInputDeviceUID()
+            : nil
+        let switchState = stateLock.withLock { () -> (generation: Int, previousUID: String?)? in
+            let canSwitch: Bool
+            switch lifecycleState {
+            case .running, .failed:
+                canSwitch = true
+            case .stopped, .starting, .recovering:
+                canSwitch = false
+            }
+            guard !isShutdown,
+                  canSwitch,
+                  !isRecording,
+                  inputDeviceSwitchGeneration == nil,
+                  activeInputDeviceUID != uid else {
+                return nil
+            }
+            let previousUID = activeInputDeviceUID ?? systemDefaultUID
+            nextGeneration += 1
+            let generation = nextGeneration
+            lifecycleState = .starting(generation)
+            lastSuccessfulCallbackNs = nil
+            inputDeviceSwitchGeneration = generation
+            inputDeviceSwitchCandidateUID = uid
+            inputDeviceSwitchPreviousUID = previousUID
+            inputDeviceSwitchIsRollback = false
+            return (generation, previousUID)
+        }
+        guard let switchState else {
+            emit(event: .inputDeviceSelectionFailed(uid: uid, rollback: .restored))
+            return
+        }
+
+        teardownGraph()
+        clearCaptureBuffersForRecovery()
+        do {
+            try configureAndStartGraph(
+                generation: switchState.generation,
+                recoveryTrigger: nil,
+                recoveryAttempt: nil,
+                inputDeviceUID: uid
+            )
+        } catch {
+            rollbackInputDeviceSwitch(generation: switchState.generation)
+        }
+    }
+
+    private func rollbackInputDeviceSwitch(generation: Int) {
+        let rollback = stateLock.withLock { () -> (generation: Int, previousUID: String?, candidateUID: String)? in
+            guard inputDeviceSwitchGeneration == generation,
+                  !inputDeviceSwitchIsRollback else {
+                return nil
+            }
+            nextGeneration += 1
+            let rollbackGeneration = nextGeneration
+            let previousUID = inputDeviceSwitchPreviousUID
+            let candidateUID = inputDeviceSwitchCandidateUID ?? ""
+            lifecycleState = .starting(rollbackGeneration)
+            lastSuccessfulCallbackNs = nil
+            inputDeviceSwitchGeneration = rollbackGeneration
+            inputDeviceSwitchIsRollback = true
+            return (rollbackGeneration, previousUID, candidateUID)
+        }
+        guard let rollback else {
+            return
+        }
+
+        do {
+            try configureAndStartGraph(
+                generation: rollback.generation,
+                recoveryTrigger: nil,
+                recoveryAttempt: nil,
+                inputDeviceUID: rollback.previousUID
+            )
+        } catch {
+            stateLock.withLock {
+                guard inputDeviceSwitchGeneration == rollback.generation else { return }
+                lifecycleState = .failed(rollback.generation)
+                inputDeviceSwitchGeneration = nil
+                inputDeviceSwitchCandidateUID = nil
+                inputDeviceSwitchPreviousUID = nil
+                inputDeviceSwitchIsRollback = false
+            }
+            emit(event: .inputDeviceSelectionFailed(
+                uid: rollback.candidateUID,
+                rollback: .unavailable
+            ))
+        }
+    }
+
+    private func failInputDeviceSwitch(generation: Int) {
+        let candidateUID = stateLock.withLock { () -> String? in
+            guard inputDeviceSwitchGeneration == generation,
+                  inputDeviceSwitchIsRollback else {
+                return nil
+            }
+            let candidateUID = inputDeviceSwitchCandidateUID
+            lifecycleState = .failed(generation)
+            lastSuccessfulCallbackNs = nil
+            inputDeviceSwitchGeneration = nil
+            inputDeviceSwitchCandidateUID = nil
+            inputDeviceSwitchPreviousUID = nil
+            inputDeviceSwitchIsRollback = false
+            return candidateUID
+        }
+        if let candidateUID {
+            emit(event: .inputDeviceSelectionFailed(uid: candidateUID, rollback: .unavailable))
+        }
     }
 }

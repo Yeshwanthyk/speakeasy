@@ -51,7 +51,13 @@ final class PasteboardPaster: Pasting {
         operationLock.lock()
         defer { operationLock.unlock() }
 
-        return writeAndVerify(text) ? .clipboardUpdated : .clipboardWriteFailed
+        let snapshot = pasteboard.snapshot()
+        let changeCount = pasteboard.changeCount
+        guard writeAndVerify(text) else {
+            restoreAfterFailedWrite(snapshot: snapshot, previousChangeCount: changeCount)
+            return .clipboardWriteFailed
+        }
+        return .clipboardUpdated
     }
 
     /// Compatibility entry point for callers that do not have a target
@@ -68,7 +74,9 @@ final class PasteboardPaster: Pasting {
         defer { operationLock.unlock() }
 
         let snapshot = pasteboard.snapshot()
+        let previousChangeCount = pasteboard.changeCount
         guard writeAndVerify(text) else {
+            restoreAfterFailedWrite(snapshot: snapshot, previousChangeCount: previousChangeCount)
             return .clipboardWriteFailed
         }
         let writeChangeCount = pasteboard.changeCount
@@ -115,6 +123,22 @@ final class PasteboardPaster: Pasting {
             return false
         }
         return pasteboard.string() == text
+    }
+
+    private func restoreAfterFailedWrite(
+        snapshot: PasteboardSnapshot?,
+        previousChangeCount: Int
+    ) {
+        guard writeClipboard == nil,
+              let snapshot,
+              pasteboard.changeCount == previousChangeCount + 1 else {
+            return
+        }
+        guard pasteboard.restore(snapshot) else {
+            logger.error("Failed to restore clipboard after write verification failed")
+            return
+        }
+        logger.debug("Restored clipboard after write verification failed")
     }
 
     private func targetCanReceivePaste(_ target: TranscriptDeliveryTarget?) -> Bool {

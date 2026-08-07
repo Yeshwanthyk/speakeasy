@@ -73,4 +73,36 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertTrue(menu.items.first(where: { $0.title == "Retry Last Failed Capture" })?.isEnabled == true)
         XCTAssertFalse(menu.items.first(where: { $0.title == "Discard Failed Capture" })?.isEnabled == true)
     }
+
+    func testMenuBuildsLazyMicrophoneControlsAndLevelPreview() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-microphone-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        let controller = MenuBarController(
+            store: store,
+            availableInputDevices: {
+                [
+                    MicrophoneDevice(uid: "built-in", name: "Built-in"),
+                    MicrophoneDevice(uid: "usb", name: "USB")
+                ]
+            },
+            selectedInputDeviceUID: { "usb" },
+            microphoneLevelSnapshot: {
+                MicrophoneLevelSnapshot(normalizedLevel: 0.42, sequence: 1)
+            }
+        )
+        let menu = NSMenu()
+
+        controller.menuNeedsUpdate(menu)
+
+        let microphone = menu.items.first(where: { $0.title == "Microphone" })
+        XCTAssertEqual(microphone?.submenu?.items.count, 2)
+        XCTAssertEqual(
+            microphone?.submenu?.items.first(where: { $0.representedObject as? String == "usb" })?.state,
+            .on
+        )
+        XCTAssertTrue(menu.items.contains(where: { $0.title == "Microphone Level: 42%" }))
+    }
 }

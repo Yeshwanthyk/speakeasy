@@ -54,6 +54,54 @@ final class AppCoordinatorTests: XCTestCase {
         return coordinator
     }
 
+    func testMicrophoneSelectionIsRejectedWhileTranscriptionOwnsCaptureResult() {
+        let endRecordingStarted = DispatchSemaphore(value: 0)
+        let endRecordingGate = DispatchSemaphore(value: 0)
+        let audio = AudioCaptureStub(
+            samples: Self.validSamples,
+            endRecordingStarted: endRecordingStarted,
+            endRecordingGate: endRecordingGate
+        )
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("Hello")),
+            feedback: feedback
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertEqual(endRecordingStarted.wait(timeout: .now() + 1), .success)
+
+        coordinator.selectInputDevice(uid: "usb")
+
+        XCTAssertTrue(audio.selectedDeviceUIDs.isEmpty)
+        XCTAssertTrue(feedback.errors.contains("Finish dictation before changing microphones"))
+        endRecordingGate.signal()
+    }
+
+    func testMicrophoneSwitchBlocksCaptureUntilFreshRouteCallbackSettles() {
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("Hello")),
+            feedback: feedback
+        )
+
+        coordinator.selectInputDevice(uid: "usb")
+        coordinator.toggleRecording()
+
+        XCTAssertEqual(audio.selectedDeviceUIDs, ["usb"])
+        XCTAssertEqual(audio.beginCount, 0)
+        XCTAssertTrue(feedback.errors.contains("Microphone changing, please wait"))
+
+        audio.emit(.inputDeviceSelectionSucceeded(uid: "usb"))
+        XCTAssertTrue(waitUntil { coordinator.canSelectInputDevice() })
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1)
+    }
+
     private func waitUntil(timeout: TimeInterval = 1.0, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
@@ -130,6 +178,41 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(audio.endCount, 1)
         XCTAssertEqual(transcriber.sampleInputs, [Self.validSamples, Self.validSamples])
         XCTAssertTrue(coordinator.canRetryFailedCapture(), "A settled retry failure remains explicitly retryable")
+    }
+
+    func testQueuedTranscriptionTimeoutRetainsCaptureForReplay() {
+        let queue = DispatchQueue(label: "com.speakeasy.app.tests.queued-timeout")
+        let endRecordingStarted = DispatchSemaphore(value: 0)
+        let endRecordingGate = DispatchSemaphore(value: 0)
+        let blocker = DispatchSemaphore(value: 0)
+        let audio = AudioCaptureStub(
+            samples: Self.validSamples,
+            endRecordingStarted: endRecordingStarted,
+            endRecordingGate: endRecordingGate
+        )
+        let feedback = FeedbackStub()
+        let timedOut = expectation(description: "timeout")
+        feedback.onError = { message in
+            if message == "Transcription timed out" { timedOut.fulfill() }
+        }
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("late")),
+            feedback: feedback,
+            timeout: 0.02,
+            transcriptionQueue: queue
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertEqual(endRecordingStarted.wait(timeout: .now() + 1), .success)
+        endRecordingGate.signal()
+        queue.async { blocker.wait() }
+
+        wait(for: [timedOut], timeout: 1)
+        blocker.signal()
+
+        XCTAssertTrue(waitUntil { coordinator.canRetryFailedCapture() })
     }
 
     func testTimedOutCaptureIsRetryableOnlyAfterNativeSettlement() {
@@ -532,6 +615,7 @@ final class AppCoordinatorTests: XCTestCase {
         var resolvedKinds: [ASRModelKind] = []
         var factoryKinds: [ASRModelKind] = []
         var persistedKinds: [ASRModelKind] = []
+        var verifierCallCount = 0
 
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -543,13 +627,20 @@ final class AppCoordinatorTests: XCTestCase {
             asrModelKind: .parakeetTDT,
             asrModelResolver: { kind in
                 switchLock.withLock { resolvedKinds.append(kind) }
-                return ASRModelConfiguration(kind: kind, url: modelURL, language: nil)
+                return ASRModelConfiguration(
+                    kind: kind,
+                    url: modelURL,
+                    language: nil,
+                    artifactVerified: true
+                )
             },
             transcriberFactory: { model in
                 switchLock.withLock { factoryKinds.append(model.kind) }
                 return replacementTranscriber
             },
-            modelArtifactVerifier: { _ in },
+            modelArtifactVerifier: { _ in
+                switchLock.withLock { verifierCallCount += 1 }
+            },
             modelSelectionStore: { kind in
                 switchLock.withLock { persistedKinds.append(kind) }
             },
@@ -579,6 +670,7 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(switchLock.withLock { resolvedKinds }, [.nemotron])
         XCTAssertEqual(switchLock.withLock { factoryKinds }, [.nemotron])
         XCTAssertEqual(switchLock.withLock { persistedKinds }, [.nemotron])
+        XCTAssertEqual(switchLock.withLock { verifierCallCount }, 0)
     }
 
     func testSwitchASRModelRejectsCorruptArtifactBeforeLoadingAndPreservesPreviousModel() {
@@ -1008,6 +1100,43 @@ final class AppCoordinatorTests: XCTestCase {
 
         wait(for: [pasted], timeout: 1.0)
         XCTAssertEqual(paster.pastedTexts, ["Stored text"])
+    }
+
+    func testPostProcessingThatRemovesAllTextSettlesAsNoSpeech() throws {
+        for (rawText, processor) in [
+            (
+                "remove this sentence please",
+                try TranscriptPostProcessor(corrections: [
+                    TranscriptCorrection(heard: "remove this sentence please", written: "")
+                ])
+            ),
+            ("new line", TranscriptPostProcessor())
+        ] {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-empty-postprocess-\(UUID().uuidString)")
+            let store = TranscriptStore(fileURL: directory.appendingPathComponent("history.json"))
+            let paster = PasterStub()
+            let feedback = FeedbackStub()
+            let noSpeech = expectation(description: "no speech")
+            feedback.onError = { message in
+                if message == "No speech detected" { noSpeech.fulfill() }
+            }
+            let coordinator = makeCoordinator(
+                audio: AudioCaptureStub(samples: Self.validSamples),
+                transcriber: FakeTranscriber(result: .success(rawText)),
+                paster: paster,
+                feedback: feedback,
+                transcriptStore: store,
+                transcriptPostProcessor: processor
+            )
+
+            coordinator.toggleRecording()
+            coordinator.toggleRecording()
+
+            wait(for: [noSpeech], timeout: 1)
+            XCTAssertTrue(store.allRecords().isEmpty)
+            XCTAssertTrue(paster.pastedTexts.isEmpty)
+        }
     }
 
     func testAcceptedTranscriptionIsCorrectedBeforePersistenceAndPaste() throws {
@@ -1551,6 +1680,7 @@ private final class AudioCaptureStub: AudioCapturing {
     private var _endCount = 0
     private var _discardCount = 0
     private var _shutdownCount = 0
+    private var _selectedDeviceUIDs: [String] = []
     private var _lastEndRecordingWasMainThread: Bool?
     private var _endRecordingUsedExpectedQueue: Bool?
     private let prepareError: Error?
@@ -1569,6 +1699,7 @@ private final class AudioCaptureStub: AudioCapturing {
     var endCount: Int { counterLock.withLock { _endCount } }
     var discardCount: Int { counterLock.withLock { _discardCount } }
     var shutdownCount: Int { counterLock.withLock { _shutdownCount } }
+    var selectedDeviceUIDs: [String] { counterLock.withLock { _selectedDeviceUIDs } }
     var lastEndRecordingWasMainThread: Bool? { counterLock.withLock { _lastEndRecordingWasMainThread } }
     var endRecordingUsedExpectedQueue: Bool? { counterLock.withLock { _endRecordingUsedExpectedQueue } }
 
@@ -1645,6 +1776,18 @@ private final class AudioCaptureStub: AudioCapturing {
 
     func shutdown() {
         counterLock.withLock { _shutdownCount += 1 }
+    }
+
+    func availableInputDevices() -> [MicrophoneDevice] { [] }
+
+    func selectedInputDeviceUID() -> String? { nil }
+
+    func selectInputDevice(uid: String) {
+        counterLock.withLock { _selectedDeviceUIDs.append(uid) }
+    }
+
+    func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
+        MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
     }
 }
 

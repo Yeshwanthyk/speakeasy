@@ -67,6 +67,8 @@ swiftc -O \
   -target "$BUILD_ARCH-apple-macosx$DEPLOYMENT_TARGET" \
   -framework AppKit \
   -framework AVFoundation \
+  -framework AudioToolbox \
+  -framework CoreAudio \
   -framework Carbon \
   -framework ApplicationServices \
   -L "$RUST_DIR/target/release" \
@@ -89,24 +91,17 @@ codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$FRAMEWORKS_DIR/libas
 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGING_APP"
 "$ROOT_DIR/script/verify_bundle.sh" "$STAGING_APP"
 
-# Rename the fully assembled and verified bundle into place. Keep the previous
-# bundle recoverable until the publish rename succeeds so a failed build never
-# leaves a partially assembled app at APP_DIR.
-PREVIOUS_APP="$BUILD_DIR/.$APP_NAME.previous.$$"
-if [[ -e "$APP_DIR" || -L "$APP_DIR" ]]; then
-  mv "$APP_DIR" "$PREVIOUS_APP"
-fi
-
-if ! mv "$STAGING_APP" "$APP_DIR"; then
-  if [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
-    mv "$PREVIOUS_APP" "$APP_DIR"
+# Exchange same-filesystem bundles in one filesystem operation. When an old
+# bundle exists it moves to STAGING_APP and remains recoverable until the new
+# current bundle has passed post-publication verification.
+"$ROOT_DIR/script/atomic_replace_bundle.swift" "$APP_DIR" "$STAGING_APP"
+if ! "$ROOT_DIR/script/verify_bundle.sh" "$APP_DIR"; then
+  if [[ -d "$STAGING_APP" ]]; then
+    "$ROOT_DIR/script/atomic_replace_bundle.swift" "$APP_DIR" "$STAGING_APP" || true
   fi
-  echo "Failed to publish $APP_DIR" >&2
+  echo "Published bundle verification failed; previous bundle restored" >&2
   exit 1
 fi
-
-if [[ -e "$PREVIOUS_APP" || -L "$PREVIOUS_APP" ]]; then
-  rm -rf "$PREVIOUS_APP"
-fi
+rm -rf "$STAGING_APP"
 
 echo "Built $APP_DIR (version $BUILD_VERSION, signed with $SIGN_IDENTITY)"

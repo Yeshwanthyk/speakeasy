@@ -22,10 +22,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let discardFailedCapture: () -> Void
     private let canRetryFailedCapture: () -> Bool
     private let canDiscardFailedCapture: () -> Bool
+    private let availableInputDevices: () -> [MicrophoneDevice]
+    private let selectedInputDeviceUID: () -> String?
+    private let selectInputDevice: (String) -> Void
+    private let canSelectInputDevice: () -> Bool
+    private let microphoneLevelSnapshot: () -> MicrophoneLevelSnapshot
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
     private var feedbackGeneration = 0
+    private var levelTimer: Timer?
+    private weak var levelItem: NSMenuItem?
 
     init(
         store: TranscriptStore,
@@ -43,7 +50,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         retryLastFailedCapture: @escaping () -> Void = {},
         discardFailedCapture: @escaping () -> Void = {},
         canRetryFailedCapture: @escaping () -> Bool = { false },
-        canDiscardFailedCapture: @escaping () -> Bool = { false }
+        canDiscardFailedCapture: @escaping () -> Bool = { false },
+        availableInputDevices: @escaping () -> [MicrophoneDevice] = { [] },
+        selectedInputDeviceUID: @escaping () -> String? = { nil },
+        selectInputDevice: @escaping (String) -> Void = { _ in },
+        canSelectInputDevice: @escaping () -> Bool = { true },
+        microphoneLevelSnapshot: @escaping () -> MicrophoneLevelSnapshot = {
+            MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+        }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -62,6 +76,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.discardFailedCapture = discardFailedCapture
         self.canRetryFailedCapture = canRetryFailedCapture
         self.canDiscardFailedCapture = canDiscardFailedCapture
+        self.availableInputDevices = availableInputDevices
+        self.selectedInputDeviceUID = selectedInputDeviceUID
+        self.selectInputDevice = selectInputDevice
+        self.canSelectInputDevice = canSelectInputDevice
+        self.microphoneLevelSnapshot = microphoneLevelSnapshot
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -105,6 +124,22 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 button.toolTip = "Speakeasy"
             }
         }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateLevelItem()
+            }
+        }
+        updateLevelItem()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = nil
+        levelItem = nil
     }
 
     // MARK: - NSMenuDelegate
@@ -170,6 +205,37 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         cancel.target = self
         cancel.isEnabled = canCancelDictation()
         menu.addItem(cancel)
+
+        let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        let microphoneMenu = NSMenu(title: "Microphone")
+        let selectedUID = selectedInputDeviceUID()
+        let devices = availableInputDevices()
+        let selectionEnabled = canSelectInputDevice()
+        if devices.isEmpty {
+            let empty = NSMenuItem(title: "No microphones available", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            microphoneMenu.addItem(empty)
+        } else {
+            for device in devices {
+                let item = NSMenuItem(
+                    title: device.name,
+                    action: #selector(selectInputDeviceItem(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = device.uid
+                item.state = device.uid == selectedUID ? .on : .off
+                item.isEnabled = selectionEnabled && device.uid != selectedUID
+                microphoneMenu.addItem(item)
+            }
+        }
+        microphoneItem.submenu = microphoneMenu
+        menu.addItem(microphoneItem)
+
+        let currentLevel = NSMenuItem(title: Self.levelTitle(for: microphoneLevelSnapshot()), action: nil, keyEquivalent: "")
+        currentLevel.isEnabled = false
+        levelItem = currentLevel
+        menu.addItem(currentLevel)
 
         let retry = NSMenuItem(
             title: "Retry Last Failed Capture",
@@ -286,6 +352,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         discardFailedCapture()
     }
 
+    @objc private func selectInputDeviceItem(_ sender: NSMenuItem) {
+        guard let uid = sender.representedObject as? String else { return }
+        selectInputDevice(uid)
+    }
+
     @objc private func selectInvocationModeItem(_ sender: NSMenuItem) {
         guard let value = sender.representedObject as? String,
               let mode = DictationInvocationMode(rawValue: value) else {
@@ -311,5 +382,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         guard collapsed.count > titleMaxLength else { return collapsed }
         let idx = collapsed.index(collapsed.startIndex, offsetBy: titleMaxLength)
         return String(collapsed[..<idx]) + "…"
+    }
+
+    private static func levelTitle(for snapshot: MicrophoneLevelSnapshot) -> String {
+        "Microphone Level: \(Int((snapshot.normalizedLevel * 100).rounded()))%"
+    }
+
+    private func updateLevelItem() {
+        guard let levelItem else { return }
+        levelItem.title = Self.levelTitle(for: microphoneLevelSnapshot())
     }
 }

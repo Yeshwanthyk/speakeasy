@@ -51,7 +51,7 @@ final class ASRModelInstaller {
 
         let targetURL = try ModelPathResolver.preferredInstallURL(kind: kind)
         try await install(kind: kind, at: targetURL)
-        return try ModelPathResolver.configuredASRModel(kind: kind)
+        return ASRModelConfiguration(kind: kind, url: targetURL, artifactVerified: true)
     }
 
     func install(kind: ASRModelKind, at targetURL: URL) async throws {

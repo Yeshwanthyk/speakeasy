@@ -74,6 +74,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         },
                         canDiscardFailedCapture: { [weak coordinator] in
                             coordinator?.canDiscardFailedCapture() ?? false
+                        },
+                        availableInputDevices: { [weak coordinator] in
+                            coordinator?.availableInputDevices() ?? []
+                        },
+                        selectedInputDeviceUID: { [weak coordinator] in
+                            coordinator?.selectedInputDeviceUID()
+                        },
+                        selectInputDevice: { [weak coordinator] uid in
+                            coordinator?.selectInputDevice(uid: uid)
+                        },
+                        canSelectInputDevice: { [weak coordinator] in
+                            coordinator?.canSelectInputDevice() ?? false
+                        },
+                        microphoneLevelSnapshot: { [weak coordinator] in
+                            coordinator?.microphoneLevelSnapshot()
+                                ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

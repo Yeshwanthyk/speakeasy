@@ -138,11 +138,18 @@ struct ASRModelConfiguration: Equatable, Sendable {
     // Reserved for a future capability-aware run-options ABI. Current GGUF
     // models use their own language detection/default behavior.
     let language: String?
+    let artifactVerified: Bool
 
-    init(kind: ASRModelKind, url: URL, language: String? = nil) {
+    init(
+        kind: ASRModelKind,
+        url: URL,
+        language: String? = nil,
+        artifactVerified: Bool = false
+    ) {
         self.kind = kind
         self.url = url
         self.language = language
+        self.artifactVerified = artifactVerified
     }
 }
 
@@ -244,7 +251,8 @@ enum ModelPathResolver {
                 environment: environment,
                 preferences: preferences,
                 artifactProvider: artifactProvider
-            )
+            ),
+            artifactVerified: true
         )
     }
 
