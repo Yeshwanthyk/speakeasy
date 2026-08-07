@@ -128,6 +128,25 @@ A candidate must have no crash, hang, truncation, load failure, or typed worker 
 
 Promotion also requires a meaningful gain: at least 10% p95 or 5% p50 for native options, and at least 20% or 50 ms release-to-final improvement for streaming. Review bucket-level quality manually until bucket gates are added to the reporter.
 
+## App-aware Smart Cleanup
+
+The app-aware cleanup benchmark is separate from the speech-engine harness. It
+uses synthetic text and destination contexts. It records hashes and invariant
+checks, not transcript or model output text.
+
+```bash
+# Instant deterministic path
+./script/benchmark_smart_cleanup.sh basic 10
+
+# macOS 26 Apple Foundation Models path
+./script/benchmark_smart_cleanup.sh smart 10
+```
+
+The Smart run requires an eligible Mac with Apple Intelligence enabled and its
+model ready. It reports the client process only. Apple's model service can run
+out of process, so the benchmark's RSS and CPU values do not represent the
+complete system cost. Compare modes on the same Mac and power state.
+
 ## App capture profiling
 
 The engine harness intentionally excludes microphones, Accessibility, paste, and UI scheduling. Profile those separately with Instruments using a release app build:

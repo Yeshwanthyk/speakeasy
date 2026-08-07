@@ -1,11 +1,18 @@
 # Third-party notices
 
-## Megaphone / FreeFlow recording overlay mechanisms
+## Megaphone / FreeFlow mechanisms
 
 Parts of Speakeasy's notch-aware recording indicator are adapted from
 [`RecordingOverlay.swift`](https://github.com/Kuberwastaken/megaphone/blob/5a9136b3ac8c766e24a5d79ac056df4d427968f1/Sources/RecordingOverlay.swift)
 and
 [`LiveAudioLevelNormalizer.swift`](https://github.com/Kuberwastaken/megaphone/blob/5a9136b3ac8c766e24a5d79ac056df4d427968f1/Sources/LiveAudioLevelNormalizer.swift).
+
+Parts of Speakeasy's app-context capture, writing-context classification,
+Foundation Models prompt, output validation, and timeout handling are adapted
+from
+[`AppContextService.swift`](https://github.com/Kuberwastaken/megaphone/blob/5a9136b3ac8c766e24a5d79ac056df4d427968f1/Sources/AppContextService.swift)
+and
+[`AppleFoundationModelsPostProcessor.swift`](https://github.com/Kuberwastaken/megaphone/blob/5a9136b3ac8c766e24a5d79ac056df4d427968f1/Sources/AppleFoundationModelsPostProcessor.swift).
 
 MIT License
 

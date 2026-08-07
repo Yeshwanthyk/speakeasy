@@ -33,6 +33,12 @@ final class AppCoordinatorTests: XCTestCase {
         keyMonitor: DictationKeyMonitoring? = nil,
         dictationShortcut: DictationShortcut = .defaultShortcut,
         shortcutSelectionStore: @escaping DictationShortcutSelectionStore = { _ in },
+        smartCleanupProvider: any SmartCleanupProviding = UnavailableSmartCleanupProvider(
+            reason: .frameworkUnavailable
+        ),
+        appContextCollector: any AppContextCollecting = AppContextCollectorStub(),
+        smartCleanupMode: SmartCleanupMode = .basic,
+        smartCleanupModeSelectionStore: @escaping SmartCleanupModeSelectionStore = { _ in },
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription"),
         deliveryTargetProvider: DeliveryTargetProviding = TestCoordinatorTargetProvider()
     ) -> AppCoordinator {
@@ -46,6 +52,10 @@ final class AppCoordinatorTests: XCTestCase {
             hallucinationFilter: hallucinationFilter,
             dictationShortcut: dictationShortcut,
             shortcutSelectionStore: shortcutSelectionStore,
+            smartCleanupProvider: smartCleanupProvider,
+            appContextCollector: appContextCollector,
+            smartCleanupMode: smartCleanupMode,
+            smartCleanupModeSelectionStore: smartCleanupModeSelectionStore,
             transcriptionTimeoutProvider: { _ in timeout },
             keyMonitorFactory: { _ in keyMonitor },
             transcriptStore: transcriptStore,
@@ -59,6 +69,428 @@ final class AppCoordinatorTests: XCTestCase {
             coordinator.skipWarmup()
         }
         return coordinator
+    }
+
+    func testExactModeBypassesCommandsAndCorrections() async throws {
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "unused", elapsed: 0.01)
+        ))
+        let collector = AppContextCollectorStub()
+        let paster = PasterStub()
+        let pasted = expectation(description: "exact paste")
+        paster.onPaste = { pasted.fulfill() }
+        let processor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "wisp", written: "Speakeasy")
+        ])
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("  hello comma wisp  ")),
+            paster: paster,
+            transcriptPostProcessor: processor,
+            smartCleanupProvider: provider,
+            appContextCollector: collector,
+            smartCleanupMode: .exact
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["hello comma wisp"])
+        let requestCount = await provider.requestCount()
+        let preparedSessionIDs = await provider.preparedSessionIDs()
+        let applications = await collector.applications()
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(preparedSessionIDs, [])
+        XCTAssertEqual(applications, [])
+    }
+
+    func testExactModeDoesNotApplyHallucinationFiltering() async {
+        let paster = PasterStub()
+        let pasted = expectation(description: "exact short response paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("  yes  ")),
+            paster: paster,
+            smartCleanupMode: .exact
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["yes"])
+    }
+
+    func testBasicModePreservesCurrentPostProcessing() async throws {
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "unused", elapsed: 0.01)
+        ))
+        let collector = AppContextCollectorStub()
+        let paster = PasterStub()
+        let pasted = expectation(description: "basic paste")
+        paster.onPaste = { pasted.fulfill() }
+        let processor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "wisp", written: "Speakeasy")
+        ])
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("hello comma wisp")),
+            paster: paster,
+            transcriptPostProcessor: processor,
+            smartCleanupProvider: provider,
+            appContextCollector: collector,
+            smartCleanupMode: .basic
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["hello, Speakeasy"])
+        let requestCount = await provider.requestCount()
+        let preparedSessionIDs = await provider.preparedSessionIDs()
+        let applications = await collector.applications()
+        XCTAssertEqual(requestCount, 0)
+        XCTAssertEqual(preparedSessionIDs, [])
+        XCTAssertEqual(applications, [])
+    }
+
+    func testSmartModeUsesModelOutputThenEnforcesCorrections() async throws {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4242,
+            bundleIdentifier: "com.example.editor"
+        )
+        let context = AppContext(
+            processIdentifier: application.processIdentifier,
+            appName: "Editor",
+            bundleIdentifier: application.bundleIdentifier,
+            windowTitle: "Draft",
+            selectedText: "selection",
+            textBeforeCaret: "Before "
+        )
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "polished wisp", elapsed: 0.012)
+        ))
+        let collector = AppContextCollectorStub(context: context)
+        let correction = TranscriptCorrection(heard: "wisp", written: "Wisp")
+        let correctionStore = TranscriptCorrectionStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("smart-success-\(UUID().uuidString)/corrections.json")
+        )
+        let didPersistCorrection = try await correctionStore.replace([correction]).value
+        XCTAssertTrue(didPersistCorrection)
+        let paster = PasterStub()
+        let pasted = expectation(description: "smart paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("raw wisp")),
+            paster: paster,
+            transcriptPostProcessor: try TranscriptPostProcessor(corrections: [correction]),
+            transcriptCorrectionStore: correctionStore,
+            smartCleanupProvider: provider,
+            appContextCollector: collector,
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["polished Wisp"])
+        let requests = await provider.requests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.transcript, "raw wisp")
+        XCTAssertEqual(requests.first?.corrections, [correction])
+        XCTAssertEqual(requests.first?.appContext, context)
+        let preparedSessionIDs = await provider.preparedSessionIDs()
+        let cleanedSessionIDs = await provider.cleanedSessionIDs()
+        XCTAssertEqual(preparedSessionIDs, cleanedSessionIDs)
+    }
+
+    func testSmartFailureFallsBackToBasicResult() async throws {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4343,
+            bundleIdentifier: "com.example.chat"
+        )
+        let provider = SmartCleanupProviderStub(result: .failure(
+            SmartCleanupFailure(reason: .timedOut, elapsed: 2.5)
+        ))
+        let paster = PasterStub()
+        let pasted = expectation(description: "fallback paste")
+        paster.onPaste = { pasted.fulfill() }
+        let processor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "wisp", written: "Wisp")
+        ])
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("hello comma wisp")),
+            paster: paster,
+            transcriptPostProcessor: processor,
+            smartCleanupProvider: provider,
+            appContextCollector: AppContextCollectorStub(),
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["hello, Wisp"])
+        let requestCount = await provider.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testInFlightSmartCleanupBlocksNewRecordingAndKeepsProcessingVisible() async {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4444,
+            bundleIdentifier: "com.example.notes"
+        )
+        let provider = SmartCleanupProviderStub(suspendsCleanup: true)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let recordingFeedback = RecordingFeedbackStub()
+        let paster = PasterStub()
+        let pasted = expectation(description: "smart paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("raw text")),
+            paster: paster,
+            recordingFeedback: recordingFeedback,
+            smartCleanupProvider: provider,
+            appContextCollector: AppContextCollectorStub(),
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let didStartCleanup = await waitUntilAsync { await provider.requestCount() == 1 }
+        XCTAssertTrue(didStartCleanup)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1)
+        XCTAssertFalse(coordinator.isRecording)
+        XCTAssertEqual(recordingFeedback.hideCount, 0)
+
+        await provider.resolve(.success(
+            SmartCleanupResponse(text: "clean text", elapsed: 0.02)
+        ))
+        await fulfillment(of: [pasted], timeout: 1)
+        XCTAssertEqual(paster.pastedTexts, ["clean text"])
+        XCTAssertTrue(recordingFeedback.hideCount > 0)
+    }
+
+    func testCancellationSuppressesLateSmartCleanupDelivery() async {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4545,
+            bundleIdentifier: "com.example.mail"
+        )
+        let provider = SmartCleanupProviderStub(suspendsCleanup: true)
+        let paster = PasterStub()
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let recordingFeedback = RecordingFeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("raw text")),
+            paster: paster,
+            recordingFeedback: recordingFeedback,
+            smartCleanupProvider: provider,
+            appContextCollector: AppContextCollectorStub(),
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let didStartCleanup = await waitUntilAsync { await provider.requestCount() == 1 }
+        XCTAssertTrue(didStartCleanup)
+
+        coordinator.cancelTranscription()
+        let didCancelCleanup = await waitUntilAsync {
+            await provider.cancelledSessionIDs().count == 1
+        }
+        XCTAssertTrue(didCancelCleanup)
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1, "A new recording waits for cleanup settlement")
+        XCTAssertFalse(coordinator.canSelectInputDevice())
+        XCTAssertEqual(recordingFeedback.hideCount, 0)
+
+        await provider.resolve(.success(
+            SmartCleanupResponse(text: "late text", elapsed: 0.03)
+        ))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertTrue(coordinator.canSelectInputDevice())
+        XCTAssertTrue(recordingFeedback.hideCount > 0)
+    }
+
+    func testShutdownCancelsInFlightSmartCleanupAndSuppressesLateDelivery() async {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4595,
+            bundleIdentifier: "com.example.shutdown"
+        )
+        let provider = SmartCleanupProviderStub(suspendsCleanup: true)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let paster = PasterStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("raw text")),
+            paster: paster,
+            smartCleanupProvider: provider,
+            appContextCollector: AppContextCollectorStub(),
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let didStartCleanup = await waitUntilAsync { await provider.requestCount() == 1 }
+        XCTAssertTrue(didStartCleanup)
+
+        coordinator.shutdown()
+        let didCancelCleanup = await waitUntilAsync {
+            await provider.cancelledSessionIDs().count == 1
+        }
+        XCTAssertTrue(didCancelCleanup)
+        await provider.resolve(.success(
+            SmartCleanupResponse(text: "late shutdown text", elapsed: 0.03)
+        ))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertEqual(audio.shutdownCount, 1)
+        XCTAssertFalse(coordinator.canCancelDictation())
+        XCTAssertFalse(coordinator.canSelectInputDevice())
+    }
+
+    func testSmartCleanupModeIsSnapshottedAtRecordingStart() async {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4646,
+            bundleIdentifier: "com.example.document"
+        )
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "smart result", elapsed: 0.01)
+        ))
+        let paster = PasterStub()
+        let pasted = expectation(description: "snapshotted smart paste")
+        paster.onPaste = { pasted.fulfill() }
+        var persistedModes: [SmartCleanupMode] = []
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("basic result")),
+            paster: paster,
+            smartCleanupProvider: provider,
+            appContextCollector: AppContextCollectorStub(),
+            smartCleanupMode: .smart,
+            smartCleanupModeSelectionStore: { persistedModes.append($0) },
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        coordinator.setSmartCleanupMode(.basic)
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        XCTAssertEqual(paster.pastedTexts, ["smart result"])
+        XCTAssertEqual(coordinator.selectedSmartCleanupMode(), .basic)
+        XCTAssertEqual(persistedModes, [.basic])
+        let requestCount = await provider.requestCount()
+        XCTAssertEqual(requestCount, 1)
+    }
+
+    func testSmartContextRequestUsesCapturedTargetPID() async {
+        let firstApplication = TranscriptDeliveryApplication(
+            processIdentifier: 4747,
+            bundleIdentifier: "com.example.first"
+        )
+        let secondApplication = TranscriptDeliveryApplication(
+            processIdentifier: 4848,
+            bundleIdentifier: "com.example.second"
+        )
+        let targetProvider = TestCoordinatorTargetProvider(target: .external(firstApplication))
+        let collector = AppContextCollectorStub()
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "clean", elapsed: 0.01)
+        ))
+        let paster = PasterStub()
+        let pasted = expectation(description: "pid-bound paste")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples),
+            transcriber: FakeTranscriber(result: .success("raw")),
+            paster: paster,
+            smartCleanupProvider: provider,
+            appContextCollector: collector,
+            smartCleanupMode: .smart,
+            deliveryTargetProvider: targetProvider
+        )
+
+        coordinator.toggleRecording()
+        targetProvider.target = .external(secondApplication)
+        coordinator.toggleRecording()
+        await fulfillment(of: [pasted], timeout: 1)
+
+        let applications = await collector.applications()
+        let requests = await provider.requests()
+        XCTAssertEqual(applications, [firstApplication])
+        XCTAssertEqual(requests.first?.appContext.processIdentifier, 4747)
+        XCTAssertEqual(paster.pastedTargets, [.external(firstApplication)])
+    }
+
+    func testFailedCaptureRetryUsesSelectedSmartModeWithoutRecapturingAudio() async {
+        let application = TranscriptDeliveryApplication(
+            processIdentifier: 4949,
+            bundleIdentifier: "com.example.retry"
+        )
+        let collector = AppContextCollectorStub()
+        let provider = SmartCleanupProviderStub(result: .success(
+            SmartCleanupResponse(text: "clean retry", elapsed: 0.01)
+        ))
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(
+            results: [.failure(TestError()), .success("raw retry")]
+        )
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            smartCleanupProvider: provider,
+            appContextCollector: collector,
+            smartCleanupMode: .basic,
+            deliveryTargetProvider: TestCoordinatorTargetProvider(target: .external(application))
+        )
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(coordinator.isRecording)
+        XCTAssertEqual(audio.beginCount, 1)
+        coordinator.toggleRecording()
+        let didEndCapture = await waitUntilAsync { audio.endCount == 1 }
+        let didTranscribe = await waitUntilAsync { transcriber.callCount == 1 }
+        XCTAssertTrue(didEndCapture)
+        XCTAssertTrue(didTranscribe)
+        XCTAssertEqual(feedback.errors, ["Transcription failed"])
+        let canRetry = await waitUntilAsync { coordinator.canRetryFailedCapture() }
+        XCTAssertTrue(canRetry)
+
+        coordinator.setSmartCleanupMode(.smart)
+        coordinator.retryLastFailedCapture()
+        let didPaste = await waitUntilAsync { paster.pastedTexts == ["clean retry"] }
+        XCTAssertTrue(didPaste)
+
+        let requestCount = await provider.requestCount()
+        let applications = await collector.applications()
+        XCTAssertEqual(audio.endCount, 1)
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(applications, [application])
     }
 
     func testShortcutUpdatePublishesOnlyAfterMonitorAcceptsIt() {
@@ -180,6 +612,17 @@ final class AppCoordinatorTests: XCTestCase {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
         return condition()
+    }
+
+    private func waitUntilAsync(
+        timeout: TimeInterval = 1.0,
+        _ condition: @escaping () async -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !(await condition()), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return await condition()
     }
 
     private func decodedHistory(at url: URL) -> [TranscriptRecord]? {
@@ -1831,6 +2274,91 @@ final class AudioCaptureLifecycleTests: XCTestCase {
 }
 
 // MARK: - Shared Stubs
+
+private actor AppContextCollectorStub: AppContextCollecting {
+    private let suppliedContext: AppContext?
+    private var collectedApplications: [TranscriptDeliveryApplication] = []
+
+    init(context: AppContext? = nil) {
+        suppliedContext = context
+    }
+
+    func collect(for application: TranscriptDeliveryApplication) async -> AppContext {
+        collectedApplications.append(application)
+        return suppliedContext ?? AppContext(
+            processIdentifier: application.processIdentifier,
+            appName: nil,
+            bundleIdentifier: application.bundleIdentifier,
+            windowTitle: nil,
+            selectedText: nil,
+            textBeforeCaret: nil
+        )
+    }
+
+    func applications() -> [TranscriptDeliveryApplication] {
+        collectedApplications
+    }
+}
+
+private actor SmartCleanupProviderStub: SmartCleanupProviding {
+    private let availabilityValue: SmartCleanupAvailability
+    private let initialResult: SmartCleanupResult
+    private let suspendsCleanup: Bool
+    private var receivedRequests: [SmartCleanupRequest] = []
+    private var preparedIDs: [UUID] = []
+    private var cleanedIDs: [UUID] = []
+    private var cancelledIDs: [UUID] = []
+    private var cleanupContinuation: CheckedContinuation<SmartCleanupResult, Never>?
+
+    init(
+        availability: SmartCleanupAvailability = .available,
+        result: SmartCleanupResult = .failure(
+            SmartCleanupFailure(reason: .generationFailed, elapsed: 0)
+        ),
+        suspendsCleanup: Bool = false
+    ) {
+        availabilityValue = availability
+        initialResult = result
+        self.suspendsCleanup = suspendsCleanup
+    }
+
+    func availability() async -> SmartCleanupAvailability {
+        availabilityValue
+    }
+
+    func prepare(sessionID: UUID) async {
+        preparedIDs.append(sessionID)
+    }
+
+    func cancel(sessionID: UUID) async {
+        cancelledIDs.append(sessionID)
+    }
+
+    func clean(
+        _ request: SmartCleanupRequest,
+        sessionID: UUID?
+    ) async -> SmartCleanupResult {
+        receivedRequests.append(request)
+        if let sessionID {
+            cleanedIDs.append(sessionID)
+        }
+        guard suspendsCleanup else { return initialResult }
+        return await withCheckedContinuation { continuation in
+            cleanupContinuation = continuation
+        }
+    }
+
+    func resolve(_ result: SmartCleanupResult) {
+        cleanupContinuation?.resume(returning: result)
+        cleanupContinuation = nil
+    }
+
+    func requestCount() -> Int { receivedRequests.count }
+    func requests() -> [SmartCleanupRequest] { receivedRequests }
+    func preparedSessionIDs() -> [UUID] { preparedIDs }
+    func cleanedSessionIDs() -> [UUID] { cleanedIDs }
+    func cancelledSessionIDs() -> [UUID] { cancelledIDs }
+}
 
 private final class AudioCaptureStub: AudioCapturing {
     // Counters are written from `transcriptionQueue` (for `endRecording`) and

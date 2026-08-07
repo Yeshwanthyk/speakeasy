@@ -53,6 +53,120 @@ final class MenuBarControllerTests: XCTestCase {
         XCTAssertEqual(modelItems?.first?.state, .on)
     }
 
+    func testMenuExposesSelectedSmartCleanupModeWithoutReadingItEagerly() {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-cleanup-selection-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        var selectionReadCount = 0
+        let controller = MenuBarController(
+            store: store,
+            currentSmartCleanupMode: {
+                selectionReadCount += 1
+                return .basic
+            }
+        )
+        let menu = NSMenu()
+
+        XCTAssertEqual(selectionReadCount, 0)
+        controller.menuNeedsUpdate(menu)
+
+        let cleanup = menu.items.first(where: { $0.title.hasPrefix("Text Cleanup —") })
+        XCTAssertEqual(cleanup?.title, "Text Cleanup — Basic")
+        XCTAssertEqual(cleanup?.submenu?.items.filter { $0.state == .on }.count, 1)
+        XCTAssertEqual(
+            cleanup?.submenu?.items.first(where: {
+                $0.representedObject as? String == SmartCleanupMode.basic.rawValue
+            })?.state,
+            .on
+        )
+    }
+
+    func testSelectingSmartCallsBackAndRefreshesAvailability() async {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-cleanup-callback-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        var selectedMode: SmartCleanupMode?
+        var availabilityCallCount = 0
+        let openedAvailability = expectation(description: "Opened availability")
+        let refreshedAvailability = expectation(description: "Refreshed availability")
+        let controller = MenuBarController(
+            store: store,
+            currentSmartCleanupMode: { selectedMode ?? .basic },
+            selectSmartCleanupMode: { selectedMode = $0 },
+            smartCleanupAvailability: {
+                availabilityCallCount += 1
+                if availabilityCallCount == 1 {
+                    openedAvailability.fulfill()
+                } else if availabilityCallCount == 2 {
+                    refreshedAvailability.fulfill()
+                }
+                return .available
+            }
+        )
+
+        XCTAssertEqual(availabilityCallCount, 0)
+        controller.menuWillOpen(NSMenu())
+        await fulfillment(of: [openedAvailability], timeout: 1)
+        await Task.yield()
+        let menu = NSMenu()
+        controller.menuNeedsUpdate(menu)
+        let smart = menu.items
+            .first(where: { $0.title.hasPrefix("Text Cleanup —") })?
+            .submenu?.items
+            .first(where: { $0.representedObject as? String == SmartCleanupMode.smart.rawValue })
+
+        guard let smart, let action = smart.action else {
+            return XCTFail("Expected an actionable Smart cleanup item")
+        }
+        XCTAssertTrue(NSApplication.shared.sendAction(action, to: smart.target, from: smart))
+        XCTAssertEqual(selectedMode, .smart)
+        await fulfillment(of: [refreshedAvailability], timeout: 1)
+    }
+
+    func testMenuShowsTypedUnavailableReasonOnlyAfterOpening() async {
+        let store = TranscriptStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-menu-cleanup-unavailable-\(UUID().uuidString)")
+                .appendingPathComponent("history.json")
+        )
+        var availabilityCallCount = 0
+        let availabilityQueried = expectation(description: "Availability queried on open")
+        let controller = MenuBarController(
+            store: store,
+            smartCleanupAvailability: {
+                availabilityCallCount += 1
+                availabilityQueried.fulfill()
+                return .unavailable(.deviceNotEligible)
+            }
+        )
+
+        XCTAssertEqual(availabilityCallCount, 0)
+        controller.menuWillOpen(NSMenu())
+        await fulfillment(of: [availabilityQueried], timeout: 1)
+        await Task.yield()
+        let menu = NSMenu()
+        controller.menuNeedsUpdate(menu)
+
+        let cleanupItems = menu.items
+            .first(where: { $0.title.hasPrefix("Text Cleanup —") })?
+            .submenu?.items
+        XCTAssertEqual(cleanupItems?.last?.title, "Smart is unavailable on this device")
+        XCTAssertTrue(cleanupItems?.last?.isEnabled == false)
+        XCTAssertTrue(cleanupItems?.first(where: {
+            $0.representedObject as? String == SmartCleanupMode.exact.rawValue
+        })?.isEnabled == true)
+        XCTAssertTrue(cleanupItems?.first(where: {
+            $0.representedObject as? String == SmartCleanupMode.basic.rawValue
+        })?.isEnabled == true)
+        XCTAssertTrue(cleanupItems?.first(where: {
+            $0.representedObject as? String == SmartCleanupMode.smart.rawValue
+        })?.isEnabled == false)
+    }
+
     func testMenuExposesInvocationModesAndCancelControl() {
         let store = TranscriptStore(
             fileURL: FileManager.default.temporaryDirectory

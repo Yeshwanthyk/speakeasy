@@ -47,6 +47,7 @@ typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> 
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
 typealias InputDeviceSelectionStore = (_ uid: String) -> Void
 typealias DictationShortcutSelectionStore = (_ shortcut: DictationShortcut) -> Void
+typealias SmartCleanupModeSelectionStore = (_ mode: SmartCleanupMode) -> Void
 
 enum TranscriptCorrectionUpdateError: Error, Equatable {
     case storeUnavailable
@@ -88,10 +89,10 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     private enum Transition {
-        case start(UUID, TranscriptionTrace, TranscriptDeliveryTarget)
-        case stop(UUID, UInt64, TranscriptionTrace, TranscriptDeliveryTarget)
+        case start(UUID, TranscriptionTrace, TranscriptDeliveryTarget, SmartCleanupMode)
+        case stop(UUID, UInt64, TranscriptionTrace, TranscriptDeliveryTarget, SmartCleanupMode)
         case discardCapture(TranscriptionTrace?, notify: Bool)
-        case cancelTranscription(UInt64, TranscriptionTrace)
+        case cancelTranscription(UUID, UInt64, TranscriptionTrace, cleanupHasStarted: Bool)
         case blocked(TranscriptionTrace, String)
         case ignore(String?)
     }
@@ -107,6 +108,24 @@ final class AppCoordinator: @unchecked Sendable {
         case recording
         case processing
         case hidden
+    }
+
+    private enum SmartCleanupLogOutcome: String {
+        case success
+        case unavailable
+        case invalidRequest
+        case cancelled
+        case timedOut
+        case generationFailed
+        case rejectedOutput
+    }
+
+    private struct SmartCleanupSession {
+        let id: UUID
+        let application: TranscriptDeliveryApplication
+        var contextTask: Task<AppContext, Never>?
+        var prewarmTask: Task<Void, Never>?
+        var cleanupTask: Task<SmartCleanupResult, Never>?
     }
 
     private enum ModelSwitchStart {
@@ -142,6 +161,9 @@ final class AppCoordinator: @unchecked Sendable {
     private let modelSelectionStore: ASRModelSelectionStore
     private let inputDeviceSelectionStore: InputDeviceSelectionStore
     private let shortcutSelectionStore: DictationShortcutSelectionStore
+    private let smartCleanupProvider: any SmartCleanupProviding
+    private let appContextCollector: any AppContextCollecting
+    private let smartCleanupModeSelectionStore: SmartCleanupModeSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
@@ -165,6 +187,9 @@ final class AppCoordinator: @unchecked Sendable {
     private var activeDeliveryTarget: TranscriptDeliveryTarget?
     private var invocationMode: DictationInvocationMode = .toggle
     private var dictationShortcut: DictationShortcut
+    private var smartCleanupMode: SmartCleanupMode
+    private var activeRecordingSmartCleanupMode: SmartCleanupMode?
+    private var activeSmartCleanupSession: SmartCleanupSession?
     private let transcriptionQueue: DispatchQueue
     private let recordingFeedback: RecordingFeedbackPresenting
     private var recordingFeedbackGeneration: UInt64 = 0
@@ -197,6 +222,12 @@ final class AppCoordinator: @unchecked Sendable {
         inputDeviceSelectionStore: @escaping InputDeviceSelectionStore = { _ in },
         dictationShortcut: DictationShortcut = .defaultShortcut,
         shortcutSelectionStore: @escaping DictationShortcutSelectionStore = { _ in },
+        smartCleanupProvider: any SmartCleanupProviding = UnavailableSmartCleanupProvider(
+            reason: .frameworkUnavailable
+        ),
+        appContextCollector: any AppContextCollecting = AppContextService(),
+        smartCleanupMode: SmartCleanupMode = .basic,
+        smartCleanupModeSelectionStore: @escaping SmartCleanupModeSelectionStore = { _ in },
         transcriptionTimeoutProvider: @escaping (ContiguousArray<Float>) -> TimeInterval,
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
@@ -225,6 +256,10 @@ final class AppCoordinator: @unchecked Sendable {
         self.inputDeviceSelectionStore = inputDeviceSelectionStore
         self.dictationShortcut = dictationShortcut
         self.shortcutSelectionStore = shortcutSelectionStore
+        self.smartCleanupProvider = smartCleanupProvider
+        self.appContextCollector = appContextCollector
+        self.smartCleanupMode = smartCleanupMode
+        self.smartCleanupModeSelectionStore = smartCleanupModeSelectionStore
         self.transcriptionTimeoutProvider = transcriptionTimeoutProvider
         self.failedCaptureReplayBuffer = failedCaptureReplayBuffer
         self.transcriptStore = transcriptStore
@@ -269,14 +304,18 @@ final class AppCoordinator: @unchecked Sendable {
 
     /// Shut down the audio engine. Call from `applicationWillTerminate`.
     func shutdown() {
-        stateLock.withLock {
+        let cleanupSession = stateLock.withLock { () -> SmartCleanupSession? in
             isShuttingDown = true
             state = .idle
             activeTrace = nil
             activeTranscriptionTrace = nil
             activeReplayLease = nil
             activeDeliveryTarget = nil
+            activeRecordingSmartCleanupMode = nil
+            defer { activeSmartCleanupSession = nil }
+            return activeSmartCleanupSession
         }
+        cancelSmartCleanupSession(cleanupSession)
         failedCaptureReplayBuffer.clear()
         transitionRecordingFeedback(to: .hidden)
         audioCapture.shutdown()
@@ -298,6 +337,24 @@ final class AppCoordinator: @unchecked Sendable {
 
     func selectedDictationShortcut() -> DictationShortcut {
         stateLock.withLock { dictationShortcut }
+    }
+
+    func selectedSmartCleanupMode() -> SmartCleanupMode {
+        stateLock.withLock { smartCleanupMode }
+    }
+
+    func setSmartCleanupMode(_ mode: SmartCleanupMode) {
+        let didChange = stateLock.withLock { () -> Bool in
+            guard smartCleanupMode != mode else { return false }
+            smartCleanupMode = mode
+            return true
+        }
+        guard didChange else { return }
+        smartCleanupModeSelectionStore(mode)
+    }
+
+    func smartCleanupAvailability() async -> SmartCleanupAvailability {
+        await smartCleanupProvider.availability()
     }
 
     @MainActor
@@ -459,7 +516,8 @@ final class AppCoordinator: @unchecked Sendable {
             token: UUID,
             runID: UInt64,
             trace: TranscriptionTrace,
-            target: TranscriptDeliveryTarget
+            target: TranscriptDeliveryTarget,
+            cleanupMode: SmartCleanupMode
         )? in
             guard !isShuttingDown, warmupState.isReady, case .idle = state,
                   let lease = failedCaptureReplayBuffer.acquireLease() else {
@@ -474,10 +532,15 @@ final class AppCoordinator: @unchecked Sendable {
             )
             trace.markStopReturned(sampleCount: lease.samples.count)
             let target = deliveryTargetProvider.currentTarget()
+            let cleanupMode = smartCleanupMode
             state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
             activeTranscriptionTrace = trace
             activeReplayLease = lease
-            return (lease, token, runID, trace, target)
+            activeSmartCleanupSession = Self.makeSmartCleanupSession(
+                mode: cleanupMode,
+                target: target
+            )
+            return (lease, token, runID, trace, target, cleanupMode)
         }
 
         guard let retry else {
@@ -486,6 +549,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         transitionRecordingFeedback(to: .processing)
+        startSmartCleanupPreparationIfNeeded()
         beginNativeTranscription(
             samples: retry.lease.samples,
             activeSampleCount: retry.lease.samples.count,
@@ -493,7 +557,8 @@ final class AppCoordinator: @unchecked Sendable {
             token: retry.token,
             runID: retry.runID,
             trace: retry.trace,
-            target: retry.target
+            target: retry.target,
+            cleanupMode: retry.cleanupMode
         )
     }
 
@@ -606,6 +671,7 @@ final class AppCoordinator: @unchecked Sendable {
         let correctionStore = TranscriptCorrectionStore()
         let postProcessor = (try? TranscriptPostProcessor(corrections: correctionStore.allCorrections()))
             ?? TranscriptPostProcessor()
+        let smartCleanupModeStore = SmartCleanupModeStore()
 
         let dictationShortcut = DictationShortcutStore.selected()
         let keyMonitorFactory: KeyMonitorFactory = { callback in
@@ -631,6 +697,10 @@ final class AppCoordinator: @unchecked Sendable {
             inputDeviceSelectionStore: { MicrophoneSelectionStore.persist(uid: $0) },
             dictationShortcut: dictationShortcut,
             shortcutSelectionStore: { DictationShortcutStore.persist($0) },
+            smartCleanupProvider: SmartCleanupProviderFactory.make(),
+            appContextCollector: AppContextService(),
+            smartCleanupMode: smartCleanupModeStore.load(),
+            smartCleanupModeSelectionStore: { smartCleanupModeStore.save($0) },
             transcriptionTimeoutProvider: Self.defaultTranscriptionTimeout,
             keyMonitorFactory: keyMonitorFactory,
             transcriptStore: TranscriptStore(),
@@ -681,7 +751,14 @@ final class AppCoordinator: @unchecked Sendable {
                 state = .startingCapture(captureID)
                 activeTrace = trace
                 activeDeliveryTarget = deliveryTargetProvider.currentTarget()
-                return .start(captureID, trace, activeDeliveryTarget ?? .unavailable)
+                let target = activeDeliveryTarget ?? .unavailable
+                let mode = smartCleanupMode
+                activeRecordingSmartCleanupMode = mode
+                activeSmartCleanupSession = Self.makeSmartCleanupSession(
+                    mode: mode,
+                    target: target
+                )
+                return .start(captureID, trace, target, mode)
             }
 
             guard warmupState.isReady || intent == .cancel else {
@@ -701,10 +778,12 @@ final class AppCoordinator: @unchecked Sendable {
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
                 let target = activeDeliveryTarget ?? .unavailable
+                let cleanupMode = activeRecordingSmartCleanupMode ?? .basic
                 activeTrace = nil
                 activeDeliveryTarget = nil
+                activeRecordingSmartCleanupMode = nil
                 activeTranscriptionTrace = trace
-                return .stop(token, runID, trace, target)
+                return .stop(token, runID, trace, target, cleanupMode)
             }
 
             switch intent {
@@ -749,25 +828,32 @@ final class AppCoordinator: @unchecked Sendable {
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return .discardCapture(trace, notify: true)
                 case .recording:
                     let trace = activeTrace
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return .discardCapture(trace, notify: true)
                 case .transcribing(let token, let runID, let didTimeOut, let didCancel):
                     guard !didTimeOut, !didCancel, let trace = activeTranscriptionTrace else {
                         return .ignore(nil)
                     }
                     state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: true)
-                    return .cancelTranscription(runID, trace)
+                    return .cancelTranscription(
+                        token,
+                        runID,
+                        trace,
+                        cleanupHasStarted: activeSmartCleanupSession?.cleanupTask != nil
+                    )
                 }
             }
         }
 
         switch transition {
-        case .start(let captureID, var trace, let target):
+        case .start(let captureID, var trace, let target, _):
             do {
                 try audioCapture.beginRecording()
                 trace.markCaptureStarted()
@@ -786,6 +872,7 @@ final class AppCoordinator: @unchecked Sendable {
                 }
 
                 transitionRecordingFeedback(to: .recording)
+                startSmartCleanupPreparationIfNeeded()
             } catch {
                 stateLock.withLock {
                     if case .startingCapture = state {
@@ -793,16 +880,25 @@ final class AppCoordinator: @unchecked Sendable {
                     }
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                 }
+                cancelActiveSmartCleanupSession()
                 logger.error("Recording start rejected: audio capture unavailable")
                 feedback.notify(event: .error("Microphone reconnecting, try again shortly"))
             }
 
-        case .stop(let token, let runID, let trace, let target):
+        case .stop(let token, let runID, let trace, let target, let cleanupMode):
             transitionRecordingFeedback(to: .processing)
-            stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
+            stopAndTranscribe(
+                token: token,
+                runID: runID,
+                trace: trace,
+                target: target,
+                cleanupMode: cleanupMode
+            )
 
         case .discardCapture(let trace, let notify):
+            cancelActiveSmartCleanupSession()
             audioCapture.discardRecording()
             transitionRecordingFeedback(to: .hidden)
             if let trace {
@@ -812,10 +908,16 @@ final class AppCoordinator: @unchecked Sendable {
                 feedback.notify(event: .error("Recording cancelled"))
             }
 
-        case .cancelTranscription(let runID, let trace):
-            transitionRecordingFeedback(to: .hidden)
-            let transcriber = stateLock.withLock { self.transcriber }
-            transcriber.cancel(runID: runID)
+        case .cancelTranscription(_, let runID, let trace, let cleanupHasStarted):
+            if cleanupHasStarted {
+                let session = stateLock.withLock { activeSmartCleanupSession }
+                cancelSmartCleanupSession(session)
+            } else {
+                cancelActiveSmartCleanupSession()
+                transitionRecordingFeedback(to: .hidden)
+                let transcriber = stateLock.withLock { self.transcriber }
+                transcriber.cancel(runID: runID)
+            }
             recordTerminal(trace: trace, outcome: .cancelled)
             feedback.notify(event: .error("Transcription cancelled"))
 
@@ -865,11 +967,13 @@ final class AppCoordinator: @unchecked Sendable {
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return (true, false)
                 case .recording:
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return (true, true)
                 case .transcribing:
                     // `endRecording()` still owns the capture buffers. Keep the
@@ -880,6 +984,7 @@ final class AppCoordinator: @unchecked Sendable {
             guard interruption.shouldNotify else {
                 return
             }
+            cancelActiveSmartCleanupSession()
             if interruption.shouldHideFeedback {
                 transitionRecordingFeedback(to: .hidden)
             }
@@ -905,11 +1010,13 @@ final class AppCoordinator: @unchecked Sendable {
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return false
                 case .recording:
                     state = .idle
                     activeTrace = nil
                     activeDeliveryTarget = nil
+                    activeRecordingSmartCleanupMode = nil
                     return true
                 case .idle, .transcribing:
                     return false
@@ -918,6 +1025,7 @@ final class AppCoordinator: @unchecked Sendable {
             if shouldHideFeedback {
                 transitionRecordingFeedback(to: .hidden)
             }
+            cancelActiveSmartCleanupSession()
             logger.error("Microphone reconnection failed")
             feedback.notify(event: .error("Microphone reconnection failed"))
 
@@ -947,11 +1055,93 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
+    private static func makeSmartCleanupSession(
+        mode: SmartCleanupMode,
+        target: TranscriptDeliveryTarget
+    ) -> SmartCleanupSession? {
+        guard mode == .smart, case .external(let application) = target else {
+            return nil
+        }
+        return SmartCleanupSession(
+            id: UUID(),
+            application: application,
+            contextTask: nil,
+            prewarmTask: nil,
+            cleanupTask: nil
+        )
+    }
+
+    private func startSmartCleanupPreparationIfNeeded() {
+        let pending = stateLock.withLock { () -> (UUID, TranscriptDeliveryApplication)? in
+            guard !isShuttingDown,
+                  let session = activeSmartCleanupSession,
+                  session.contextTask == nil,
+                  session.prewarmTask == nil else {
+                return nil
+            }
+            switch state {
+            case .recording, .transcribing:
+                break
+            case .idle, .startingCapture:
+                return nil
+            }
+            return (session.id, session.application)
+        }
+        guard let (sessionID, application) = pending else { return }
+
+        let collector = appContextCollector
+        let provider = smartCleanupProvider
+        let contextTask = Task { await collector.collect(for: application) }
+        let prewarmTask = Task { await provider.prepare(sessionID: sessionID) }
+
+        let didInstall = stateLock.withLock { () -> Bool in
+            guard !isShuttingDown,
+                  var session = activeSmartCleanupSession,
+                  session.id == sessionID else {
+                return false
+            }
+            switch state {
+            case .recording, .transcribing:
+                session.contextTask = contextTask
+                session.prewarmTask = prewarmTask
+                activeSmartCleanupSession = session
+                return true
+            case .idle, .startingCapture:
+                return false
+            }
+        }
+
+        guard didInstall else {
+            contextTask.cancel()
+            prewarmTask.cancel()
+            Task { await provider.cancel(sessionID: sessionID) }
+            return
+        }
+    }
+
+    private func cancelActiveSmartCleanupSession() {
+        let session = stateLock.withLock { () -> SmartCleanupSession? in
+            defer { activeSmartCleanupSession = nil }
+            return activeSmartCleanupSession
+        }
+        cancelSmartCleanupSession(session)
+    }
+
+    private func cancelSmartCleanupSession(_ session: SmartCleanupSession?) {
+        guard let session else { return }
+        session.contextTask?.cancel()
+        session.prewarmTask?.cancel()
+        session.cleanupTask?.cancel()
+        let provider = smartCleanupProvider
+        Task { await provider.cancel(sessionID: session.id) }
+    }
+
     private func stopAndTranscribe(
         token: UUID,
         runID: UInt64,
         trace: TranscriptionTrace,
-        target: TranscriptDeliveryTarget
+        target: TranscriptDeliveryTarget,
+        cleanupMode: SmartCleanupMode
     ) {
         // `endRecording` blocks on a grace-window semaphore (up to ~220ms)
         // waiting for the trailing audio frame. Run it off-main so the UI
@@ -970,7 +1160,8 @@ final class AppCoordinator: @unchecked Sendable {
                     trace: trace,
                     captureResult: captureResult,
                     rms: rms,
-                    target: target
+                    target: target,
+                    cleanupMode: cleanupMode
                 )
             }
         }
@@ -982,7 +1173,8 @@ final class AppCoordinator: @unchecked Sendable {
         trace: TranscriptionTrace,
         captureResult: AudioCaptureResult,
         rms: Float,
-        target: TranscriptDeliveryTarget
+        target: TranscriptDeliveryTarget,
+        cleanupMode: SmartCleanupMode
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         let samples = captureResult.samples
@@ -1055,7 +1247,8 @@ final class AppCoordinator: @unchecked Sendable {
             token: token,
             runID: runID,
             trace: trace,
-            target: target
+            target: target,
+            cleanupMode: cleanupMode
         )
     }
 
@@ -1066,7 +1259,8 @@ final class AppCoordinator: @unchecked Sendable {
         token: UUID,
         runID: UInt64,
         trace: TranscriptionTrace,
-        target: TranscriptDeliveryTarget
+        target: TranscriptDeliveryTarget,
+        cleanupMode: SmartCleanupMode
     ) {
         let timeoutTrace = trace
         var trace = trace
@@ -1115,30 +1309,43 @@ final class AppCoordinator: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 timeoutWorkItem.cancel()
-                let settlement = self.finishTranscription(token: token)
-
-                switch settlement {
-                case .eligible:
-                    switch result {
-                    case .success(let text):
-                        self.failedCaptureReplayBuffer.clear()
-                        self.handleTranscriptionResult(
-                            text,
-                            trace: trace,
-                            activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
-                            activeRMS: rms,
-                            target: target
-                        )
-                    case .failure(let error):
+                switch result {
+                case .success(let text):
+                    let isEligible = self.stateLock.withLock {
+                        guard case let .transcribing(current, _, didTimeOut, didCancel) = self.state,
+                              current == token else {
+                            return false
+                        }
+                        return !didTimeOut && !didCancel && !self.isShuttingDown
+                    }
+                    guard isEligible else {
+                        if case .timedOut = self.finishTranscription(token: token) {
+                            self.retainFailedCapture(samples: samples, reason: .timedOut)
+                        }
+                        return
+                    }
+                    self.failedCaptureReplayBuffer.clear()
+                    self.handleTranscriptionResult(
+                        text,
+                        token: token,
+                        trace: trace,
+                        activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
+                        activeRMS: rms,
+                        target: target,
+                        cleanupMode: cleanupMode
+                    )
+                case .failure(let error):
+                    switch self.finishTranscription(token: token) {
+                    case .eligible:
                         self.retainFailedCapture(samples: samples, reason: .transcriptionFailed)
                         self.recordTerminal(trace: trace, outcome: .transcriptionFailed)
                         self.logger.error("Transcription failed: \(String(describing: error))")
                         self.feedback.notify(event: .error("Transcription failed"))
+                    case .timedOut:
+                        self.retainFailedCapture(samples: samples, reason: .timedOut)
+                    case .cancelled, .stale:
+                        break
                     }
-                case .timedOut:
-                    self.retainFailedCapture(samples: samples, reason: .timedOut)
-                case .cancelled, .stale:
-                    break
                 }
             }
         }
@@ -1146,16 +1353,26 @@ final class AppCoordinator: @unchecked Sendable {
 
     private func handleTranscriptionResult(
         _ text: String,
+        token: UUID,
         trace: TranscriptionTrace,
         activeDurationSeconds: TimeInterval? = nil,
         activeRMS: Float? = nil,
-        target: TranscriptDeliveryTarget = .unavailable
+        target: TranscriptDeliveryTarget = .unavailable,
+        cleanupMode: SmartCleanupMode
     ) {
-        let trace = trace
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            settleNoSpeech(token: token, trace: trace)
+            return
+        }
+
+        if cleanupMode == .exact {
+            settleAcceptedTranscript(
+                ProcessedTranscript(rawText: trimmed, finalText: trimmed),
+                token: token,
+                trace: trace,
+                target: target
+            )
             return
         }
 
@@ -1166,23 +1383,253 @@ final class AppCoordinator: @unchecked Sendable {
         )
         if case .rejected(let reason) = hallucinationVerdict {
             logger.debug("Filtered transcript degeneration: \(String(describing: reason))")
-            recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            settleNoSpeech(token: token, trace: trace)
             return
         }
 
         let postProcessor = stateLock.withLock { transcriptPostProcessor }
-        let processedTranscript = postProcessor.process(trimmed)
-        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !finalText.isEmpty else {
-            recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+        switch cleanupMode {
+        case .exact:
+            return
+        case .basic:
+            guard let transcript = processedTranscript(trimmed, using: postProcessor) else {
+                settleNoSpeech(token: token, trace: trace)
+                return
+            }
+            settleAcceptedTranscript(
+                transcript,
+                token: token,
+                trace: trace,
+                target: target
+            )
+        case .smart:
+            guard let fallback = processedTranscript(trimmed, using: postProcessor) else {
+                settleNoSpeech(token: token, trace: trace)
+                return
+            }
+            beginSmartCleanup(
+                rawTranscript: trimmed,
+                fallback: fallback,
+                postProcessor: postProcessor,
+                token: token,
+                trace: trace,
+                target: target
+            )
+        }
+    }
+
+    private func beginSmartCleanup(
+        rawTranscript: String,
+        fallback: ProcessedTranscript,
+        postProcessor: TranscriptPostProcessor,
+        token: UUID,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
+        let preparation = stateLock.withLock { () -> (
+            sessionID: UUID,
+            application: TranscriptDeliveryApplication,
+            contextTask: Task<AppContext, Never>?,
+            prewarmTask: Task<Void, Never>?
+        )? in
+            guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
+                  current == token,
+                  !didTimeOut,
+                  !didCancel,
+                  !isShuttingDown,
+                  let session = activeSmartCleanupSession else {
+                return nil
+            }
+            return (
+                session.id,
+                session.application,
+                session.contextTask,
+                session.prewarmTask
+            )
+        }
+
+        guard let preparation else {
+            settleAcceptedTranscript(fallback, token: token, trace: trace, target: target)
             return
         }
-        let settledTranscript = ProcessedTranscript(
-            rawText: processedTranscript.rawText,
-            finalText: finalText
+
+        let corrections = MainActor.assumeIsolated {
+            transcriptCorrectionStore?.allCorrections() ?? []
+        }
+        let provider = smartCleanupProvider
+        let cleanupTask = Task<SmartCleanupResult, Never> {
+            if let prewarmTask = preparation.prewarmTask {
+                await prewarmTask.value
+            }
+            guard !Task.isCancelled else {
+                return .failure(SmartCleanupFailure(reason: .cancelled, elapsed: 0))
+            }
+
+            let context: AppContext
+            if let contextTask = preparation.contextTask {
+                context = await contextTask.value
+            } else {
+                context = AppContext(
+                    processIdentifier: preparation.application.processIdentifier,
+                    appName: nil,
+                    bundleIdentifier: preparation.application.bundleIdentifier,
+                    windowTitle: nil,
+                    selectedText: nil,
+                    textBeforeCaret: nil
+                )
+            }
+            guard !Task.isCancelled else {
+                return .failure(SmartCleanupFailure(reason: .cancelled, elapsed: 0))
+            }
+
+            return await provider.clean(
+                SmartCleanupRequest(
+                    transcript: rawTranscript,
+                    appContext: context,
+                    corrections: corrections
+                ),
+                sessionID: preparation.sessionID
+            )
+        }
+
+        let didInstall = stateLock.withLock { () -> Bool in
+            guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
+                  current == token,
+                  !didTimeOut,
+                  !didCancel,
+                  !isShuttingDown,
+                  var session = activeSmartCleanupSession,
+                  session.id == preparation.sessionID else {
+                return false
+            }
+            session.cleanupTask = cleanupTask
+            activeSmartCleanupSession = session
+            return true
+        }
+
+        guard didInstall else {
+            cleanupTask.cancel()
+            Task { await provider.cancel(sessionID: preparation.sessionID) }
+            return
+        }
+
+        Task { [weak self] in
+            let result = await cleanupTask.value
+            DispatchQueue.main.async { [weak self] in
+                self?.completeSmartCleanup(
+                    result,
+                    rawTranscript: rawTranscript,
+                    fallback: fallback,
+                    postProcessor: postProcessor,
+                    token: token,
+                    sessionID: preparation.sessionID,
+                    trace: trace,
+                    target: target
+                )
+            }
+        }
+    }
+
+    private func completeSmartCleanup(
+        _ result: SmartCleanupResult,
+        rawTranscript: String,
+        fallback: ProcessedTranscript,
+        postProcessor: TranscriptPostProcessor,
+        token: UUID,
+        sessionID: UUID,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        logSmartCleanupResult(result)
+
+        let isCurrent = stateLock.withLock {
+            guard case let .transcribing(current, _, _, _) = state,
+                  current == token,
+                  !isShuttingDown,
+                  activeSmartCleanupSession?.id == sessionID else {
+                return false
+            }
+            return true
+        }
+        guard isCurrent else { return }
+
+        let transcript: ProcessedTranscript
+        switch result {
+        case .success(let response):
+            if let processed = processedTranscript(response.text, using: postProcessor) {
+                transcript = ProcessedTranscript(
+                    rawText: rawTranscript,
+                    finalText: processed.finalText
+                )
+            } else {
+                transcript = fallback
+            }
+        case .failure:
+            transcript = fallback
+        }
+
+        settleAcceptedTranscript(transcript, token: token, trace: trace, target: target)
+    }
+
+    private func logSmartCleanupResult(_ result: SmartCleanupResult) {
+        let outcome: SmartCleanupLogOutcome
+        switch result {
+        case .success:
+            outcome = .success
+        case .failure(let failure):
+            switch failure.reason {
+            case .unavailable:
+                outcome = .unavailable
+            case .invalidRequest:
+                outcome = .invalidRequest
+            case .cancelled:
+                outcome = .cancelled
+            case .timedOut:
+                outcome = .timedOut
+            case .generationFailed:
+                outcome = .generationFailed
+            case .rejectedOutput:
+                outcome = .rejectedOutput
+            }
+        }
+        let elapsedMilliseconds = Int((result.elapsed * 1_000).rounded())
+        logger.info(
+            "Smart cleanup outcome=\(outcome.rawValue, privacy: .public) elapsed_ms=\(elapsedMilliseconds)"
         )
+    }
+
+    private func processedTranscript(
+        _ text: String,
+        using postProcessor: TranscriptPostProcessor
+    ) -> ProcessedTranscript? {
+        let processedTranscript = postProcessor.process(text)
+        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalText.isEmpty else { return nil }
+        return ProcessedTranscript(rawText: processedTranscript.rawText, finalText: finalText)
+    }
+
+    private func settleNoSpeech(token: UUID, trace: TranscriptionTrace) {
+        guard case .eligible = finishTranscription(token: token) else { return }
+        recordTerminal(trace: trace, outcome: .noSpeech)
+        feedback.notify(event: .error("No speech detected"))
+    }
+
+    private func settleAcceptedTranscript(
+        _ transcript: ProcessedTranscript,
+        token: UUID,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
+        guard case .eligible = finishTranscription(token: token) else { return }
+        persistAndDeliverTranscript(transcript, trace: trace, target: target)
+    }
+
+    private func persistAndDeliverTranscript(
+        _ settledTranscript: ProcessedTranscript,
+        trace: TranscriptionTrace,
+        target: TranscriptDeliveryTarget
+    ) {
         let record = TranscriptRecord(
             id: trace.id,
             rawText: settledTranscript.rawText,
@@ -1371,24 +1818,31 @@ final class AppCoordinator: @unchecked Sendable {
     /// it settles; only then does the app become idle.
     @discardableResult
     private func finishTranscription(token: UUID) -> TranscriptionSettlement {
-        let settlement = stateLock.withLock { () -> TranscriptionSettlement in
+        let completion = stateLock.withLock { () -> (
+            settlement: TranscriptionSettlement,
+            cleanupSession: SmartCleanupSession?
+        ) in
             guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
                   current == token else {
-                return .stale
+                return (.stale, nil)
             }
 
             state = .idle
             activeTranscriptionTrace = nil
             activeReplayLease = nil
-            if didTimeOut { return .timedOut }
-            if didCancel { return .cancelled }
-            return .eligible
+            activeRecordingSmartCleanupMode = nil
+            let cleanupSession = activeSmartCleanupSession
+            activeSmartCleanupSession = nil
+            if didTimeOut { return (.timedOut, cleanupSession) }
+            if didCancel { return (.cancelled, cleanupSession) }
+            return (.eligible, cleanupSession)
         }
 
-        if settlement != .stale {
+        if completion.settlement != .stale {
+            cancelSmartCleanupSession(completion.cleanupSession)
             transitionRecordingFeedback(to: .hidden)
         }
-        return settlement
+        return completion.settlement
     }
 
     private func transitionRecordingFeedback(to transition: RecordingFeedbackTransition) {
@@ -1448,6 +1902,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard let cancellation, cancellation.shouldNotify else { return }
 
+        cancelActiveSmartCleanupSession()
         transitionRecordingFeedback(to: .hidden)
         let transcriber = stateLock.withLock { self.transcriber }
         transcriber.cancel(runID: cancellation.runID)

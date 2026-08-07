@@ -1,0 +1,62 @@
+[
+  {
+    "id": "email-follow-up",
+    "appName": "Mail",
+    "bundleIdentifier": "com.apple.mail",
+    "windowTitle": "Invoice follow-up",
+    "selectedText": null,
+    "textBeforeCaret": null,
+    "transcript": "Hi Sarah comma um I wanted to follow up on invoice 4821 because the payment is due Friday period Please let me know if you need anything else period",
+    "requiredTerms": ["Sarah", "4821", "Friday"]
+  },
+  {
+    "id": "work-chat-deploy",
+    "appName": "Slack",
+    "bundleIdentifier": "com.tinyspeck.slackmacgap",
+    "windowTitle": "release-team",
+    "selectedText": null,
+    "textBeforeCaret": "The release is ready.",
+    "transcript": "the deploy is done comma and I think we should watch the error rate for thirty minutes",
+    "requiredTerms": ["deploy", "error rate", "thirty minutes"]
+  },
+  {
+    "id": "casual-chat-plan",
+    "appName": "Messages",
+    "bundleIdentifier": "com.apple.MobileSMS",
+    "windowTitle": "Alex",
+    "selectedText": null,
+    "textBeforeCaret": null,
+    "transcript": "hey are you free around seven question mark we could meet at Bar Luna",
+    "requiredTerms": ["seven", "Bar Luna"]
+  },
+  {
+    "id": "document-list",
+    "appName": "Obsidian",
+    "bundleIdentifier": "md.obsidian",
+    "windowTitle": "Launch plan.md",
+    "selectedText": null,
+    "textBeforeCaret": "Launch checklist\n",
+    "transcript": "I want to cover three things colon first verify the backup comma second deploy version 2.4.1 comma and third check the customer dashboard",
+    "requiredTerms": ["backup", "2.4.1", "customer dashboard"]
+  },
+  {
+    "id": "terminal-command",
+    "appName": "Terminal",
+    "bundleIdentifier": "com.apple.Terminal",
+    "windowTitle": "zsh",
+    "selectedText": null,
+    "textBeforeCaret": null,
+    "transcript": "run git push dash dash force with lease and then inspect slash tmp slash release dot json",
+    "requiredTerms": ["git", "force", "/tmp", "release", "json"]
+  },
+  {
+    "id": "neutral-correction",
+    "appName": "TextEdit",
+    "bundleIdentifier": "com.apple.TextEdit",
+    "windowTitle": "Untitled",
+    "selectedText": "Project Wisp",
+    "textBeforeCaret": "I think we should",
+    "transcript": "definitely ship Project Wisp tomorrow comma but not before the final review",
+    "requiredTerms": ["Project Wisp", "tomorrow", "final review"]
+  }
+]

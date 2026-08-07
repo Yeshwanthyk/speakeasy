@@ -45,6 +45,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         selectASRModel: { [weak coordinator] kind in
                             coordinator?.switchASRModel(to: kind)
                         },
+                        currentSmartCleanupMode: { [weak coordinator] in
+                            coordinator?.selectedSmartCleanupMode() ?? .smart
+                        },
+                        selectSmartCleanupMode: { [weak coordinator] mode in
+                            coordinator?.setSmartCleanupMode(mode)
+                        },
+                        smartCleanupAvailability: { [weak coordinator] in
+                            guard let coordinator else {
+                                return .unavailable(.frameworkUnavailable)
+                            }
+                            return await coordinator.smartCleanupAvailability()
+                        },
                         copyLastTranscript: { [weak coordinator] in
                             _ = coordinator?.copyLastTranscript()
                         },

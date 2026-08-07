@@ -344,6 +344,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let saveCorrections: CorrectionEditorModel.Saver
     private let currentASRModelKind: () -> ASRModelKind
     private let selectASRModel: (ASRModelKind) -> Void
+    private let currentSmartCleanupMode: () -> SmartCleanupMode
+    private let selectSmartCleanupMode: (SmartCleanupMode) -> Void
+    private let smartCleanupAvailability: () async -> SmartCleanupAvailability
     private let currentInvocationMode: () -> DictationInvocationMode
     private let selectInvocationMode: (DictationInvocationMode) -> Void
     private let currentDictationShortcut: () -> DictationShortcut
@@ -366,6 +369,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
     private var feedbackGeneration = 0
+    private var smartCleanupAvailabilityRefreshGeneration = 0
+    private var smartCleanupAvailabilityStatus: SmartCleanupAvailability?
+    private var isMenuOpen = false
     private var levelTimer: Timer?
     private weak var levelItem: NSMenuItem?
     private var correctionEditorController: CorrectionEditorWindowController?
@@ -377,6 +383,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         pasteTranscript: ((String) -> Void)? = nil,
         currentASRModelKind: @escaping () -> ASRModelKind = { .parakeet110M },
         selectASRModel: @escaping (ASRModelKind) -> Void = { _ in },
+        currentSmartCleanupMode: @escaping () -> SmartCleanupMode = { .smart },
+        selectSmartCleanupMode: @escaping (SmartCleanupMode) -> Void = { _ in },
+        smartCleanupAvailability: @escaping () async -> SmartCleanupAvailability = { .available },
         copyLastTranscript: @escaping () -> Void = {},
         pasteLastTranscript: @escaping () -> Void = {},
         loadCorrections: @escaping CorrectionEditorModel.Loader = { [] },
@@ -413,6 +422,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.saveCorrections = saveCorrections
         self.currentASRModelKind = currentASRModelKind
         self.selectASRModel = selectASRModel
+        self.currentSmartCleanupMode = currentSmartCleanupMode
+        self.selectSmartCleanupMode = selectSmartCleanupMode
+        self.smartCleanupAvailability = smartCleanupAvailability
         self.currentInvocationMode = currentInvocationMode
         self.selectInvocationMode = selectInvocationMode
         self.currentDictationShortcut = currentDictationShortcut
@@ -477,6 +489,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
+        isMenuOpen = true
+        refreshSmartCleanupAvailability()
         levelTimer?.invalidate()
         levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -487,6 +501,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
+        isMenuOpen = false
         levelTimer?.invalidate()
         levelTimer = nil
         levelItem = nil
@@ -579,6 +594,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         addShortcutControls(to: menu)
         addMicrophoneControls(to: menu)
         addModelControls(to: menu)
+        addSmartCleanupControls(to: menu)
         addCorrectionControls(to: menu)
         addDiagnostics(to: menu)
 
@@ -808,6 +824,46 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(modelItem)
     }
 
+    private func addSmartCleanupControls(to menu: NSMenu) {
+        let selectedMode = currentSmartCleanupMode()
+        let cleanupItem = NSMenuItem(
+            title: "Text Cleanup — \(Self.shortName(for: selectedMode))",
+            action: nil,
+            keyEquivalent: ""
+        )
+        cleanupItem.image = Self.symbol(
+            "text.badge.sparkles",
+            accessibilityDescription: "Text cleanup"
+        )
+
+        let cleanupMenu = NSMenu(title: "Text Cleanup")
+        cleanupMenu.autoenablesItems = false
+        for mode in SmartCleanupMode.allCases {
+            let title = Self.menuTitle(for: mode)
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(selectSmartCleanupModeItem(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = mode == selectedMode ? .on : .off
+            item.isEnabled = mode != .smart || smartCleanupAvailabilityStatus == .available
+            item.toolTip = Self.explanation(for: mode)
+            item.setAccessibilityLabel(title)
+            cleanupMenu.addItem(item)
+        }
+
+        let statusTitle = Self.smartCleanupAvailabilityTitle(smartCleanupAvailabilityStatus)
+        let statusItem = NSMenuItem(title: statusTitle, action: nil, keyEquivalent: "")
+        statusItem.isEnabled = false
+        statusItem.setAccessibilityLabel(statusTitle)
+        cleanupMenu.addItem(statusItem)
+
+        cleanupItem.submenu = cleanupMenu
+        menu.addItem(cleanupItem)
+    }
+
     private func addCorrectionControls(to menu: NSMenu) {
         menu.addItem(
             actionItem(
@@ -955,6 +1011,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         selectASRModel(kind)
     }
 
+    @objc private func selectSmartCleanupModeItem(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String,
+              let mode = SmartCleanupMode(rawValue: value) else {
+            return
+        }
+
+        selectSmartCleanupMode(mode)
+        if mode == .smart {
+            refreshSmartCleanupAvailability()
+        }
+    }
+
     @objc private func changeShortcutAction() {
         guard canChangeDictationShortcut() else { return }
 
@@ -1053,6 +1121,53 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    private static func shortName(for mode: SmartCleanupMode) -> String {
+        switch mode {
+        case .exact:
+            return "Exact"
+        case .basic:
+            return "Basic"
+        case .smart:
+            return "Smart"
+        }
+    }
+
+    private static func menuTitle(for mode: SmartCleanupMode) -> String {
+        "\(shortName(for: mode)) — \(explanation(for: mode))"
+    }
+
+    private static func explanation(for mode: SmartCleanupMode) -> String {
+        switch mode {
+        case .exact:
+            return "Raw recognizer text"
+        case .basic:
+            return "Instant local commands and corrections"
+        case .smart:
+            return "Apple Intelligence with destination app context; falls back to Basic"
+        }
+    }
+
+    private static func smartCleanupAvailabilityTitle(
+        _ availability: SmartCleanupAvailability?
+    ) -> String {
+        switch availability {
+        case nil:
+            return "Checking Smart availability…"
+        case .available:
+            return "Smart is available"
+        case .unavailable(.unsupportedOperatingSystem):
+            return "Smart needs macOS 26"
+        case .unavailable(.deviceNotEligible):
+            return "Smart is unavailable on this device"
+        case .unavailable(.appleIntelligenceDisabled):
+            return "Turn on Apple Intelligence to use Smart"
+        case .unavailable(.modelNotReady):
+            return "Apple Intelligence model is not ready yet"
+        case .unavailable(.frameworkUnavailable):
+            return "Apple Intelligence framework is missing"
+        }
+    }
+
     private static func levelTitle(for snapshot: MicrophoneLevelSnapshot) -> String {
         "Microphone Level: \(Int((snapshot.normalizedLevel * 100).rounded()))%"
     }
@@ -1068,6 +1183,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let snapshot = microphoneLevelSnapshot()
         levelItem.title = Self.levelTitle(for: snapshot)
         (levelItem.view as? MicrophoneLevelView)?.update(snapshot: snapshot)
+    }
+
+    private func refreshSmartCleanupAvailability() {
+        smartCleanupAvailabilityRefreshGeneration &+= 1
+        let generation = smartCleanupAvailabilityRefreshGeneration
+        let availabilityProvider = smartCleanupAvailability
+
+        Task { [weak self] in
+            let availability = await availabilityProvider()
+            guard let self,
+                  self.smartCleanupAvailabilityRefreshGeneration == generation else {
+                return
+            }
+            self.smartCleanupAvailabilityStatus = availability
+            if self.isMenuOpen {
+                self.menuNeedsUpdate(self.menu)
+            }
+        }
     }
 }
 
