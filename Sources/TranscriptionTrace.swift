@@ -13,6 +13,7 @@ struct TranscriptionTrace: Sendable {
         case captureInterrupted
         case transcriptionFailed
         case timedOut
+        case cancelled
         case warmupBlocked
         case accessibilityDenied
     }

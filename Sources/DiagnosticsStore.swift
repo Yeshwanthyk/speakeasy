@@ -12,6 +12,7 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
     var captureInterrupted = 0
     var transcriptionFailed = 0
     var timedOut = 0
+    var cancelled = 0
     var warmupBlocked = 0
     var accessibilityDenied = 0
 
@@ -27,6 +28,7 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
         case .captureInterrupted: captureInterrupted += 1
         case .transcriptionFailed: transcriptionFailed += 1
         case .timedOut: timedOut += 1
+        case .cancelled: cancelled += 1
         case .warmupBlocked: warmupBlocked += 1
         case .accessibilityDenied: accessibilityDenied += 1
         }
@@ -43,6 +45,7 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
             + captureInterrupted
             + transcriptionFailed
             + timedOut
+            + cancelled
             + warmupBlocked
             + accessibilityDenied
     }

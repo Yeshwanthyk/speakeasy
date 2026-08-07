@@ -178,6 +178,49 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.lifetime.outcomes.timedOut, 1)
         XCTAssertEqual(snapshot.lifetime.outcomes.eventsPosted, 0)
         XCTAssertFalse(diagnostics.report().contains("late private text"))
+        XCTAssertEqual(transcriber.cancelledRunIDs, [1])
+    }
+
+    func testUserCancellationRequestsNativeCancelAndSuppressesLateCompletion() {
+        let diagnostics = DiagnosticsStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-cancel-stats-\(UUID().uuidString)")
+                .appendingPathComponent("stats.json")
+        )
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let transcriber = FakeTranscriber(result: .success("late private text"), delay: 0.2)
+        let paster = PasterStub()
+        let feedback = FeedbackStub()
+        let cancelled = expectation(description: "cancelled")
+        feedback.onError = { message in
+            if message == "Transcription cancelled" { cancelled.fulfill() }
+        }
+
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            feedback: feedback,
+            timeout: 1.0,
+            diagnosticsStore: diagnostics
+        )
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { transcriber.callCount == 1 })
+
+        coordinator.cancelTranscription()
+        wait(for: [cancelled], timeout: 1.0)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 1)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+
+        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        XCTAssertEqual(transcriber.cancelledRunIDs, [1])
+        XCTAssertEqual(diagnostics.snapshot().lifetime.outcomes.cancelled, 1)
+
+        coordinator.toggleRecording()
+        XCTAssertEqual(audio.beginCount, 2)
     }
 
     func testEmptySamplesDoNotTriggerTranscription() {
@@ -1448,10 +1491,14 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     private var _callCount = 0
     private var _warmUpCount = 0
     private var _transcribeUsedExpectedQueue: Bool?
+    private var _runIDs: [UInt64] = []
+    private var _cancelledRunIDs: [UInt64] = []
 
     var callCount: Int { counterLock.withLock { _callCount } }
     var warmUpCount: Int { counterLock.withLock { _warmUpCount } }
     var transcribeUsedExpectedQueue: Bool? { counterLock.withLock { _transcribeUsedExpectedQueue } }
+    var runIDs: [UInt64] { counterLock.withLock { _runIDs } }
+    var cancelledRunIDs: [UInt64] { counterLock.withLock { _cancelledRunIDs } }
 
     init(
         result: Result<String, Error>,
@@ -1466,8 +1513,13 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
+        try transcribe(samples: samples, runID: 0)
+    }
+
+    func transcribe(samples: ContiguousArray<Float>, runID: UInt64) throws -> String {
         counterLock.withLock {
             _callCount += 1
+            _runIDs.append(runID)
             if let expectedQueue {
                 _transcribeUsedExpectedQueue = DispatchQueue.getSpecific(key: expectedQueue.key) == expectedQueue.value
             }
@@ -1477,6 +1529,10 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
         case .success(let text): return text
         case .failure(let error): throw error
         }
+    }
+
+    func cancel(runID: UInt64) {
+        counterLock.withLock { _cancelledRunIDs.append(runID) }
     }
 
     func warmUp() async throws {

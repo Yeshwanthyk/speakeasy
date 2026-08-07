@@ -61,7 +61,7 @@ final class AppCoordinator: @unchecked Sendable {
         case idle
         case startingCapture
         case recording
-        case transcribing(UUID, didTimeOut: Bool)
+        case transcribing(UUID, runID: UInt64, didTimeOut: Bool, didCancel: Bool)
     }
 
     /// Readiness of the transcription model.
@@ -85,7 +85,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     private enum Transition {
         case start(TranscriptionTrace, TranscriptDeliveryTarget)
-        case stop(UUID, TranscriptionTrace, TranscriptDeliveryTarget)
+        case stop(UUID, UInt64, TranscriptionTrace, TranscriptDeliveryTarget)
         case blocked(TranscriptionTrace, String)
         case ignore(String?)
     }
@@ -124,11 +124,15 @@ final class AppCoordinator: @unchecked Sendable {
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
     private let stateLock = UnfairLock()
     private var state: State = .idle
+    private var nextTranscriptionID: UInt64 = 0
     private var warmupState: WarmupState = .pending
     private var activeModelSwitchID: UUID?
     private var suppressRecoverySuccessStatus = false
     /// Partial trace built during a recording session; nil when idle or transcribing.
     private var activeTrace: TranscriptionTrace?
+    /// Trace retained while native work is settling so user cancellation can
+    /// record the terminal outcome before the completion callback arrives.
+    private var activeTranscriptionTrace: TranscriptionTrace?
     /// Target captured before automatic recording starts. Recovery actions do
     /// not use this value; they resolve a fresh external target.
     private var activeDeliveryTarget: TranscriptDeliveryTarget?
@@ -397,13 +401,19 @@ final class AppCoordinator: @unchecked Sendable {
                 return .ignore("Microphone reconnecting, please wait")
             case .recording:
                 let token = UUID()
-                state = .transcribing(token, didTimeOut: false)
+                nextTranscriptionID &+= 1
+                if nextTranscriptionID == 0 {
+                    nextTranscriptionID = 1
+                }
+                let runID = nextTranscriptionID
+                state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
                 let target = activeDeliveryTarget ?? .unavailable
                 activeTrace = nil
                 activeDeliveryTarget = nil
-                return .stop(token, trace, target)
+                activeTranscriptionTrace = trace
+                return .stop(token, runID, trace, target)
             case .transcribing:
                 return .ignore(nil)
             }
@@ -442,11 +452,11 @@ final class AppCoordinator: @unchecked Sendable {
                 feedback.notify(event: .error("Microphone reconnecting, try again shortly"))
             }
 
-        case .stop(let token, let trace, let target):
+        case .stop(let token, let runID, let trace, let target):
             Task { @MainActor [flash] in
                 flash.hide(completion: nil)
             }
-            stopAndTranscribe(token: token, trace: trace, target: target)
+            stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
 
         case .blocked(let trace, let message):
             recordTerminal(trace: trace, outcome: .warmupBlocked)
@@ -460,6 +470,29 @@ final class AppCoordinator: @unchecked Sendable {
             logger.info("Ignoring hotkey: \(message, privacy: .public)")
             feedback.notify(event: .error(message))
         }
+    }
+
+    /// Request cancellation of the active native transcription. The
+    /// coordinator remains transcribing until the native call settles, so a
+    /// late completion cannot overlap a later session.
+    func cancelTranscription() {
+        let cancellation = stateLock.withLock { () -> (runID: UInt64, trace: TranscriptionTrace)? in
+            guard case let .transcribing(token, runID, didTimeOut, didCancel) = state,
+                  !didTimeOut,
+                  !didCancel,
+                  let trace = activeTranscriptionTrace else {
+                return nil
+            }
+
+            state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: true)
+            return (runID, trace)
+        }
+
+        guard let cancellation else { return }
+        let transcriber = stateLock.withLock { self.transcriber }
+        transcriber.cancel(runID: cancellation.runID)
+        recordTerminal(trace: cancellation.trace, outcome: .cancelled)
+        feedback.notify(event: .error("Transcription cancelled"))
     }
 
     private func handleAudioCaptureEvent(_ event: AudioCaptureEvent) {
@@ -540,6 +573,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     private func stopAndTranscribe(
         token: UUID,
+        runID: UInt64,
         trace: TranscriptionTrace,
         target: TranscriptDeliveryTarget
     ) {
@@ -556,6 +590,7 @@ final class AppCoordinator: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 self?.processCaptureResult(
                     token: token,
+                    runID: runID,
                     trace: trace,
                     captureResult: captureResult,
                     rms: rms,
@@ -567,6 +602,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     private func processCaptureResult(
         token: UUID,
+        runID: UInt64,
         trace: TranscriptionTrace,
         captureResult: AudioCaptureResult,
         rms: Float,
@@ -581,6 +617,22 @@ final class AppCoordinator: @unchecked Sendable {
             prependedSampleCount: captureResult.prependedSampleCount,
             graceDurationMs: captureResult.graceDurationMs
         )
+        stateLock.withLock { activeTranscriptionTrace = trace }
+
+        guard stateLock.withLock({
+            guard case let .transcribing(current, currentRunID, didTimeOut, didCancel) = state,
+                  current == token,
+                  currentRunID == runID else {
+                return false
+            }
+            if didCancel || didTimeOut {
+                return false
+            }
+            return true
+        }) else {
+            _ = finishTranscription(token: token)
+            return
+        }
 
         guard !captureResult.wasInterrupted else {
             if finishTranscription(token: token) {
@@ -634,7 +686,7 @@ final class AppCoordinator: @unchecked Sendable {
             let result: Result<String, Error>
             do {
                 let transcriber = self.stateLock.withLock { self.transcriber }
-                let text = try transcriber.transcribe(samples: samples)
+                let text = try transcriber.transcribe(samples: samples, runID: runID)
                 result = .success(text)
             } catch {
                 result = .failure(error)
@@ -876,35 +928,39 @@ final class AppCoordinator: @unchecked Sendable {
     }
 
     /// Returns whether the completed result is still eligible for delivery.
-    /// A timed-out native inference cannot be cancelled, so it keeps ownership
-    /// of the serial worker until it returns; only then does the app become idle.
+    /// A cancelled native inference keeps ownership of the serial worker until
+    /// it settles; only then does the app become idle.
     @discardableResult
     private func finishTranscription(token: UUID) -> Bool {
         stateLock.withLock {
-            guard case let .transcribing(current, didTimeOut) = state,
+            guard case let .transcribing(current, _, didTimeOut, didCancel) = state,
                   current == token else {
                 return false
             }
 
             state = .idle
-            return !didTimeOut
+            activeTranscriptionTrace = nil
+            return !didTimeOut && !didCancel
         }
     }
 
     private func handleTranscriptionTimeout(token: UUID, timeout: TimeInterval, trace: TranscriptionTrace) {
-        let shouldNotify = stateLock.withLock { () -> Bool in
-            guard case let .transcribing(current, didTimeOut) = state,
+        let cancellation = stateLock.withLock { () -> (runID: UInt64, shouldNotify: Bool)? in
+            guard case let .transcribing(current, runID, didTimeOut, didCancel) = state,
                   current == token,
-                  !didTimeOut else {
-                return false
+                  !didTimeOut,
+                  !didCancel else {
+                return nil
             }
 
-            state = .transcribing(current, didTimeOut: true)
-            return true
+            state = .transcribing(current, runID: runID, didTimeOut: true, didCancel: false)
+            return (runID, true)
         }
 
-        guard shouldNotify else { return }
+        guard let cancellation, cancellation.shouldNotify else { return }
 
+        let transcriber = stateLock.withLock { self.transcriber }
+        transcriber.cancel(runID: cancellation.runID)
         recordTerminal(trace: trace, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))

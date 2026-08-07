@@ -9,13 +9,26 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use transcribe_cpp::{Model, RunOptions, Session};
+use transcribe_cpp::{CancelToken, Model, RunOptions, Session};
+
+pub const ASR_STATUS_OK: i32 = 0;
+pub const ASR_STATUS_ERROR: i32 = 1;
+pub const ASR_STATUS_CANCELLED: i32 = 2;
+
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsrStatus {
+    Ok = ASR_STATUS_OK,
+    Error = ASR_STATUS_ERROR,
+    Cancelled = ASR_STATUS_CANCELLED,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsrResult {
     pub text: *mut c_char,
     pub error: *mut c_char,
+    pub status: AsrStatus,
 }
 
 #[repr(C)]
@@ -27,6 +40,48 @@ pub struct AsrCreateResult {
 
 pub struct AsrHandle {
     session: Mutex<Session>,
+    cancellation: Mutex<CancellationState>,
+}
+
+/// Cancellation state is separate from `Session`. The cancel ABI may run
+/// concurrently with native inference and must only touch the active run's
+/// atomic flag, never lock or mutate the session.
+#[derive(Default)]
+struct CancellationState {
+    active: Option<ActiveRun>,
+}
+
+struct ActiveRun {
+    id: u64,
+    token: CancelToken,
+}
+
+impl CancellationState {
+    fn begin(&mut self, id: u64) -> CancelToken {
+        let token = CancelToken::new();
+        self.active = Some(ActiveRun {
+            id,
+            token: token.clone(),
+        });
+        token
+    }
+
+    fn cancel(&self, id: u64) -> bool {
+        let Some(active) = self.active.as_ref() else {
+            return false;
+        };
+        if active.id != id {
+            return false;
+        }
+        active.token.cancel();
+        true
+    }
+
+    fn finish(&mut self, id: u64) {
+        if self.active.as_ref().is_some_and(|active| active.id == id) {
+            self.active = None;
+        }
+    }
 }
 
 static BACKEND_INIT: OnceLock<Result<(), String>> = OnceLock::new();
@@ -52,6 +107,7 @@ fn result_ok(text: String) -> AsrResult {
     AsrResult {
         text: to_c_string(text.trim()),
         error: std::ptr::null_mut(),
+        status: AsrStatus::Ok,
     }
 }
 
@@ -59,6 +115,15 @@ fn result_err(message: &str) -> AsrResult {
     AsrResult {
         text: std::ptr::null_mut(),
         error: to_c_string(message),
+        status: AsrStatus::Error,
+    }
+}
+
+fn result_cancelled() -> AsrResult {
+    AsrResult {
+        text: std::ptr::null_mut(),
+        error: std::ptr::null_mut(),
+        status: AsrStatus::Cancelled,
     }
 }
 
@@ -114,6 +179,7 @@ pub unsafe extern "C" fn asr_create(model_path: *const c_char) -> AsrCreateResul
 
         let handle = Box::new(AsrHandle {
             session: Mutex::new(session),
+            cancellation: Mutex::new(CancellationState::default()),
         });
         create_ok(Box::into_raw(handle))
     }))
@@ -135,6 +201,32 @@ pub unsafe extern "C" fn asr_destroy(handle: *mut AsrHandle) {
     }));
 }
 
+/// Request cooperative cancellation for one native run.
+///
+/// This only locks the handle's cancellation control plane and flips the
+/// active run's atomic flag. It does not lock or mutate transcribe.cpp's
+/// `Session`. A request for any other run ID is ignored, preventing a late
+/// cancel from affecting a later run on the same handle.
+///
+/// # Safety
+///
+/// `handle` must be null or a live pointer returned by `asr_create`.
+#[no_mangle]
+pub unsafe extern "C" fn asr_cancel(handle: *mut AsrHandle, run_id: u64) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        if handle.is_null() {
+            return false;
+        }
+        // SAFETY: guaranteed by the caller contract and checked for null above.
+        let handle = unsafe { &*handle };
+        match handle.cancellation.lock() {
+            Ok(cancellation) => cancellation.cancel(run_id),
+            Err(_) => false,
+        }
+    }))
+    .unwrap_or(false)
+}
+
 /// Transcribe borrowed 16 kHz mono float32 PCM.
 ///
 /// # Safety
@@ -146,6 +238,7 @@ pub unsafe extern "C" fn asr_transcribe(
     handle: *mut AsrHandle,
     samples: *const f32,
     len: usize,
+    run_id: u64,
 ) -> AsrResult {
     catch_unwind(AssertUnwindSafe(|| {
         if handle.is_null() {
@@ -171,10 +264,29 @@ pub unsafe extern "C" fn asr_transcribe(
             }
         };
 
-        match session.run(samples, &RunOptions::default()) {
+        // Publish the token before installing it on the session. If a cancel
+        // arrives in that window it flips the token first, and the session
+        // observes the already-cancelled token when it starts.
+        let token = match handle.cancellation.lock() {
+            Ok(mut cancellation) => cancellation.begin(run_id),
+            Err(_) => {
+                return result_err(
+                    "ASR cancellation state is poisoned; destroy and recreate the handle",
+                );
+            }
+        };
+        session.set_cancel_token(&token);
+
+        let result = match session.run(samples, &RunOptions::default()) {
             Ok(transcript) => result_ok(transcript.text),
+            Err(_error) if session.was_aborted() => result_cancelled(),
             Err(error) => result_err(&format!("transcribe.cpp transcription failed: {error}")),
+        };
+        session.clear_cancel_token();
+        if let Ok(mut cancellation) = handle.cancellation.lock() {
+            cancellation.finish(run_id);
         }
+        result
     }))
     .unwrap_or_else(|_| result_err("Rust panicked during asr_transcribe"))
 }
@@ -236,6 +348,7 @@ mod tests {
             asr_result_free(AsrResult {
                 text: std::ptr::null_mut(),
                 error: std::ptr::null_mut(),
+                status: AsrStatus::Ok,
             });
         }
     }
@@ -267,10 +380,39 @@ mod tests {
 
     #[test]
     fn transcribe_rejects_null_handle() {
-        let result = unsafe { asr_transcribe(std::ptr::null_mut(), std::ptr::null(), 0) };
+        let result = unsafe { asr_transcribe(std::ptr::null_mut(), std::ptr::null(), 0, 1) };
         assert!(result.text.is_null());
         assert!(!result.error.is_null());
+        assert_eq!(result.status, AsrStatus::Error);
         unsafe { asr_result_free(result) };
+    }
+
+    #[test]
+    fn cancelled_result_has_typed_status_without_partial_text() {
+        let result = result_cancelled();
+        assert_eq!(result.status, AsrStatus::Cancelled);
+        assert!(result.text.is_null());
+        assert!(result.error.is_null());
+    }
+
+    #[test]
+    fn cancellation_state_ignores_stale_run_ids() {
+        let mut state = CancellationState::default();
+        let first = state.begin(7);
+        assert!(state.cancel(7));
+        assert!(first.is_cancelled());
+        state.finish(7);
+
+        let second = state.begin(8);
+        assert!(!state.cancel(7));
+        assert!(!second.is_cancelled());
+        assert!(state.cancel(8));
+        assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn null_cancel_is_ignored() {
+        assert!(!unsafe { asr_cancel(std::ptr::null_mut(), 1) });
     }
 
     #[test]
@@ -296,7 +438,7 @@ mod tests {
         unsafe { asr_create_result_free(create) };
 
         let silence = vec![0.0_f32; 16_000];
-        let result = unsafe { asr_transcribe(create.handle, silence.as_ptr(), silence.len()) };
+        let result = unsafe { asr_transcribe(create.handle, silence.as_ptr(), silence.len(), 1) };
         if !result.error.is_null() {
             let message = unsafe { CStr::from_ptr(result.error) }
                 .to_string_lossy()

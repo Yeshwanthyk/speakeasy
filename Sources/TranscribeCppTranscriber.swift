@@ -4,6 +4,7 @@ import os
 private struct AsrResult {
     var text: UnsafeMutablePointer<CChar>?
     var error: UnsafeMutablePointer<CChar>?
+    var status: Int32
 }
 
 private struct AsrCreateResult {
@@ -24,15 +25,22 @@ private func asr_destroy(_ handle: UnsafeMutableRawPointer?)
 private func asr_transcribe(
     _ handle: UnsafeMutableRawPointer?,
     _ samples: UnsafePointer<Float>?,
-    _ length: Int
+    _ length: Int,
+    _ runID: UInt64
 ) -> AsrResult
 
 @_silgen_name("asr_result_free")
 private func asr_result_free(_ result: AsrResult)
 
+@_silgen_name("asr_cancel")
+private func asr_cancel(_ handle: UnsafeMutableRawPointer?, _ runID: UInt64) -> Bool
+
+private let asrStatusCancelled: Int32 = 2
+
 enum TranscribeCppError: Error {
     case modelLoadFailed(String)
     case transcriptionFailed(String)
+    case cancelled
     case emptyResult
 }
 
@@ -71,14 +79,21 @@ final class TranscribeCppTranscriber {
     }
 
     func transcribe(samples: ContiguousArray<Float>) throws -> String {
+        try transcribe(samples: samples, runID: 0)
+    }
+
+    func transcribe(samples: ContiguousArray<Float>, runID: UInt64) throws -> String {
         guard !samples.isEmpty else {
             return ""
         }
 
         return try samples.withUnsafeBufferPointer { buffer in
-            let result = asr_transcribe(handle, buffer.baseAddress, buffer.count)
+            let result = asr_transcribe(handle, buffer.baseAddress, buffer.count, runID)
             defer { asr_result_free(result) }
 
+            if result.status == asrStatusCancelled {
+                throw TranscribeCppError.cancelled
+            }
             if let errorPointer = result.error {
                 throw TranscribeCppError.transcriptionFailed(String(cString: errorPointer))
             }
@@ -87,6 +102,10 @@ final class TranscribeCppTranscriber {
             }
             return String(cString: textPointer)
         }
+    }
+
+    func cancel(runID: UInt64) {
+        _ = asr_cancel(handle, runID)
     }
 
     func warmUp() async throws {
