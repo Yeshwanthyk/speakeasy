@@ -206,6 +206,18 @@ struct PhoneticCorrector: Sendable {
         let words = tokens.filter { !$0.normalized.isEmpty && $0.hasLetterOrNumber }
         guard words.count > 0 else { return text }
 
+        // Normalization-driven skeleton computation dominates this pass;
+        // compute each unique word's skeleton exactly once.
+        var skeletonCache: [String: String] = [:]
+        func cachedSkeleton(_ normalized: String) -> String {
+            if let cached = skeletonCache[normalized] {
+                return cached
+            }
+            let computed = Self.phoneticSkeleton(normalized)
+            skeletonCache[normalized] = computed
+            return computed
+        }
+
         var candidates: [Candidate] = []
         for windowSize in stride(from: maxWordWindowSize, through: 1, by: -1) {
             guard words.count >= windowSize else { continue }
@@ -217,10 +229,15 @@ struct PhoneticCorrector: Sendable {
                         words: words,
                         start: start,
                         windowSize: windowSize,
+                        skeletonOf: cachedSkeleton,
                         into: &candidates
                     )
                 } else {
-                    appendSingleWordCandidates(word: words[start], into: &candidates)
+                    appendSingleWordCandidates(
+                        word: words[start],
+                        skeletonOf: cachedSkeleton,
+                        into: &candidates
+                    )
                 }
             }
         }
@@ -258,12 +275,13 @@ struct PhoneticCorrector: Sendable {
         words: [TranscriptPostProcessor.Token],
         start: Int,
         windowSize: Int,
+        skeletonOf: (String) -> String,
         into candidates: inout [Candidate]
     ) {
         var skeletons: [String] = []
         skeletons.reserveCapacity(windowSize)
         for offset in 0..<windowSize {
-            skeletons.append(Self.phoneticSkeleton(words[start + offset].normalized))
+            skeletons.append(skeletonOf(words[start + offset].normalized))
         }
         let key = skeletons.joined(separator: "\u{1F}")
         guard let entry = windowsBySkeleton[key] else { return }
@@ -277,9 +295,10 @@ struct PhoneticCorrector: Sendable {
 
     private func appendSingleWordCandidates(
         word: TranscriptPostProcessor.Token,
+        skeletonOf: (String) -> String,
         into candidates: inout [Candidate]
     ) {
-        let skeleton = Self.phoneticSkeleton(word.normalized)
+        let skeleton = skeletonOf(word.normalized)
         if !skeleton.isEmpty, let canonical = skeletonsByWord[skeleton] {
             candidates.append(Candidate(
                 range: word.range,
