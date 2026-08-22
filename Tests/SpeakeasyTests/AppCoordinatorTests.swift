@@ -7,10 +7,11 @@ final class AppCoordinatorTests: XCTestCase {
 
     // MARK: - Helpers
 
-    /// Enough loud samples to pass both minActiveSamples and RMS threshold.
-    static let validSamples = ContiguousArray<Float>(repeating: 0.1, count: 8_000)
-    /// Representative quiet speech observed from the built-in microphone.
-    static let quietSpeechSamples = ContiguousArray<Float>(repeating: 0.004, count: 8_000)
+    /// Enough loud samples to pass minActiveSamples and the speech gate.
+    static let validSamples = GatedAudioFixtures.modulatedSpeech(amplitude: 0.1)
+    /// Representative quiet speech observed from the built-in microphone
+    /// (peak amplitude near -48 dBFS) with speech-like burst structure.
+    static let quietSpeechSamples = GatedAudioFixtures.modulatedSpeech(amplitude: 0.004)
     /// Enough samples but too quiet (silence).
     static let silentSamples = ContiguousArray<Float>(repeating: 0.0001, count: 8_000)
     /// Too few active samples.

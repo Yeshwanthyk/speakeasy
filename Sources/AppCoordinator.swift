@@ -120,8 +120,6 @@ final class AppCoordinator: @unchecked Sendable {
     private static let maxTranscriptionTimeout: TimeInterval = 600
     /// Minimum active (non-preroll) samples required. 4800 = 300ms at 16kHz.
     private static let minActiveSamples = 4_800
-    /// Keep this conservative: microphone gain can put valid speech near -48 dBFS.
-    private static let silenceRmsThreshold: Float = 0.002
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private let audioCapture: AudioCapturing
@@ -963,6 +961,11 @@ final class AppCoordinator: @unchecked Sendable {
                 of: captureResult.samples,
                 startingAt: captureResult.prependedSampleCount
             )
+            // Speech gating scans every sample; keep it off the main queue.
+            let speech = SpeechGate.analyze(
+                captureResult.samples,
+                startingAt: captureResult.prependedSampleCount
+            )
             DispatchQueue.main.async { [weak self] in
                 self?.processCaptureResult(
                     token: token,
@@ -970,6 +973,7 @@ final class AppCoordinator: @unchecked Sendable {
                     trace: trace,
                     captureResult: captureResult,
                     rms: rms,
+                    speech: speech,
                     target: target
                 )
             }
@@ -982,6 +986,7 @@ final class AppCoordinator: @unchecked Sendable {
         trace: TranscriptionTrace,
         captureResult: AudioCaptureResult,
         rms: Float,
+        speech: SpeechGateResult,
         target: TranscriptDeliveryTarget
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
@@ -1039,8 +1044,10 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
 
-        guard rms > Self.silenceRmsThreshold else {
-            logger.debug("Audio below silence threshold: RMS \(rms) < \(Self.silenceRmsThreshold)")
+        guard speech.hasSpeech else {
+            logger.debug(
+                "Speech gate rejected audio: rms=\(rms, format: .fixed(precision: 4)) floor=\(speech.noiseFloorRMS, format: .fixed(precision: 4)) voiced=\(speech.voicedFrameCount)/\(speech.analyzedFrameCount) longestRun=\(speech.longestVoicedRun)"
+            )
             feedback.notify(event: .error("No speech detected"))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
