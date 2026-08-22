@@ -1,5 +1,8 @@
 use std::fmt::Write as _;
 
+use std::collections::BTreeMap;
+
+use crate::fixtures::FixtureBucket;
 use crate::metrics::{AggregateMetrics, Comparison};
 
 pub fn markdown(
@@ -128,5 +131,44 @@ mod tests {
 
         assert!(output.contains("**Incomparable.**"));
         assert!(output.contains("fingerprints differ"));
+    }
+}
+
+
+/// Markdown table for the per-bucket length sweep.
+pub fn length_sweep(sweep: &BTreeMap<FixtureBucket, AggregateMetrics>) -> String {
+    if sweep.is_empty() {
+        return String::new();
+    }
+    let mut output = String::new();
+    writeln!(output, "## Length sweep\n").expect("write string");
+    writeln!(
+        output,
+        "| Bucket | Samples | Successful | Wall p50 | Wall p95 | RTF p50 |"
+    )
+    .expect("write string");
+    writeln!(output, "|---|---:|---:|---:|---:|---:|").expect("write string");
+    for (bucket, metrics) in sweep {
+        writeln!(
+            output,
+            "| {} | {} | {} | {} | {} | {} |",
+            bucket_label(*bucket),
+            metrics.samples_total,
+            metrics.samples_ok,
+            format_ms(metrics.wall_p50_ms),
+            format_ms(metrics.wall_p95_ms),
+            format_number(metrics.realtime_factor_p50),
+        )
+        .expect("write string");
+    }
+    output
+}
+
+fn bucket_label(bucket: FixtureBucket) -> &'static str {
+    match bucket {
+        FixtureBucket::Short => "short",
+        FixtureBucket::Medium => "medium",
+        FixtureBucket::Long => "long",
+        FixtureBucket::Control => "control",
     }
 }

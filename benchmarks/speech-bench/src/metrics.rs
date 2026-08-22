@@ -1,9 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::ExecutionMode;
+use crate::fixtures::{Corpus, FixtureBucket};
 use crate::protocol::{Record, RunStart, RunStatus, SampleStatus, PROTOCOL_SCHEMA};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -582,4 +583,122 @@ mod tests {
         assert_eq!(percentile(&mut values, 0.5), Some(3.0));
         assert_eq!(percentile(&mut values, 0.95), Some(5.0));
     }
+
+    #[test]
+    fn bucket_aggregation_groups_by_fixture_bucket() {
+        use crate::fixtures::{Corpus, Fixture, FixtureBucket, FixtureManifest};
+        use crate::protocol::{Record, SampleRecord, SampleStatus};
+
+        fn fixture(id: &str, bucket: FixtureBucket) -> Fixture {
+            Fixture {
+                id: id.to_string(),
+                audio: std::path::PathBuf::from(format!("{id}.wav")),
+                audio_sha256: "0".repeat(64),
+                reference: "reference".to_string(),
+                sample_rate_hz: 16_000,
+                channels: 1,
+                frames: 16_000,
+                duration_ms: 1_000,
+                bucket,
+                locale: "en".to_string(),
+                conditions: vec![],
+                tags: vec![],
+                include_in_wer: true,
+            }
+        }
+
+        fn sample(fixture_id: &str, wall_ms: f64) -> Record {
+            Record::Sample(Box::new(SampleRecord {
+                schema: "s".to_string(),
+                run_id: "run".to_string(),
+                fixture_id: fixture_id.to_string(),
+                repetition: 0,
+                status: SampleStatus::Ok,
+                audio_ms: 1_000.0,
+                wall_ms: Some(wall_ms),
+                realtime_factor: Some(wall_ms / 1_000.0),
+                native: None,
+                stream: None,
+                detected_language: None,
+                actual_timestamp_kind: None,
+                text_sha256: None,
+                score: None,
+                truncated: false,
+                error: None,
+            }))
+        }
+
+        let manifest = FixtureManifest {
+            schema: "s".to_string(),
+            corpus_id: "corpus".to_string(),
+            normalization_version: "v1".to_string(),
+            fixtures: vec![
+                fixture("short-a", FixtureBucket::Short),
+                fixture("long-a", FixtureBucket::Long),
+                fixture("long-b", FixtureBucket::Long),
+                fixture("long-c", FixtureBucket::Long),
+            ],
+        };
+        let fixtures = manifest
+            .fixtures
+            .iter()
+            .map(|definition| crate::fixtures::ValidatedFixture {
+                audio_path: definition.audio.clone(),
+                definition: definition.clone(),
+            })
+            .collect();
+        let corpus = Corpus {
+            manifest: manifest.clone(),
+            manifest_path: std::path::PathBuf::from("manifest.json"),
+            manifest_sha256: String::new(),
+            fixtures,
+        };
+
+        let records = vec![
+            sample("short-a", 100.0),
+            sample("long-a", 900.0),
+            sample("long-b", 1_000.0),
+            sample("long-c", 1_100.0),
+        ];
+        let sweep = aggregate_by_bucket(&records, &corpus);
+
+        assert_eq!(sweep.len(), 2);
+        let short = &sweep[&FixtureBucket::Short];
+        let long = &sweep[&FixtureBucket::Long];
+        assert_eq!(short.wall_p50_ms, Some(100.0));
+        assert_eq!(long.wall_p50_ms, Some(1_000.0));
+        assert_eq!(long.samples_ok, 3);
+    }
+}
+
+
+/// Per-utterance-length aggregation: joins sample records with their
+/// fixture buckets and aggregates each bucket separately, so latency
+/// growth as utterances grow is visible instead of blended into one
+/// corpus-wide number.
+pub fn aggregate_by_bucket(
+    records: &[Record],
+    corpus: &Corpus,
+) -> BTreeMap<FixtureBucket, AggregateMetrics> {
+    let mut bucket_by_fixture: HashMap<&str, FixtureBucket> = HashMap::new();
+    for fixture in &corpus.fixtures {
+        bucket_by_fixture.insert(
+            fixture.definition.id.as_str(),
+            fixture.definition.bucket,
+        );
+    }
+
+    let mut grouped: BTreeMap<FixtureBucket, Vec<Record>> = BTreeMap::new();
+    for record in records {
+        if let Record::Sample(sample) = record {
+            if let Some(bucket) = bucket_by_fixture.get(sample.fixture_id.as_str()) {
+                grouped.entry(*bucket).or_default().push(record.clone());
+            }
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(bucket, records)| (bucket, aggregate(&records)))
+        .collect()
 }

@@ -6,8 +6,8 @@ use speech_bench::catalog::{download, ModelCatalog, CATALOG_PATH};
 use speech_bench::config::BenchmarkConfig;
 use speech_bench::environment::{discover_repo_root, EnvironmentFingerprint};
 use speech_bench::fixtures::Corpus;
-use speech_bench::metrics::{aggregate, compare_with_allowed_changes};
-use speech_bench::report::markdown;
+use speech_bench::metrics::{aggregate, aggregate_by_bucket, compare_with_allowed_changes};
+use speech_bench::report::{length_sweep, markdown};
 use speech_bench::runner::{
     default_result_path, default_worker_path, read_results, run as run_benchmark, write_results,
     RunRequest,
@@ -52,6 +52,8 @@ enum Command {
         #[arg(long = "allow-change", visible_alias = "allow-config-change")]
         allowed_config_changes: Vec<String>,
     },
+    /// Aggregate an existing JSONL result file per fixture length bucket.
+    Sweep { results: PathBuf, manifest: PathBuf },
     /// Compare two existing JSONL result files.
     Compare {
         candidate: PathBuf,
@@ -142,6 +144,12 @@ fn run() -> Result<(), String> {
             baseline,
             allowed_config_changes,
         } => run_and_report(config, worker, output, baseline, allowed_config_changes)?,
+        Command::Sweep { results, manifest } => {
+            let records = read_results(&results)?;
+            let corpus = Corpus::load(&manifest)?;
+            let sweep = aggregate_by_bucket(&records, &corpus);
+            print!("{}", markdown_length_sweep(&sweep));
+        }
         Command::Compare {
             candidate,
             baseline,
@@ -166,6 +174,12 @@ fn run() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn markdown_length_sweep(
+    sweep: &std::collections::BTreeMap<speech_bench::fixtures::FixtureBucket, speech_bench::metrics::AggregateMetrics>,
+) -> String {
+    length_sweep(sweep)
 }
 
 fn load_catalog() -> Result<ModelCatalog, String> {
