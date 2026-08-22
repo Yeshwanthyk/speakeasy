@@ -19,6 +19,9 @@ protocol AudioCapturing {
     func selectedInputDeviceUID() -> String?
     func selectInputDevice(uid: String)
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot
+    /// Buffered audio for live-preview re-transcription; implementations
+    /// without preview support return an empty buffer.
+    func livePreviewSamples() -> ContiguousArray<Float>
 }
 
 protocol Pasting {
@@ -168,6 +171,16 @@ final class AppCoordinator: @unchecked Sendable {
     private var invocationMode: DictationInvocationMode = .toggle
     private var dictationShortcut: DictationShortcut
     private let transcriptionQueue: DispatchQueue
+    /// Live preview scheduling/state for the active recording; nil disables.
+    private let livePreviewController: LivePreviewController?
+    /// Serial queue for preview inference; separate from transcriptionQueue
+    /// so a settling preview never blocks finalization bookkeeping.
+    private let previewQueue = DispatchQueue(label: "com.speakeasy.app.live-preview", qos: .utility)
+    private var previewTimer: DispatchSourceTimer?
+    /// Latest adopted preview text, published for UI/tests.
+    private(set) var livePreviewText: String?
+    /// Callback fired on main when an adopted preview replaces the previous.
+    var onLivePreviewTextChange: ((String) -> Void)?
     private let recordingFeedback: RecordingFeedbackPresenting
     private var recordingFeedbackGeneration: UInt64 = 0
     private var keyMonitor: DictationKeyMonitoring?
@@ -206,6 +219,7 @@ final class AppCoordinator: @unchecked Sendable {
         e2eTraceStore: E2ETraceStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
         textPolisher: TextPolishing? = nil,
+        livePreviewController: LivePreviewController? = nil,
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
         deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
@@ -222,6 +236,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.transcriptPostProcessor = transcriptPostProcessor
         self.textPolisher = textPolisher
         self.e2eTraceStore = e2eTraceStore
+        self.livePreviewController = livePreviewController
         self.transcriptCorrectionStore = transcriptCorrectionStore
         self.currentASRModelKind = asrModelKind
         self.asrModelResolver = asrModelResolver
@@ -791,6 +806,7 @@ final class AppCoordinator: @unchecked Sendable {
                     return
                 }
 
+                startLivePreviewLoop()
                 transitionRecordingFeedback(to: .recording)
             } catch {
                 stateLock.withLock {
@@ -805,10 +821,12 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
         case .stop(let token, let runID, let trace, let target):
+            stopLivePreviewLoop()
             transitionRecordingFeedback(to: .processing)
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
 
         case .discardCapture(let trace, let notify):
+            stopLivePreviewLoop()
             audioCapture.discardRecording()
             transitionRecordingFeedback(to: .hidden)
             if let trace {
@@ -1481,6 +1499,84 @@ final class AppCoordinator: @unchecked Sendable {
         recordTerminal(trace: trace, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
+    }
+
+    // MARK: - Live preview
+
+    /// Distinct run-ID space for preview passes so a stale final-run cancel
+    /// can never hit an in-flight preview or vice versa.
+    private static let previewRunIDFlag: UInt64 = 1 << 63
+    private var previewRunSequence: UInt64 = 0
+
+    private func startLivePreviewLoop() {
+        guard let controller = livePreviewController else { return }
+        controller.reset()
+        stateLock.withLock { livePreviewText = nil }
+
+        let timer = DispatchSource.makeTimerSource(queue: previewQueue)
+        timer.schedule(deadline: .now() + LivePreviewController.defaultMinimumIntervalMs / 1000,
+                       repeating: 0.35)
+        timer.setEventHandler { [weak self] in
+            self?.pollLivePreview(nowMs: Self.millisSinceLaunch())
+        }
+        timer.resume()
+        stateLock.withLock { previewTimer = timer }
+    }
+
+    private func stopLivePreviewLoop() {
+        let timer = stateLock.withLock { () -> DispatchSourceTimer? in
+            let timer = previewTimer
+            previewTimer = nil
+            return timer
+        }
+        timer?.cancel()
+        if let controller = livePreviewController {
+            _ = controller.finishPass(candidate: nil) // clear in-flight flag only
+            controller.reset()
+        }
+        stateLock.withLock { livePreviewText = nil }
+    }
+
+    func pollLivePreview(nowMs: Double) {
+        guard let controller = livePreviewController else { return }
+        let samples = audioCapture.livePreviewSamples()
+        guard controller.shouldTranscribe(nowMs: nowMs, bufferedSampleCount: samples.count) else {
+            return
+        }
+        controller.beginPass(nowMs: nowMs, bufferedSampleCount: samples.count)
+
+        // Recording carries no run ID; previews get their own sequence in a
+        // dedicated high-bit space so they never collide with final runs.
+        let sequence = stateLock.withLock { () -> UInt64 in
+            previewRunSequence &+= 1
+            return previewRunSequence
+        }
+        let previewRunID = Self.previewRunIDFlag | sequence
+
+        previewQueue.async { [weak self] in
+            guard let self else { return }
+            let transcriber = self.stateLock.withLock { self.transcriber }
+            let text = try? transcriber.transcribe(samples: samples, runID: previewRunID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let adopted = self.livePreviewController?.finishPass(candidate: text)
+                if let adopted, !adopted.isEmpty {
+                    let changed = self.stateLock.withLock { () -> Bool in
+                        let previous = self.livePreviewText
+                        self.livePreviewText = adopted
+                        return previous != adopted
+                    }
+                    if changed {
+                        self.onLivePreviewTextChange?(adopted)
+                        self.logger.debug("Live preview adopted (\(adopted.count) chars)")
+                    }
+                }
+            }
+        }
+    }
+
+    fileprivate static func millisSinceLaunch() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000
     }
 
     private func recordTerminal(

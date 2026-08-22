@@ -18,7 +18,7 @@ final class AppCoordinatorTests: XCTestCase {
     static let shortSamples = ContiguousArray<Float>(repeating: 0.1, count: 100)
 
     private func makeCoordinator(
-        audio: AudioCaptureStub,
+        audio: AudioCapturing,
         transcriber: FakeTranscriber,
         paster: PasterStub = PasterStub(),
         recordingFeedback: RecordingFeedbackStub? = nil,
@@ -29,6 +29,7 @@ final class AppCoordinatorTests: XCTestCase {
         transcriptStore: TranscriptStore? = nil,
         diagnosticsStore: DiagnosticsStore? = nil,
         e2eTraceStore: E2ETraceStore? = nil,
+        livePreviewController: LivePreviewController? = nil,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
@@ -54,6 +55,7 @@ final class AppCoordinatorTests: XCTestCase {
             diagnosticsStore: diagnosticsStore,
             e2eTraceStore: e2eTraceStore,
             transcriptPostProcessor: transcriptPostProcessor,
+            livePreviewController: livePreviewController,
             transcriptCorrectionStore: transcriptCorrectionStore,
             transcriptionQueue: transcriptionQueue,
             deliveryTargetProvider: deliveryTargetProvider
@@ -258,6 +260,98 @@ final class AppCoordinatorTests: XCTestCase {
             }
         )
         XCTAssertEqual(recordingFeedback.hideCount, 0)
+    }
+
+    /// Capture stub serving growing buffers to the live-preview hook.
+    private final class PreviewCaptureStub: AudioCapturing {
+        private let lock = UnfairLock()
+        private var bufferedSamples = 0
+        private(set) var beginCount = 0
+        private let recordingSamples = GatedAudioFixtures.modulatedSpeech(amplitude: 0.1)
+
+        func setBuffered(_ count: Int) {
+            lock.withLock { bufferedSamples = count }
+        }
+
+        func livePreviewSamples() -> ContiguousArray<Float> {
+            ContiguousArray(repeating: 0.1, count: lock.withLock { bufferedSamples })
+        }
+
+        func prepare() throws {}
+        func setEventHandler(_ handler: @escaping @Sendable (AudioCaptureEvent) -> Void) {}
+        func beginRecording() throws {
+            lock.withLock { beginCount += 1 }
+        }
+        func endRecording() -> AudioCaptureResult {
+            return AudioCaptureResult(
+                samples: recordingSamples,
+                prependedSampleCount: 0,
+                graceDurationMs: 0
+            )
+        }
+        func discardRecording() {}
+        func shutdown() {}
+        func availableInputDevices() -> [MicrophoneDevice] { [] }
+        func selectedInputDeviceUID() -> String? { nil }
+        func selectInputDevice(uid: String) {}
+        func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
+            MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+        }
+    }
+
+    @MainActor
+    func testDirectPollTriggersPreviewPass() {
+        let audio = PreviewCaptureStub()
+        audio.setBuffered(48_000)
+        let transcriber = FakeTranscriber(result: .success("preview text"))
+        let controller = LivePreviewController(minimumIntervalMs: 0, minimumGrowthSamples: 8_000)
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: PasterStub(),
+            livePreviewController: controller
+        )
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { audio.beginCount >= 1 }, "recording began")
+
+        coordinator.pollLivePreview(nowMs: 1_000)
+        XCTAssertTrue(waitUntil(timeout: 2) { transcriber.callCount >= 1 },
+                      "direct poll must reach transcriber")
+    }
+
+    @MainActor
+    func testLivePreviewPassesRunDuringRecordingAndFinalPassStillPastes() {
+        let audio = PreviewCaptureStub()
+        audio.setBuffered(48_000)
+        let transcriber = FakeTranscriber(result: .success("final text"))
+        let paster = PasterStub()
+        let pasted = expectation(description: "pasted")
+        paster.onPaste = { pasted.fulfill() }
+
+        let controller = LivePreviewController(minimumIntervalMs: 0, minimumGrowthSamples: 8_000)
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: transcriber,
+            paster: paster,
+            livePreviewController: controller
+        )
+
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil(timeout: 2) { transcriber.callCount >= 1 },
+                      "preview pass should reach the transcriber during recording")
+
+        // Final pass on key-up remains the source of truth.
+        coordinator.toggleRecording()
+        wait(for: [pasted], timeout: 2)
+        XCTAssertEqual(paster.pastedTexts, ["final text"])
+
+        XCTAssertTrue(transcriber.runIDs.contains { $0 & (1 << 63) != 0 },
+                      "preview passes must use the reserved run-ID space")
+        if let lastRunID = transcriber.runIDs.last {
+            XCTAssertEqual(lastRunID & (1 << 63), 0,
+                           "the final pass stays in the low run-ID space")
+        }
     }
 
     @MainActor
@@ -1986,6 +2080,8 @@ private final class AudioCaptureStub: AudioCapturing {
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
         MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
     }
+
+    func livePreviewSamples() -> ContiguousArray<Float> { [] }
 }
 
 private final class FakeTranscriber: Transcriber, @unchecked Sendable {

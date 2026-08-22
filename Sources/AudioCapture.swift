@@ -309,6 +309,11 @@ final class AudioCapture: @unchecked Sendable {
         return inputDeviceProvider.defaultInputDeviceUID()
     }
 
+    /// Most recent converted audio, capped for live-preview re-transcription.
+    func livePreviewSamples() -> ContiguousArray<Float> {
+        ringBuffer.readLast(240_000) // last 15 s at 16 kHz
+    }
+
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
         levelPreview.latest()
     }
