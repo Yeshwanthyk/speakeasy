@@ -40,13 +40,21 @@ struct TranscriptPostProcessor: Sendable {
 
     private let commandMatcher: CompiledMatcher
     private let correctionMatcher: CompiledMatcher
+    /// Optional deterministic term rescue that runs before commands and
+    /// exact corrections; nil keeps the pipeline byte-identical to before.
+    private let phoneticCorrector: PhoneticCorrector?
 
     init() {
         self.commandMatcher = CompiledMatcher(rules: Self.commandRules)
         self.correctionMatcher = CompiledMatcher(rules: [])
+        self.phoneticCorrector = nil
     }
 
     init(corrections: [TranscriptCorrection]) throws {
+        try self.init(corrections: corrections, phoneticTerms: [])
+    }
+
+    init(corrections: [TranscriptCorrection], phoneticTerms: [PhoneticTerm]) throws {
         guard corrections.count <= Self.maxCorrections else {
             throw TranscriptPostProcessorError.tooManyCorrections(corrections.count)
         }
@@ -103,10 +111,14 @@ struct TranscriptPostProcessor: Sendable {
 
         self.commandMatcher = CompiledMatcher(rules: Self.commandRules)
         self.correctionMatcher = CompiledMatcher(rules: rules)
+        self.phoneticCorrector = try PhoneticCorrector(terms: phoneticTerms)
     }
 
     func process(_ rawText: String) -> ProcessedTranscript {
-        let commandText = rewriteCommands(in: rawText)
+        // Phonetic rescue runs on the raw transcript so misheard domain
+        // terms become canonical words before command and exact matching.
+        let phoneticText = phoneticCorrector?.correct(rawText) ?? rawText
+        let commandText = rewriteCommands(in: phoneticText)
         let finalText = correctionMatcher.rewrite(in: commandText)
         return ProcessedTranscript(rawText: rawText, finalText: finalText)
     }
@@ -193,7 +205,7 @@ struct TranscriptPostProcessor: Sendable {
         tokens.map(\.normalized).joined(separator: "\u{1F}")
     }
 
-    private static func tokens(in text: String) -> [Token] {
+    static func tokens(in text: String) -> [Token] {
         var tokens: [Token] = []
         var wordStart: String.Index?
         var index = text.startIndex
@@ -231,7 +243,7 @@ struct TranscriptPostProcessor: Sendable {
         return tokens
     }
 
-    private static func normalize(_ value: String) -> String {
+    static func normalize(_ value: String) -> String {
         value
             .precomposedStringWithCompatibilityMapping
             .folding(
@@ -253,9 +265,13 @@ struct TranscriptPostProcessor: Sendable {
         )
     }
 
-    private struct Token: Sendable {
+    struct Token: Sendable {
         let normalized: String
         let range: Range<String.Index>
+
+        var hasLetterOrNumber: Bool {
+            !normalized.isEmpty && normalized.contains(where: { $0.isLetter || $0.isNumber })
+        }
     }
 
     private enum CommandStyle: Sendable, Equatable {
