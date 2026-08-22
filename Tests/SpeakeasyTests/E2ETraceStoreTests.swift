@@ -233,3 +233,29 @@ final class E2ETraceStoreTests: XCTestCase {
         return condition()
     }
 }
+
+// MARK: - Native timing surfacing (task: cross-reported FFI timings)
+
+final class NativeASRTimingsTests: XCTestCase {
+    func testFieldsRoundTrip() {
+        let timings = NativeASRTimings(totalMs: 12.5, waitMs: 0.5, audioMs: 400)
+        XCTAssertEqual(timings.totalMs, 12.5)
+        XCTAssertEqual(timings.waitMs, 0.5)
+        XCTAssertEqual(timings.audioMs, 400)
+    }
+    func testRealtimeFactorDividesTotalByAudio() {
+        let timings = NativeASRTimings(totalMs: 250, waitMs: 10, audioMs: 1000)
+        XCTAssertEqual(timings.realtimeFactor, 0.25, accuracy: 0.0001)
+    }
+
+    func testRealtimeFactorIsZeroWithoutAudio() {
+        let timings = NativeASRTimings(totalMs: 5, waitMs: 0, audioMs: 0)
+        XCTAssertEqual(timings.realtimeFactor, 0)
+    }
+
+    func testFastRealtimeStaysBelowOne() {
+        let timings = NativeASRTimings(totalMs: 80, waitMs: 3, audioMs: 5_000)
+        XCTAssertLessThan(timings.realtimeFactor, 1.0)
+        XCTAssertEqual(timings.realtimeFactor, 80.0 / 5_000.0, accuracy: 0.0001)
+    }
+}

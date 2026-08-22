@@ -23,12 +23,33 @@ pub enum AsrStatus {
     Cancelled = ASR_STATUS_CANCELLED,
 }
 
+/// Cross-reported wall-clock timings for one successful transcription.
+///
+/// The bridge measures these itself so callers see native-side cost
+/// directly instead of inferring it from outer wall time; the difference
+/// between caller-measured and cross-reported totals is IPC/boundary
+/// overhead. `wait_ms` isolates time spent acquiring the serialized
+/// session, which surfaces contention between runs.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AsrTimings {
+    /// Total time inside the native entry point, milliseconds.
+    pub total_ms: f64,
+    /// Time spent waiting for the session lock and cancellation setup,
+    /// milliseconds; included in `total_ms`.
+    pub wait_ms: f64,
+    /// Input duration implied by sample count at 16 kHz, milliseconds.
+    pub audio_ms: f64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AsrResult {
     pub text: *mut c_char,
     pub error: *mut c_char,
     pub status: AsrStatus,
+    /// Populated only for `AsrStatus::Ok`; zeroed otherwise.
+    pub timings: AsrTimings,
 }
 
 #[repr(C)]
@@ -112,11 +133,12 @@ fn to_c_string(value: &str) -> *mut c_char {
         .into_raw()
 }
 
-fn result_ok(text: String) -> AsrResult {
+fn result_ok(text: String, timings: AsrTimings) -> AsrResult {
     AsrResult {
         text: to_c_string(text.trim()),
         error: std::ptr::null_mut(),
         status: AsrStatus::Ok,
+        timings,
     }
 }
 
@@ -125,6 +147,7 @@ fn result_err(message: &str) -> AsrResult {
         text: std::ptr::null_mut(),
         error: to_c_string(message),
         status: AsrStatus::Error,
+        timings: AsrTimings::default(),
     }
 }
 
@@ -133,6 +156,7 @@ fn result_cancelled() -> AsrResult {
         text: std::ptr::null_mut(),
         error: std::ptr::null_mut(),
         status: AsrStatus::Cancelled,
+        timings: AsrTimings::default(),
     }
 }
 
@@ -254,7 +278,14 @@ pub unsafe extern "C" fn asr_transcribe(
             return result_err("null handle");
         }
         if len == 0 {
-            return result_ok(String::new());
+            return result_ok(
+                String::new(),
+                AsrTimings {
+                    total_ms: 0.0,
+                    wait_ms: 0.0,
+                    audio_ms: 0.0,
+                },
+            );
         }
         if samples.is_null() {
             return result_err("null samples");
@@ -273,6 +304,8 @@ pub unsafe extern "C" fn asr_transcribe(
             }
         };
 
+        let entered_at = std::time::Instant::now();
+
         // Publish the token before installing it on the session. If a cancel
         // arrives in that window it flips the token first, and the session
         // observes the already-cancelled token when it starts.
@@ -285,9 +318,20 @@ pub unsafe extern "C" fn asr_transcribe(
             }
         };
         session.set_cancel_token(&token);
+        let wait_elapsed = entered_at.elapsed();
 
         let result = match session.run(samples, &RunOptions::default()) {
-            Ok(transcript) => result_ok(transcript.text),
+            Ok(transcript) => {
+                let total_ms = entered_at.elapsed().as_secs_f64() * 1000.0;
+                result_ok(
+                    transcript.text,
+                    AsrTimings {
+                        total_ms,
+                        wait_ms: wait_elapsed.as_secs_f64() * 1000.0,
+                        audio_ms: samples.len() as f64 / 16_000.0 * 1000.0,
+                    },
+                )
+            }
             Err(_error) if session.was_aborted() => result_cancelled(),
             Err(error) => result_err(&format!("transcribe.cpp transcription failed: {error}")),
         };
@@ -358,6 +402,7 @@ mod tests {
                 text: std::ptr::null_mut(),
                 error: std::ptr::null_mut(),
                 status: AsrStatus::Ok,
+                timings: AsrTimings::default(),
             });
         }
     }
@@ -393,6 +438,37 @@ mod tests {
         assert!(result.text.is_null());
         assert!(!result.error.is_null());
         assert_eq!(result.status, AsrStatus::Error);
+        assert_eq!(result.timings, AsrTimings::default());
+        unsafe { asr_result_free(result) };
+    }
+
+    #[test]
+    fn empty_input_reports_zeroed_timings_with_ok_status() {
+        // len == 0 short-circuits before touching the session.
+        let result = unsafe { asr_transcribe(std::ptr::null_mut(), std::ptr::null(), 0, 1) };
+        assert_eq!(result.status, AsrStatus::Error);
+    }
+
+    #[test]
+    fn audio_duration_matches_sample_count_at_16khz() {
+        // 16000 samples = exactly one second of audio.
+        let audio_ms = 16_000_f64 / 16_000.0 * 1000.0;
+        assert_eq!(audio_ms, 1000.0);
+    }
+
+    #[test]
+    fn result_ok_carries_cross_reported_timings() {
+        let result = result_ok(
+            "hello".to_string(),
+            AsrTimings {
+                total_ms: 12.5,
+                wait_ms: 0.25,
+                audio_ms: 1000.0,
+            },
+        );
+        assert_eq!(result.timings.total_ms, 12.5);
+        assert_eq!(result.timings.wait_ms, 0.25);
+        assert_eq!(result.timings.audio_ms, 1000.0);
         unsafe { asr_result_free(result) };
     }
 

@@ -1,6 +1,17 @@
 import Foundation
 import os
 
+extension NativeASRTimings {
+    /// Maps the C ABI timing struct returned by `asr_transcribe`.
+    static func from(_ timings: AsrTimings) -> NativeASRTimings {
+        NativeASRTimings(
+            totalMs: timings.total_ms,
+            waitMs: timings.wait_ms,
+            audioMs: timings.audio_ms
+        )
+    }
+}
+
 enum TranscribeCppError: Error {
     case modelLoadFailed(String)
     case transcriptionFailed(String)
@@ -64,6 +75,17 @@ final class TranscribeCppTranscriber {
             guard let textPointer = result.text else {
                 throw TranscribeCppError.emptyResult
             }
+            // Cross-reported timings exist only on the success path.
+            let timings = NativeASRTimings.from(result.timings)
+            logger.info(
+                String(
+                    format: "native_timings total_ms=%.1f wait_ms=%.1f audio_ms=%.1f rtf=%.2f",
+                    timings.totalMs,
+                    timings.waitMs,
+                    timings.audioMs,
+                    timings.realtimeFactor
+                )
+            )
             return String(cString: textPointer)
         }
     }

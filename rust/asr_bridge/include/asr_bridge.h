@@ -17,10 +17,18 @@ typedef enum AsrStatus {
     ASR_STATUS_CANCELLED = 2,
 } AsrStatus;
 
+typedef struct AsrTimings {
+    double total_ms;
+    double wait_ms;
+    double audio_ms;
+} AsrTimings;
+
 typedef struct AsrResult {
     char *text;
     char *error;
     AsrStatus status;
+    /* Populated only when status == ASR_STATUS_OK; zeroed otherwise. */
+    AsrTimings timings;
 } AsrResult;
 
 typedef struct AsrCreateResult {
