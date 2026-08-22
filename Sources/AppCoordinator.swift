@@ -132,6 +132,8 @@ final class AppCoordinator: @unchecked Sendable {
     private let deliveryTargetProvider: DeliveryTargetProviding
     private let hallucinationFilter: HallucinationFilter
     private var transcriptPostProcessor: TranscriptPostProcessor
+    /// Optional post-correction refinement stage; nil means no polish step.
+    private let textPolisher: TextPolishing?
     private let transcriptCorrectionStore: TranscriptCorrectionStore?
     private var currentASRModelKind: ASRModelKind
     private let asrModelResolver: ASRModelResolver?
@@ -200,6 +202,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriptStore: TranscriptStore? = nil,
         diagnosticsStore: DiagnosticsStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
+        textPolisher: TextPolishing? = nil,
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
         deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
@@ -214,6 +217,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.deliveryTargetProvider = deliveryTargetProvider
         self.hallucinationFilter = hallucinationFilter
         self.transcriptPostProcessor = transcriptPostProcessor
+        self.textPolisher = textPolisher
         self.transcriptCorrectionStore = transcriptCorrectionStore
         self.currentASRModelKind = asrModelKind
         self.asrModelResolver = asrModelResolver
@@ -1118,8 +1122,12 @@ final class AppCoordinator: @unchecked Sendable {
                 result = .failure(error)
             }
             trace.markTranscriptionEnded()
+            // Immutable snapshot for the async hop below.
+            let settledTrace = trace
 
-            DispatchQueue.main.async { [weak self] in
+            // One main-actor task keeps settlement and delivery in the same
+            // sequential order the previous main-queue hop provided.
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 timeoutWorkItem.cancel()
                 let settlement = self.finishTranscription(token: token)
@@ -1129,16 +1137,16 @@ final class AppCoordinator: @unchecked Sendable {
                     switch result {
                     case .success(let text):
                         self.failedCaptureReplayBuffer.clear()
-                        self.handleTranscriptionResult(
+                        await self.handleTranscriptionResult(
                             text,
-                            trace: trace,
+                            trace: settledTrace,
                             activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
                             activeRMS: rms,
                             target: target
                         )
                     case .failure(let error):
                         self.retainFailedCapture(samples: samples, reason: .transcriptionFailed)
-                        self.recordTerminal(trace: trace, outcome: .transcriptionFailed)
+                        self.recordTerminal(trace: settledTrace, outcome: .transcriptionFailed)
                         self.logger.error("Transcription failed: \(String(describing: error))")
                         self.feedback.notify(event: .error("Transcription failed"))
                     }
@@ -1151,13 +1159,14 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
+    @MainActor
     private func handleTranscriptionResult(
         _ text: String,
         trace: TranscriptionTrace,
         activeDurationSeconds: TimeInterval? = nil,
         activeRMS: Float? = nil,
         target: TranscriptDeliveryTarget = .unavailable
-    ) {
+    ) async {
         let trace = trace
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -1180,16 +1189,25 @@ final class AppCoordinator: @unchecked Sendable {
 
         let postProcessor = stateLock.withLock { transcriptPostProcessor }
         let processedTranscript = postProcessor.process(trimmed)
-        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let polisher = stateLock.withLock({ textPolisher }) {
+            // Polish refines corrected text; structural guards fall back to
+            // the corrected text when output loses meaning or runs away.
+            let polished = await polisher.polish(finalText)
+            finalText = PolishGuard.sanitized(source: finalText, output: polished) { reason in
+                self.logger.debug("Polish rejected (\(String(describing: reason))); keeping corrected text")
+            }.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
             feedback.notify(event: .error("No speech detected"))
             return
         }
-        let settledTranscript = ProcessedTranscript(
+        let polishedTranscript = ProcessedTranscript(
             rawText: processedTranscript.rawText,
             finalText: finalText
         )
+        let settledTranscript = polishedTranscript
         let record = TranscriptRecord(
             id: trace.id,
             rawText: settledTranscript.rawText,
@@ -1209,9 +1227,7 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
 
-        let persistence = MainActor.assumeIsolated {
-            transcriptStore.append(record)
-        }
+        let persistence = transcriptStore.append(record)
         Task { @MainActor [weak self] in
             guard let self else { return }
             guard await persistence.value else {
