@@ -28,6 +28,7 @@ final class AppCoordinatorTests: XCTestCase {
         skipWarmup: Bool = true,
         transcriptStore: TranscriptStore? = nil,
         diagnosticsStore: DiagnosticsStore? = nil,
+        e2eTraceStore: E2ETraceStore? = nil,
         hallucinationFilter: HallucinationFilter = HallucinationFilter(),
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
@@ -51,6 +52,7 @@ final class AppCoordinatorTests: XCTestCase {
             keyMonitorFactory: { _ in keyMonitor },
             transcriptStore: transcriptStore,
             diagnosticsStore: diagnosticsStore,
+            e2eTraceStore: e2eTraceStore,
             transcriptPostProcessor: transcriptPostProcessor,
             transcriptCorrectionStore: transcriptCorrectionStore,
             transcriptionQueue: transcriptionQueue,
@@ -256,6 +258,38 @@ final class AppCoordinatorTests: XCTestCase {
             }
         )
         XCTAssertEqual(recordingFeedback.hideCount, 0)
+    }
+
+    @MainActor
+    func testHappyPathWritesSuccessfulE2ETraceRecord() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-e2e-coord-\(UUID().uuidString)", isDirectory: true)
+        let traceURL = directory.appendingPathComponent("dictation-e2e.jsonl")
+        let e2eStore = E2ETraceStore(fileURL: traceURL)
+        let audio = AudioCaptureStub(samples: Self.validSamples)
+        let paster = PasterStub()
+        let pasted = expectation(description: "pasted")
+        paster.onPaste = { pasted.fulfill() }
+        let coordinator = makeCoordinator(
+            audio: audio,
+            transcriber: FakeTranscriber(result: .success("traced text")),
+            paster: paster,
+            e2eTraceStore: e2eStore
+        )
+
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        wait(for: [pasted], timeout: 1.0)
+
+        waitUntil(timeout: 2) { e2eStore.allRecords().contains(where: \.succeeded) }
+        let records = e2eStore.allRecords().filter(\.succeeded)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.deliveredCharacterCount, "traced text".count)
+        XCTAssertNotNil(records.first?.hotkeyPressToCaptureStartMs)
+        XCTAssertNotNil(records.first?.transcriptionMs)
+        XCTAssertNotNil(records.first?.hotkeyReleaseToPasteRequestMs)
+
+        try? FileManager.default.removeItem(at: directory)
     }
 
     func testTranscriptionFailureNotifiesUser() {

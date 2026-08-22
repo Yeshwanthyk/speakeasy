@@ -1,0 +1,235 @@
+import Foundation
+import XCTest
+@testable import Speakeasy
+
+final class E2ETraceStoreTests: XCTestCase {
+    private var directory: URL!
+    private var fileURL: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-e2e-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        fileURL = directory.appendingPathComponent("dictation-e2e.jsonl")
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+        try super.tearDownWithError()
+    }
+
+    // MARK: - Record factory gating
+
+    func testCompleteSuccessfulTraceProducesRecord() {
+        let trace = completeTrace()
+        let record = E2ETraceRecordFactory.record(
+            from: trace,
+            outcome: .eventsPosted,
+            deliveredText: "hello world"
+        )
+        XCTAssertNotNil(record)
+        XCTAssertTrue(record!.succeeded)
+        XCTAssertEqual(record!.deliveredCharacterCount, 11)
+        XCTAssertEqual(record!.outcome, "eventsPosted")
+        XCTAssertEqual(record!.hotkeyReleaseToPasteRequestMs ?? -1, 160.0, accuracy: 0.001)
+    }
+
+    func testIncompleteSuccessfulTraceIsDropped() {
+        var trace = completeTrace()
+        trace.pasteRequestedAt = nil
+        let record = E2ETraceRecordFactory.record(
+            from: trace,
+            outcome: .eventsPosted,
+            deliveredText: "hello"
+        )
+        XCTAssertNil(record, "successful outcome without paste milestone must not record")
+    }
+
+    func testFailedOutcomeRecordsEvenWhenIncomplete() {
+        let trace = TranscriptionTrace(backend: "test")
+        let record = E2ETraceRecordFactory.record(from: trace, outcome: .noSpeech, deliveredText: nil)
+        XCTAssertNotNil(record)
+        XCTAssertFalse(record!.succeeded)
+        XCTAssertNil(record!.deliveredCharacterCount)
+    }
+
+    func testFailureOutcomesAreNeverMarkedSuccessful() {
+        for outcome in [TranscriptionTrace.Outcome.noSpeech, .transcriptionFailed, .timedOut] {
+            let record = E2ETraceRecordFactory.record(
+                from: completeTrace(),
+                outcome: outcome,
+                deliveredText: nil
+            )
+            XCTAssertEqual(record?.succeeded, false, "\(outcome) must not count as success")
+        }
+    }
+
+    // MARK: - Persistence
+
+    func testAppendPersistsJSONLAndSurvivesReload() {
+        let store = E2ETraceStore(fileURL: fileURL)
+        let record = E2ETraceRecordFactory.record(
+            from: completeTrace(),
+            outcome: .clipboardUpdated,
+            deliveredText: "persisted"
+        )!
+
+        store.append(record)
+        waitUntilFileContains(count: 1)
+
+        let reloaded = E2ETraceStore(fileURL: fileURL)
+        waitUntil { reloaded.allRecords().count == 1 }
+        let decoded = reloaded.allRecords().first
+        // JSONL stores wall time at second precision; compare the rest exactly.
+        XCTAssertEqual(decoded?.id, record.id)
+        XCTAssertEqual(decoded?.backend, record.backend)
+        XCTAssertEqual(decoded?.outcome, record.outcome)
+        XCTAssertEqual(decoded?.succeeded, record.succeeded)
+        XCTAssertEqual(decoded?.deliveredCharacterCount, record.deliveredCharacterCount)
+        XCTAssertEqual(decoded?.hotkeyReleaseToPasteRequestMs ?? -1,
+                       record.hotkeyReleaseToPasteRequestMs ?? -2, accuracy: 0.001)
+
+        let raw = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+        XCTAssertEqual(raw.split(separator: "\n").count, 1, "one JSON object per line")
+    }
+
+    func testCorruptLogLoadsWhatItCan() throws {
+        let good = E2ETraceRecordFactory.record(from: completeTrace(), outcome: .eventsPosted, deliveredText: "x")!
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let line = String(data: try encoder.encode(good), encoding: .utf8)!
+        try "\(line)\nnot json at all\n\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let store = E2ETraceStore(fileURL: fileURL)
+        XCTAssertEqual(store.allRecords().count, 1, "corrupt lines skipped, valid kept")
+
+        store.append(good)
+        let reloaded = E2ETraceStore(fileURL: fileURL)
+        waitUntil { reloaded.allRecords().count == 2 }
+    }
+
+    func testWrapAroundKeepsNewestHalfAndStaysBounded() {
+        let store = E2ETraceStore(fileURL: fileURL, maxRecords: 4)
+
+        // Distinct lengths turn character count into an index tag.
+        func makeRecord(_ index: Int) -> E2ETraceRecord {
+            E2ETraceRecordFactory.record(
+                from: completeTrace(),
+                outcome: .eventsPosted,
+                deliveredText: String(repeating: "x", count: index)
+            )!
+        }
+        for index in 0..<10 {
+            store.append(makeRecord(index))
+        }
+
+        waitUntil(timeout: 2) { store.allRecords().count >= 2 }
+        XCTAssertLessThanOrEqual(store.allRecords().count, 4, "retention stays bounded")
+        // Serial appends fill to 4, wrap to 2 at the fifth, reach 4 again,
+        // wrap at the eighth, and end at 4: only recent indices survive.
+        let indices = Set(store.allRecords().compactMap(\.deliveredCharacterCount))
+        XCTAssertTrue(indices.isSuperset(of: [8, 9]) && indices.isSubset(of: [6, 7, 8, 9]), "got \(indices)")
+    }
+
+    // MARK: - Summarizer
+
+    func testSummaryUsesSuccessfulPassesOnly() {
+        let success = makeRecord(outcome: .eventsPosted, succeeded: true, transcriptionMs: 100)
+        let another = makeRecord(outcome: .clipboardUpdated, succeeded: true, transcriptionMs: 300)
+        let failure = makeRecord(outcome: .timedOut, succeeded: false, transcriptionMs: 10_000)
+
+        let summary = E2ESummarizer.summarize([success, another, failure])
+        XCTAssertEqual(summary.totalPasses, 3)
+        XCTAssertEqual(summary.successfulPasses, 2)
+        let transcription = summary.segments.first { $0.name == "transcription" }
+        XCTAssertEqual(transcription?.medianMs, 200, "median over successes only")
+    }
+
+    func testMedianInterpolatesEvenCounts() {
+        XCTAssertEqual(E2ESummarizer.median([3, 1, 2]), 2)
+        XCTAssertEqual(E2ESummarizer.median([4, 1, 3, 2]), 2.5)
+        XCTAssertNil(E2ESummarizer.median([]))
+    }
+
+    func testSummaryOmitsSegmentsMissingFromAllSuccesses() {
+        var record = makeRecord(outcome: .eventsPosted, succeeded: true, transcriptionMs: 5)
+        record = E2ETraceRecord(
+            id: record.id,
+            recordedAt: record.recordedAt,
+            backend: record.backend,
+            outcome: record.outcome,
+            succeeded: record.succeeded,
+            deliveredCharacterCount: record.deliveredCharacterCount,
+            utteranceMs: record.utteranceMs,
+            hotkeyPressToCaptureStartMs: nil,
+            hotkeyReleaseToStopReturnMs: nil,
+            captureStopToTranscriptionStartMs: nil,
+            transcriptionMs: record.transcriptionMs,
+            transcriptionEndToPasteRequestMs: nil,
+            hotkeyReleaseToPasteRequestMs: nil
+        )
+        let summary = E2ESummarizer.summarize([record])
+        XCTAssertFalse(summary.segments.isEmpty)
+        XCTAssertFalse(summary.segments.contains { $0.name == "press_to_capture_start" })
+    }
+
+    // MARK: - Helpers
+
+    private func completeTrace() -> TranscriptionTrace {
+        completeTrace(id: UUID())
+    }
+
+    private func completeTrace(id: UUID) -> TranscriptionTrace {
+        var trace = TranscriptionTrace(id: id, hotkeyPressedAt: 0, backend: "test")
+        trace.markCaptureStarted(at: 10_000_000)
+        trace.markHotkeyReleased(at: 20_000_000)
+        trace.markStopReturned(sampleCount: 16_000, prependedSampleCount: 800, graceDurationMs: 12.5, at: 70_000_000)
+        trace.markTranscriptionStarted(at: 80_000_000)
+        trace.markTranscriptionEnded(at: 130_000_000)
+        trace.markPasteRequested(at: 180_000_000)
+        return trace
+    }
+
+    private func makeRecord(
+        outcome: TranscriptionTrace.Outcome,
+        succeeded: Bool,
+        transcriptionMs: Double?
+    ) -> E2ETraceRecord {
+        E2ETraceRecord(
+            id: UUID(),
+            recordedAt: Date(),
+            backend: "test",
+            outcome: outcome.rawValue,
+            succeeded: succeeded,
+            deliveredCharacterCount: succeeded ? 5 : nil,
+            utteranceMs: 1_000,
+            hotkeyPressToCaptureStartMs: 1,
+            hotkeyReleaseToStopReturnMs: 2,
+            captureStopToTranscriptionStartMs: 3,
+            transcriptionMs: transcriptionMs,
+            transcriptionEndToPasteRequestMs: 4,
+            hotkeyReleaseToPasteRequestMs: 10
+        )
+    }
+
+    private func waitUntilFileContains(count expected: Int, timeout: TimeInterval = 2) {
+        waitUntil(timeout: timeout) {
+            let data = try? Data(contentsOf: self.fileURL)
+            return (data?.split(separator: 0x0A).count ?? -1) == expected
+        }
+    }
+
+    @discardableResult
+    private func waitUntil(
+        timeout: TimeInterval = 1.0,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
+    }
+}

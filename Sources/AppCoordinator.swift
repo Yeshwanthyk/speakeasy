@@ -127,6 +127,8 @@ final class AppCoordinator: @unchecked Sendable {
     let paster: Pasting
     let transcriptStore: TranscriptStore?
     let diagnosticsStore: DiagnosticsStore?
+    /// Persistent keyboard-to-insertion latency log; nil disables tracing.
+    private let e2eTraceStore: E2ETraceStore?
     private let feedback: UserFeedback
     private let accessibilityChecker: AccessibilityChecking
     private let deliveryTargetProvider: DeliveryTargetProviding
@@ -201,6 +203,7 @@ final class AppCoordinator: @unchecked Sendable {
         keyMonitorFactory: KeyMonitorFactory?,
         transcriptStore: TranscriptStore? = nil,
         diagnosticsStore: DiagnosticsStore? = nil,
+        e2eTraceStore: E2ETraceStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
         textPolisher: TextPolishing? = nil,
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
@@ -218,6 +221,7 @@ final class AppCoordinator: @unchecked Sendable {
         self.hallucinationFilter = hallucinationFilter
         self.transcriptPostProcessor = transcriptPostProcessor
         self.textPolisher = textPolisher
+        self.e2eTraceStore = e2eTraceStore
         self.transcriptCorrectionStore = transcriptCorrectionStore
         self.currentASRModelKind = asrModelKind
         self.asrModelResolver = asrModelResolver
@@ -1487,6 +1491,15 @@ final class AppCoordinator: @unchecked Sendable {
         trace.log(logger: logger, outcome: outcome)
         MainActor.assumeIsolated {
             _ = diagnosticsStore?.record(trace: trace, outcome: outcome, text: text)
+        }
+        if let e2eTraceStore = stateLock.withLock({ self.e2eTraceStore }) {
+            if let record = E2ETraceRecordFactory.record(
+                from: trace,
+                outcome: outcome,
+                deliveredText: text
+            ) {
+                e2eTraceStore.append(record)
+            }
         }
     }
 
