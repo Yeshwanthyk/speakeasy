@@ -78,13 +78,7 @@ final class TranscribeCppTranscriber {
             // Cross-reported timings exist only on the success path.
             let timings = NativeASRTimings.from(result.timings)
             logger.info(
-                String(
-                    format: "native_timings total_ms=%.1f wait_ms=%.1f audio_ms=%.1f rtf=%.2f",
-                    timings.totalMs,
-                    timings.waitMs,
-                    timings.audioMs,
-                    timings.realtimeFactor
-                )
+                "native_timings total_ms=\(timings.totalMs, format: .fixed(precision: 1), privacy: .public) wait_ms=\(timings.waitMs, format: .fixed(precision: 1), privacy: .public) audio_ms=\(timings.audioMs, format: .fixed(precision: 1), privacy: .public) rtf=\(timings.realtimeFactor, format: .fixed(precision: 2), privacy: .public)"
             )
             return String(cString: textPointer)
         }
