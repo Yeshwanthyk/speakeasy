@@ -656,9 +656,24 @@ final class AppCoordinator: @unchecked Sendable {
             keyMonitorFactory: keyMonitorFactory,
             transcriptStore: TranscriptStore(),
             diagnosticsStore: DiagnosticsStore(),
+            e2eTraceStore: Self.defaultE2ETraceStore(),
             transcriptPostProcessor: postProcessor,
             transcriptCorrectionStore: correctionStore
         )
+    }
+
+    /// Production e2e latency log under Application Support, beside the
+    /// other stores. Returns nil on path failure; tracing never blocks
+    /// dictation startup.
+    private static func defaultE2ETraceStore() -> E2ETraceStore? {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let identifier = Bundle.main.bundleIdentifier ?? "Speakeasy"
+        let url = base
+            .appendingPathComponent(identifier, isDirectory: true)
+            .appendingPathComponent("logs", isDirectory: true)
+            .appendingPathComponent("dictation-e2e.jsonl")
+        return E2ETraceStore(fileURL: url)
     }
     #endif
 
