@@ -148,6 +148,12 @@ final class AppCoordinator: @unchecked Sendable {
     private let inputDeviceSelectionStore: InputDeviceSelectionStore
     private let shortcutSelectionStore: DictationShortcutSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
+    private let nativeClock: @Sendable () -> UInt64
+    private let rewarmThresholdNs: UInt64
+    private var lastNativeInferenceAt: UInt64?
+    private var rewarmInProgress = false
+    private var rewarmStartedTraceIDs: Set<UUID> = []
+    private let rewarmQueue = DispatchQueue(label: "com.speakeasy.app.rewarm", qos: .userInitiated)
     private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
     private let intentLock = UnfairLock()
@@ -223,7 +229,9 @@ final class AppCoordinator: @unchecked Sendable {
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
         deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
-        failedCaptureReplayBuffer: FailedCaptureReplayBuffer = FailedCaptureReplayBuffer()
+        failedCaptureReplayBuffer: FailedCaptureReplayBuffer = FailedCaptureReplayBuffer(),
+        nativeClock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        rewarmThreshold: TimeInterval = 90
     ) {
         self.audioCapture = audioCapture
         self.transcriber = transcriber
@@ -251,6 +259,8 @@ final class AppCoordinator: @unchecked Sendable {
         self.transcriptStore = transcriptStore
         self.diagnosticsStore = diagnosticsStore
         self.transcriptionQueue = transcriptionQueue
+        self.nativeClock = nativeClock
+        self.rewarmThresholdNs = UInt64(max(0, rewarmThreshold) * 1_000_000_000)
 
         audioCapture.setEventHandler { [weak self] event in
             self?.handleAudioCaptureEvent(event)
@@ -278,8 +288,13 @@ final class AppCoordinator: @unchecked Sendable {
 
         let model = stateLock.withLock { transcriber }
         do {
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy model warmup")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             try await model.warmUp()
-            stateLock.withLock { warmupState = .ready }
+            stateLock.withLock {
+                lastNativeInferenceAt = nativeClock()
+                warmupState = .ready
+            }
             logger.info("Model warmup completed successfully")
         } catch {
             stateLock.withLock { warmupState = .failed(error) }
@@ -307,6 +322,45 @@ final class AppCoordinator: @unchecked Sendable {
     /// where warmup is not needed or not available.
     func skipWarmup() {
         stateLock.withLock { warmupState = .ready }
+    }
+
+    /// Wake and key-down share the same non-periodic idle check.
+    func rewarmIfIdle() {
+        let request = stateLock.withLock { () -> (Transcriber, UUID?)? in
+            guard !isShuttingDown, warmupState.isReady, activeModelSwitchID == nil,
+                  !rewarmInProgress, let last = lastNativeInferenceAt,
+                  nativeClock() >= last, nativeClock() - last > rewarmThresholdNs else { return nil }
+            if case .transcribing = state { return nil }
+            rewarmInProgress = true
+            return (transcriber, activeTrace?.id)
+        }
+        guard let (model, traceID) = request else { return }
+        rewarmQueue.async { [weak self] in
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let self else { return }
+                let shouldRun = self.stateLock.withLock { () -> Bool in
+                    guard !self.isShuttingDown, self.activeModelSwitchID == nil else { return false }
+                    if case .transcribing = self.state { return false }
+                    return true
+                }
+                guard shouldRun else {
+                    self.stateLock.withLock { self.rewarmInProgress = false }
+                    return
+                }
+                if let traceID {
+                    _ = self.stateLock.withLock { self.rewarmStartedTraceIDs.insert(traceID) }
+                }
+                let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy idle model rewarm")
+                defer { ProcessInfo.processInfo.endActivity(activity) }
+                do {
+                    try await model.warmUp()
+                    self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+                } catch {
+                    self.logger.error("Idle model rewarm failed: \(String(describing: error))")
+                }
+                self.stateLock.withLock { self.rewarmInProgress = false }
+            }
+        }
     }
 
     func selectedASRModelKind() -> ASRModelKind {
@@ -586,6 +640,8 @@ final class AppCoordinator: @unchecked Sendable {
                         try modelArtifactVerifier(model)
                     }
                     let transcriber = try transcriberFactory(model)
+                    let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy replacement model warmup")
+                    defer { ProcessInfo.processInfo.endActivity(activity) }
                     try await transcriber.warmUp()
                     result = .success((model, transcriber))
                 } catch {
@@ -710,10 +766,13 @@ final class AppCoordinator: @unchecked Sendable {
                 failedCaptureReplayBuffer.clear()
                 activeReplayLease = nil
                 let captureID = UUID()
-                let trace = TranscriptionTrace(
+                var trace = TranscriptionTrace(
                     hotkeyPressedAt: now,
                     backend: currentASRModelKind.preferenceValue
                 )
+                if let last = lastNativeInferenceAt, nativeClock() >= last {
+                    trace.idleGapSinceLastNativeInferenceMs = Double(nativeClock() - last) / 1_000_000
+                }
                 state = .startingCapture(captureID)
                 activeTrace = trace
                 activeDeliveryTarget = deliveryTargetProvider.currentTarget()
@@ -804,6 +863,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         switch transition {
         case .start(let captureID, var trace, let target):
+            rewarmIfIdle()
             do {
                 try audioCapture.beginRecording()
                 trace.markCaptureStarted()
@@ -1153,11 +1213,15 @@ final class AppCoordinator: @unchecked Sendable {
             let result: Result<String, Error>
             do {
                 let transcriber = self.stateLock.withLock { self.transcriber }
-                let text = try transcriber.transcribe(samples: samples, runID: runID)
+                let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy native transcription")
+                defer { ProcessInfo.processInfo.endActivity(activity) }
+                let (text, timings) = try transcriber.transcribeWithTimings(samples: samples, runID: runID)
+                trace.nativeTimings = timings
                 result = .success(text)
             } catch {
                 result = .failure(error)
             }
+            self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
             trace.markTranscriptionEnded()
             // Immutable snapshot for the async hop below.
             let settledTrace = trace
@@ -1571,7 +1635,10 @@ final class AppCoordinator: @unchecked Sendable {
         previewQueue.async { [weak self] in
             guard let self else { return }
             let transcriber = self.stateLock.withLock { self.transcriber }
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy live preview inference")
             let text = try? transcriber.transcribe(samples: samples, runID: previewRunID)
+            ProcessInfo.processInfo.endActivity(activity)
+            self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let adopted = self.livePreviewController?.finishPass(candidate: text)
@@ -1599,6 +1666,8 @@ final class AppCoordinator: @unchecked Sendable {
         outcome: TranscriptionTrace.Outcome,
         text: String? = nil
     ) {
+        var trace = trace
+        trace.rewarmRan = stateLock.withLock { rewarmStartedTraceIDs.remove(trace.id) != nil }
         trace.log(logger: logger, outcome: outcome)
         MainActor.assumeIsolated {
             _ = diagnosticsStore?.record(trace: trace, outcome: outcome, text: text)
@@ -1633,6 +1702,7 @@ final class AppCoordinator: @unchecked Sendable {
                 currentASRModelKind = kind
                 warmupState = .ready
                 activeModelSwitchID = nil
+                lastNativeInferenceAt = nativeClock()
                 return previousTranscriber
             }
 

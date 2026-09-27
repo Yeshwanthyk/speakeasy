@@ -37,7 +37,9 @@ final class AppCoordinatorTests: XCTestCase {
         dictationShortcut: DictationShortcut = .defaultShortcut,
         shortcutSelectionStore: @escaping DictationShortcutSelectionStore = { _ in },
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.tests.transcription"),
-        deliveryTargetProvider: DeliveryTargetProviding = TestCoordinatorTargetProvider()
+        deliveryTargetProvider: DeliveryTargetProviding = TestCoordinatorTargetProvider(),
+        nativeClock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        rewarmThreshold: TimeInterval = 90
     ) -> AppCoordinator {
         let coordinator = AppCoordinator(
             audioCapture: audio,
@@ -58,12 +60,78 @@ final class AppCoordinatorTests: XCTestCase {
             livePreviewController: livePreviewController,
             transcriptCorrectionStore: transcriptCorrectionStore,
             transcriptionQueue: transcriptionQueue,
-            deliveryTargetProvider: deliveryTargetProvider
+            deliveryTargetProvider: deliveryTargetProvider,
+            nativeClock: nativeClock,
+            rewarmThreshold: rewarmThreshold
         )
         if skipWarmup {
             coordinator.skipWarmup()
         }
         return coordinator
+    }
+
+    func testIdleThresholdAndWakeRewarm() async {
+        let clock = TestNativeClock()
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples), transcriber: transcriber,
+            skipWarmup: false, nativeClock: { clock.now }, rewarmThreshold: 90
+        )
+        await coordinator.warmUpModel()
+        clock.advance(seconds: 89)
+        coordinator.rewarmIfIdle()
+        XCTAssertEqual(transcriber.warmUpCount, 1)
+        clock.advance(seconds: 2)
+        coordinator.rewarmIfIdle()
+        XCTAssertTrue(waitUntil { transcriber.warmUpCount == 2 })
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        clock.advance(seconds: 91)
+        coordinator.rewarmIfIdle() // same entry point as the workspace wake observer
+        XCTAssertTrue(waitUntil { transcriber.warmUpCount == 3 })
+    }
+
+    func testRewarmCannotQueueBehindFinalTranscription() async {
+        let clock = TestNativeClock()
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let enteredStop = DispatchSemaphore(value: 0)
+        let releaseStop = DispatchSemaphore(value: 0)
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples,
+                                    endRecordingStarted: enteredStop, endRecordingGate: releaseStop),
+            transcriber: transcriber, skipWarmup: false,
+            nativeClock: { clock.now }, rewarmThreshold: 90
+        )
+        await coordinator.warmUpModel()
+        coordinator.toggleRecording()
+        clock.advance(seconds: 100)
+        coordinator.toggleRecording()
+        XCTAssertEqual(enteredStop.wait(timeout: .now() + 1), .success)
+        coordinator.rewarmIfIdle()
+        XCTAssertEqual(transcriber.warmUpCount, 1)
+        releaseStop.signal()
+    }
+
+    func testKeyDownRewarmAndTraceIdleGap() async {
+        let clock = TestNativeClock()
+        let transcriber = FakeTranscriber(result: .success("Hello"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = E2ETraceStore(fileURL: directory.appendingPathComponent("logs/dictation-e2e.jsonl"))
+        let coordinator = makeCoordinator(
+            audio: AudioCaptureStub(samples: Self.validSamples), transcriber: transcriber,
+            skipWarmup: false, e2eTraceStore: store,
+            nativeClock: { clock.now }, rewarmThreshold: 90
+        )
+        await coordinator.warmUpModel()
+        clock.advance(seconds: 100)
+        coordinator.toggleRecording()
+        XCTAssertTrue(waitUntil { transcriber.warmUpCount == 2 })
+        coordinator.cancelTranscription()
+        XCTAssertTrue(waitUntil { store.allRecords().count == 1 })
+        guard let record = store.allRecords().first else { return XCTFail("missing trace") }
+        XCTAssertEqual(record.idleGapSinceLastNativeInferenceMs ?? -1, 100_000, accuracy: 1)
+        XCTAssertEqual(record.rewarmRan, true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("logs/dictation-e2e.jsonl").path))
     }
 
     func testShortcutUpdatePublishesOnlyAfterMonitorAcceptsIt() {
@@ -375,7 +443,7 @@ final class AppCoordinatorTests: XCTestCase {
         coordinator.toggleRecording()
         wait(for: [pasted], timeout: 1.0)
 
-        waitUntil(timeout: 2) { e2eStore.allRecords().contains(where: \.succeeded) }
+        XCTAssertTrue(waitUntil(timeout: 2) { e2eStore.allRecords().contains(where: \.succeeded) })
         let records = e2eStore.allRecords().filter(\.succeeded)
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records.first?.deliveredCharacterCount, "traced text".count)
@@ -2082,6 +2150,13 @@ private final class AudioCaptureStub: AudioCapturing {
     }
 
     func livePreviewSamples() -> ContiguousArray<Float> { [] }
+}
+
+private final class TestNativeClock: @unchecked Sendable {
+    private let lock = UnfairLock()
+    private var value: UInt64 = 1_000_000_000
+    var now: UInt64 { lock.withLock { value } }
+    func advance(seconds: UInt64) { lock.withLock { value += seconds * 1_000_000_000 } }
 }
 
 private final class FakeTranscriber: Transcriber, @unchecked Sendable {

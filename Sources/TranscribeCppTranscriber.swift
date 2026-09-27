@@ -58,9 +58,11 @@ final class TranscribeCppTranscriber {
     }
 
     func transcribe(samples: ContiguousArray<Float>, runID: UInt64) throws -> String {
-        guard !samples.isEmpty else {
-            return ""
-        }
+        try transcribeWithTimings(samples: samples, runID: runID).0
+    }
+
+    func transcribeWithTimings(samples: ContiguousArray<Float>, runID: UInt64) throws -> (String, NativeASRTimings?) {
+        guard !samples.isEmpty else { return ("", nil) }
 
         return try samples.withUnsafeBufferPointer { buffer in
             let result = asr_transcribe(handle, buffer.baseAddress, buffer.count, runID)
@@ -80,7 +82,7 @@ final class TranscribeCppTranscriber {
             logger.info(
                 "native_timings total_ms=\(timings.totalMs, format: .fixed(precision: 1), privacy: .public) wait_ms=\(timings.waitMs, format: .fixed(precision: 1), privacy: .public) audio_ms=\(timings.audioMs, format: .fixed(precision: 1), privacy: .public) rtf=\(timings.realtimeFactor, format: .fixed(precision: 2), privacy: .public)"
             )
-            return String(cString: textPointer)
+            return (String(cString: textPointer), timings)
         }
     }
 
@@ -89,7 +91,7 @@ final class TranscribeCppTranscriber {
     }
 
     func warmUp() async throws {
-        let silentSamples = ContiguousArray<Float>(repeating: 0, count: 16_000)
+        let silentSamples = ContiguousArray<Float>(repeating: 0, count: 8_000)
         _ = try transcribe(samples: silentSamples)
         logger.info("transcribe.cpp warmup inference completed")
     }

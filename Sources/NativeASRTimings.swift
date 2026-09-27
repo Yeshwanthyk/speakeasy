@@ -3,7 +3,7 @@
 /// `totalMs` is measured inside the Rust bridge; comparing it against the
 /// caller's wall clock exposes boundary overhead for free, and
 /// `realtimeFactor` shows how far inference is from keeping up with speech.
-struct NativeASRTimings: Equatable {
+struct NativeASRTimings: Equatable, Sendable {
     let totalMs: Double
     /// Time spent waiting for the serialized session before inference began.
     let waitMs: Double

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// One completed dictation pass as a persistent, comparable record.
 ///
@@ -25,6 +26,10 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
     /// Key-up through paste request; the release latency users perceive.
     /// Deliberately excludes speaking time.
     let hotkeyReleaseToPasteRequestMs: Double?
+    var idleGapSinceLastNativeInferenceMs: Double? = nil
+    var nativeTotalMs: Double? = nil
+    var nativeWaitMs: Double? = nil
+    var rewarmRan: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -40,6 +45,10 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
         case transcriptionMs = "transcription_ms"
         case transcriptionEndToPasteRequestMs = "transcription_end_to_paste_request_ms"
         case hotkeyReleaseToPasteRequestMs = "release_to_paste_request_ms"
+        case idleGapSinceLastNativeInferenceMs = "idle_gap_since_last_native_inference_ms"
+        case nativeTotalMs = "native_total_ms"
+        case nativeWaitMs = "native_wait_ms"
+        case rewarmRan = "rewarm_ran"
     }
 }
 
@@ -85,7 +94,11 @@ enum E2ETraceRecordFactory {
             ),
             transcriptionMs: trace.transcriptionDurationMs,
             transcriptionEndToPasteRequestMs: trace.transcriptionEndToPasteRequestMs,
-            hotkeyReleaseToPasteRequestMs: trace.hotkeyReleaseToPasteRequestMs
+            hotkeyReleaseToPasteRequestMs: trace.hotkeyReleaseToPasteRequestMs,
+            idleGapSinceLastNativeInferenceMs: trace.idleGapSinceLastNativeInferenceMs,
+            nativeTotalMs: trace.nativeTimings?.totalMs,
+            nativeWaitMs: trace.nativeTimings?.waitMs,
+            rewarmRan: trace.rewarmRan
         )
     }
 
@@ -114,6 +127,15 @@ final class E2ETraceStore: @unchecked Sendable {
         precondition(maxRecords >= 4, "retention window must allow a wrap")
         self.fileURL = fileURL
         self.maxRecords = maxRecords
+        do {
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                _ = FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            }
+        } catch {
+            Logger(subsystem: "com.speakeasy.app", category: "e2e-traces")
+                .error("Could not initialize dictation-e2e.jsonl: \(String(describing: error), privacy: .public)")
+        }
         let records = Self.loadRecords(from: fileURL)
         if records.count > maxRecords {
             self.pendingRecords = Array(records.suffix(maxRecords))
@@ -162,7 +184,8 @@ final class E2ETraceStore: @unchecked Sendable {
             try handle.write(contentsOf: data)
             try handle.write(contentsOf: Data([0x0A]))
         } catch {
-            // Tracing must never break dictation; drop the line silently.
+            Logger(subsystem: "com.speakeasy.app", category: "e2e-traces")
+                .error("Could not write dictation-e2e.jsonl: \(String(describing: error), privacy: .public)")
         }
     }
 

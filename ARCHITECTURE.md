@@ -34,6 +34,7 @@ UI-affecting collaborators are main-actor isolated. Blocking capture stop and na
 A `TextPolishing` seam sits after corrections and before persistence. The default is no polisher; when one is installed, `PolishBudget` bounds generation (`max(48, min(256, ceil(tokens x 1.8) + 24))`) and `PolishGuard` structurally validates output — collapse, one-to-two-word meaning loss, implausible expansion, or emptied text falls back to the corrected source. Filler removal and stutter deduplication stay allowed.
 
 Every terminal outcome flows through `recordTerminal` into `E2ETraceStore`, an append-only JSONL log of per-pass records gated on mandatory milestones (successful deliveries require capture start, key-up, stop return, transcription start/end, and paste request). `E2ESummarizer` reports segment medians over successful insertions only, excluding user think-time by construction.
+Production creates `logs/dictation-e2e.jsonl` under its bundle-ID Application Support directory at coordinator startup and logs write errors. Each record includes the key-down idle gap since the last completed native inference, whether a rewarm was requested for the pass, and native total/session-wait milliseconds when the bridge returned success. A cancelled or timed-out pass may not have native timings yet. The same fields appear in the terminal OSLog line.
 
 ## Audio Capture
 
@@ -50,6 +51,7 @@ The capture lifecycle observes `AVAudioEngineConfigurationChange` and wake event
 `ASRModelKind` selects one pinned Q8_0 GGUF artifact. Each artifact records an immutable Hugging Face revision, expected byte count, SHA-256, and license. `ASRModelInstaller` downloads into the destination filesystem, verifies it, and atomically promotes it. Existing ONNX directories are not consulted.
 
 The default is Parakeet TDT+CTC 110M Q8_0. Parakeet Unified EN 0.6B Q8_0 is the only fallback and user-visible alternative. Legacy Parakeet TDT v3 and Nemotron selections migrate to Unified. A model switch downloads if necessary, verifies, constructs, and warms a replacement off-main, then atomically swaps the app's `Transcriber` and persists the selection; any failure leaves the last-known-good transcriber and selection unchanged.
+After 90 seconds without completed inference, key-down or system wake/screen unlock requests a short, off-main silent rewarm; it is skipped if final transcription has already started. The retained native session mutex serializes any rewarm already running with final transcription. Native inference holds a `.userInitiated` process activity, without disabling system sleep. There is no periodic keepalive.
 
 ## Native Boundary
 

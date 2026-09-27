@@ -32,6 +32,10 @@ struct TranscriptionTrace: Sendable {
     var sampleCount: Int
     var prependedSampleCount: Int
     var graceDurationMs: Double?
+    /// Gap measured at key-down, before any rewarm can reset the clock.
+    var idleGapSinceLastNativeInferenceMs: Double?
+    var rewarmRan = false
+    var nativeTimings: NativeASRTimings?
 
     init(
         id: UUID = UUID(),
@@ -127,6 +131,13 @@ struct TranscriptionTrace: Sendable {
         }
         if let graceDurationMs {
             parts.append(String(format: "grace_ms=%.1f", graceDurationMs))
+        }
+        parts.append("rewarm_ran=\(rewarmRan)")
+        if let idleGapSinceLastNativeInferenceMs {
+            parts.append(String(format: "idle_gap_ms=%.1f", idleGapSinceLastNativeInferenceMs))
+        }
+        if let nativeTimings {
+            parts.append(String(format: "native_total_ms=%.1f native_wait_ms=%.1f", nativeTimings.totalMs, nativeTimings.waitMs))
         }
         if let value = hotkeyPressToCaptureStartMs {
             parts.append(String(format: "press_to_capture_start_ms=%.1f", value))

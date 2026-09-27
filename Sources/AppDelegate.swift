@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private var coordinator: AppCoordinator?
     private var menuBarController: MenuBarController?
+    private var wakeObserver: NSObjectProtocol?
+    private var unlockObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
@@ -31,6 +33,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let coordinator = try await AppCoordinator(feedback: feedback)
                 try coordinator.prepareCapture()
                 self.coordinator = coordinator
+                wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                    forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+                ) { [weak coordinator] _ in coordinator?.rewarmIfIdle() }
+                unlockObserver = DistributedNotificationCenter.default().addObserver(
+                    forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+                ) { [weak coordinator] _ in coordinator?.rewarmIfIdle() }
 
                 if let store = coordinator.transcriptStore {
                     let menuBarController = MenuBarController(
@@ -131,6 +139,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
         coordinator?.shutdown()
     }
 

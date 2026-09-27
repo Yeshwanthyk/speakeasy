@@ -35,6 +35,22 @@ final class E2ETraceStoreTests: XCTestCase {
         XCTAssertEqual(record!.hotkeyReleaseToPasteRequestMs ?? -1, 160.0, accuracy: 0.001)
     }
 
+    func testNativeIdleAndRewarmFieldsPersist() throws {
+        var trace = completeTrace()
+        trace.idleGapSinceLastNativeInferenceMs = 120_000
+        trace.nativeTimings = NativeASRTimings(totalMs: 185, waitMs: 2, audioMs: 1_000)
+        trace.rewarmRan = true
+        let record = try XCTUnwrap(E2ETraceRecordFactory.record(from: trace, outcome: .eventsPosted, deliveredText: "x"))
+        let store = E2ETraceStore(fileURL: fileURL)
+        store.append(record)
+        waitUntilFileContains(count: 1)
+        let decoded = try XCTUnwrap(E2ETraceStore(fileURL: fileURL).allRecords().first)
+        XCTAssertEqual(decoded.idleGapSinceLastNativeInferenceMs, 120_000)
+        XCTAssertEqual(decoded.nativeTotalMs, 185)
+        XCTAssertEqual(decoded.nativeWaitMs, 2)
+        XCTAssertEqual(decoded.rewarmRan, true)
+    }
+
     func testIncompleteSuccessfulTraceIsDropped() {
         var trace = completeTrace()
         trace.pasteRequestedAt = nil
@@ -92,6 +108,21 @@ final class E2ETraceStoreTests: XCTestCase {
 
         let raw = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
         XCTAssertEqual(raw.split(separator: "\n").count, 1, "one JSON object per line")
+    }
+
+    func testExistingJSONLWithoutNewFieldsStillLoads() throws {
+        let record = try XCTUnwrap(E2ETraceRecordFactory.record(
+            from: completeTrace(), outcome: .eventsPosted, deliveredText: "old"
+        ))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(record)) as? [String: Any])
+        for key in ["idle_gap_since_last_native_inference_ms", "native_total_ms", "native_wait_ms", "rewarm_ran"] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        try data.write(to: fileURL)
+        XCTAssertEqual(E2ETraceStore(fileURL: fileURL).allRecords().first?.id, record.id)
     }
 
     func testCorruptLogLoadsWhatItCan() throws {
