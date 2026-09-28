@@ -49,3 +49,7 @@ This builds the app, installs it to `~/Applications`, and opens it. Run the test
 ## Credits
 
 Speech recognition uses NVIDIA's Parakeet models through [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp). The recording overlay adapts code from [Megaphone](https://github.com/Kuberwastaken/megaphone). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## License
+
+[MIT](LICENSE). Model weights are licensed separately (CC-BY-4.0).
