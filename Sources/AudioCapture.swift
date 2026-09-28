@@ -1,5 +1,6 @@
 import AppKit
 @preconcurrency import AVFoundation
+import CoreAudio
 import Foundation
 import os
 
@@ -236,6 +237,8 @@ final class AudioCapture: @unchecked Sendable {
     private var tapInstalled = false
     private var configurationObserver: NSObjectProtocol?
     private var wakeObserver: NSObjectProtocol?
+    private let defaultDeviceQueue = DispatchQueue(label: "com.speakeasy.app.default-input")
+    private var defaultDeviceListener: AudioObjectPropertyListenerBlock?
 
     init(
         maxRecordingSamples: Int = AudioCapture.defaultMaxRecordingSamples,
@@ -280,6 +283,18 @@ final class AudioCapture: @unchecked Sendable {
         ) { [weak self] _ in
             self?.revalidateAfterWake()
         }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, self.stateLock.withLock({ self.activeInputDeviceUID == nil }) else { return }
+            self.requestRecovery(trigger: .configurationChange)
+        }
+        if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, defaultDeviceQueue, listener) == noErr {
+            defaultDeviceListener = listener
+        }
 
         logger.debug("AudioCapture initialized (engine idle)")
     }
@@ -290,6 +305,14 @@ final class AudioCapture: @unchecked Sendable {
         }
         if let wakeObserver {
             wakeNotificationCenter.removeObserver(wakeObserver)
+        }
+        if let defaultDeviceListener {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, defaultDeviceQueue, defaultDeviceListener)
         }
     }
 
@@ -304,11 +327,7 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func selectedInputDeviceUID() -> String? {
-        if let activeInputDeviceUID = stateLock.withLock({ activeInputDeviceUID }) {
-            return activeInputDeviceUID
-        }
-        guard engine.captureInputNode.audioUnit != nil else { return nil }
-        return inputDeviceProvider.defaultInputDeviceUID()
+        stateLock.withLock { activeInputDeviceUID }
     }
 
     /// Most recent converted audio, capped for live-preview re-transcription.
@@ -678,7 +697,7 @@ final class AudioCapture: @unchecked Sendable {
                         rollback: .restored
                     )
                 } else {
-                    activeInputDeviceUID = inputDeviceSwitchCandidateUID
+                    activeInputDeviceUID = inputDeviceSwitchCandidateUID?.isEmpty == true ? nil : inputDeviceSwitchCandidateUID
                     routeEvent = .inputDeviceSelectionSucceeded(uid: inputDeviceSwitchCandidateUID ?? "")
                 }
                 inputDeviceSwitchGeneration = nil
@@ -962,7 +981,7 @@ final class AudioCapture: @unchecked Sendable {
                 generation: initialGeneration,
                 recoveryTrigger: trigger,
                 recoveryAttempt: attempt,
-                inputDeviceUID: currentInputDeviceUID()
+                inputDeviceUID: stateLock.withLock { activeInputDeviceUID }
             )
         } catch {
             logger.error("Audio capture recovery attempt failed: \(String(describing: error), privacy: .public)")
@@ -1061,13 +1080,15 @@ final class AudioCapture: @unchecked Sendable {
         // Keep voice processing disabled here. This graph intentionally runs while idle
         // to preserve pre-roll and start latency; enabling its ducking would therefore
         // lower other apps for the entire lifetime of the prepared capture graph.
-        if let inputDeviceUID {
-            do {
+        do {
+            if let inputDeviceUID {
                 try inputDeviceProvider.setInputDevice(uid: inputDeviceUID, on: inputNode.audioUnit)
-            } catch {
-                markStartFailed(generation: generation)
-                throw error
+            } else {
+                try inputDeviceProvider.setDefaultInputDevice(on: inputNode.audioUnit)
             }
+        } catch {
+            markStartFailed(generation: generation)
+            throw error
         }
 
         // The selected device owns the input format. Read it only after applying
@@ -1226,19 +1247,16 @@ final class AudioCapture: @unchecked Sendable {
         while graceSemaphore.wait(timeout: .now()) == .success {}
     }
 
-    private func currentInputDeviceUID() -> String? {
-        selectedInputDeviceUID()
-    }
-
     private func beginInputDeviceSwitch(to uid: String) {
-        guard inputDeviceProvider.enumerateInputDevices().contains(where: { $0.uid == uid }) else {
+        if uid.isEmpty, stateLock.withLock({ activeInputDeviceUID == nil }) {
+            emit(event: .inputDeviceSelectionSucceeded(uid: ""))
+            return
+        }
+        guard uid.isEmpty || inputDeviceProvider.enumerateInputDevices().contains(where: { $0.uid == uid }) else {
             emit(event: .inputDeviceSelectionFailed(uid: uid, rollback: .restored))
             return
         }
 
-        let systemDefaultUID = engine.captureInputNode.audioUnit != nil
-            ? inputDeviceProvider.defaultInputDeviceUID()
-            : nil
         let switchState = stateLock.withLock { () -> (generation: Int, previousUID: String?)? in
             let canSwitch: Bool
             switch lifecycleState {
@@ -1251,10 +1269,10 @@ final class AudioCapture: @unchecked Sendable {
                   canSwitch,
                   !isRecording,
                   inputDeviceSwitchGeneration == nil,
-                  activeInputDeviceUID != uid else {
+                  (activeInputDeviceUID ?? "") != uid else {
                 return nil
             }
-            let previousUID = activeInputDeviceUID ?? systemDefaultUID
+            let previousUID = activeInputDeviceUID
             nextGeneration += 1
             let generation = nextGeneration
             lifecycleState = .starting(generation)
@@ -1277,7 +1295,7 @@ final class AudioCapture: @unchecked Sendable {
                 generation: switchState.generation,
                 recoveryTrigger: nil,
                 recoveryAttempt: nil,
-                inputDeviceUID: uid
+                inputDeviceUID: uid.isEmpty ? nil : uid
             )
         } catch {
             rollbackInputDeviceSwitch(generation: switchState.generation)

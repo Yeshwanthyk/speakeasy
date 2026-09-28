@@ -48,7 +48,7 @@ typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConf
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
 typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
-typealias InputDeviceSelectionStore = (_ uid: String) -> Void
+typealias InputDeviceSelectionStore = (_ uid: String?) -> Void
 typealias DictationShortcutSelectionStore = (_ shortcut: DictationShortcut) -> Void
 
 enum TranscriptCorrectionUpdateError: Error, Equatable {
@@ -438,7 +438,7 @@ final class AppCoordinator: @unchecked Sendable {
             guard activeInputDeviceSwitchUID == nil else { return "Microphone change already in progress" }
             guard activeModelSwitchID == nil else { return "Wait for model switching to finish" }
             guard case .idle = state else { return "Finish dictation before changing microphones" }
-            guard audioCapture.selectedInputDeviceUID() != uid else { return nil }
+            guard (audioCapture.selectedInputDeviceUID() ?? "") != uid else { return nil }
             activeInputDeviceSwitchUID = uid
             return nil
         }
@@ -607,7 +607,7 @@ final class AppCoordinator: @unchecked Sendable {
     func switchASRModel(to kind: ASRModelKind) {
         guard let asrModelResolver, let transcriberFactory else {
             logger.error("Model switching requested without a transcriber factory")
-            feedback.notify(event: .error("Model switching unavailable"))
+            feedback.notify(event: .modelSwitchFailed("Model switching unavailable"))
             return
         }
 
@@ -650,7 +650,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         case .reject(let message):
             logger.info("Ignoring ASR model switch to \(kind.displayName): \(message)")
-            feedback.notify(event: .error(message))
+            feedback.notify(event: .modelSwitchFailed(message))
 
         case .start(let switchID, let previousWarmupState):
             Task.detached(priority: .userInitiated) { [asrModelResolver, transcriberFactory, modelArtifactVerifier] in
@@ -1056,7 +1056,7 @@ final class AppCoordinator: @unchecked Sendable {
                 return true
             }
             guard isCurrent else { return }
-            inputDeviceSelectionStore(uid)
+            inputDeviceSelectionStore(uid.isEmpty ? nil : uid)
             feedback.notify(event: .status("Microphone changed"))
 
         case .inputDeviceSelectionFailed(let uid, let rollback):
@@ -1753,6 +1753,7 @@ final class AppCoordinator: @unchecked Sendable {
                 withExtendedLifetime(previousTranscriber) {}
             }
             modelSelectionStore(kind)
+            feedback.notify(event: .status("Switched to \(kind.displayName)"))
             logger.info("Switched ASR model to \(kind.displayName) at \(model.url.path)")
 
         case .failure(let error):
@@ -1776,9 +1777,6 @@ final class AppCoordinator: @unchecked Sendable {
                 return false
             }
 
-            guard case .idle = state else {
-                return false
-            }
             activeModelSwitchID = nil
             warmupState = previousWarmupState
             return true
@@ -1789,7 +1787,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         logger.error("Failed to switch ASR model to \(kind.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
-        feedback.notify(event: .error("Failed to switch audio model"))
+        feedback.notify(event: .modelSwitchFailed("Failed to switch audio model"))
     }
 
     static func defaultTranscriptionTimeout(

@@ -5,10 +5,11 @@ import os
 enum UserFeedbackEvent: Equatable, Sendable {
     case status(String)
     case error(String)
+    case modelSwitchFailed(String)
 
     var message: String {
         switch self {
-        case .status(let message), .error(let message):
+        case .status(let message), .error(let message), .modelSwitchFailed(let message):
             return message
         }
     }
@@ -35,14 +36,16 @@ final class SystemFeedback: UserFeedback {
         switch event {
         case .status(let message):
             logger.info("\(message, privacy: .public)")
-        case .error(let message):
+        case .error(let message), .modelSwitchFailed(let message):
             logger.error("\(message, privacy: .public)")
         }
 
         let currentPresenter: Presenter? = lock.withLock { self.presenter }
         DispatchQueue.main.async {
             currentPresenter?(event)
-            if case .error = event {
+            if case .modelSwitchFailed = event {
+                NSSound.beep()
+            } else if case .error = event {
                 NSSound.beep()
             }
         }

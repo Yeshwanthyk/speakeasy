@@ -109,8 +109,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         availableInputDevices: { [weak coordinator] in
                             coordinator?.availableInputDevices() ?? []
                         },
-                        selectedInputDeviceUID: { [weak coordinator] in
-                            coordinator?.selectedInputDeviceUID()
+                        selectedInputDeviceUID: {
+                            MicrophoneSelectionStore.selectedUID()
                         },
                         selectInputDevice: { [weak coordinator] uid in
                             coordinator?.selectInputDevice(uid: uid)
@@ -119,8 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             coordinator?.canSelectInputDevice() ?? false
                         },
                         microphoneLevelSnapshot: { [weak coordinator] in
-                            coordinator?.microphoneLevelSnapshot()
-                                ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+                            coordinator?.microphoneLevelSnapshot() ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
                         }
                     )
                     feedback.setPresenter { [weak menuBarController] event in

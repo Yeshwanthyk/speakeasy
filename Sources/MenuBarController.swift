@@ -91,248 +91,12 @@ private final class MenuHeaderView: NSView {
     }
 }
 
-private final class MicrophoneLevelView: NSView {
-    private let valueLabel = NSTextField(labelWithString: "")
-    private let track = NSView()
-    private let fill = NSView()
-    private var level: CGFloat = 0
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-
-        let label = NSTextField(labelWithString: "Live input level")
-        label.frame = NSRect(x: 14, y: 22, width: 220, height: 17)
-        label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        addSubview(label)
-
-        valueLabel.frame = NSRect(x: frameRect.width - 56, y: 22, width: 42, height: 17)
-        valueLabel.autoresizingMask = [.minXMargin]
-        valueLabel.alignment = .right
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        valueLabel.textColor = .tertiaryLabelColor
-        addSubview(valueLabel)
-
-        track.wantsLayer = true
-        track.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.28).cgColor
-        track.layer?.cornerRadius = 2.5
-        addSubview(track)
-
-        fill.wantsLayer = true
-        fill.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        fill.layer?.cornerRadius = 2.5
-        track.addSubview(fill)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func layout() {
-        super.layout()
-        track.frame = NSRect(x: 14, y: 10, width: bounds.width - 28, height: 5)
-        fill.frame = NSRect(x: 0, y: 0, width: track.bounds.width * level, height: track.bounds.height)
-    }
-
-    func update(snapshot: MicrophoneLevelSnapshot) {
-        let bounded = min(max(CGFloat(snapshot.normalizedLevel), 0), 1)
-        level = bounded
-        valueLabel.stringValue = "\(Int((bounded * 100).rounded()))%"
-        fill.layer?.backgroundColor = level > 0.82
-            ? NSColor.systemOrange.cgColor
-            : NSColor.controlAccentColor.cgColor
-        setAccessibilityLabel("Microphone input level \(valueLabel.stringValue)")
-        needsLayout = true
-    }
-}
-
-private enum MenuStatsFormatter {
-    private static let countFormatter: NumberFormatter = {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.maximumFractionDigits = 0
-        return formatter
-    }()
-
-    static func count(_ value: Int) -> String {
-        countFormatter.string(from: NSNumber(value: value)) ?? "\(value)"
-    }
-
-    static func duration(milliseconds: Double) -> String {
-        let seconds = max(milliseconds, 0) / 1_000
-        if seconds < 60 {
-            return "\(Int(seconds.rounded())) sec"
-        }
-        let minutes = seconds / 60
-        if minutes < 60 {
-            return "\(Int(minutes.rounded())) min"
-        }
-        return String(format: "%.1f hr", minutes / 60)
-    }
-
-    static func latency(milliseconds: Double?) -> String {
-        guard let milliseconds else { return "—" }
-        if milliseconds < 1_000 {
-            return "\(Int(milliseconds.rounded())) ms"
-        }
-        return String(format: "%.1f sec", milliseconds / 1_000)
-    }
-
-    static func percentage(_ rate: Double?) -> String {
-        guard let rate else { return "—" }
-        return "\(Int((rate * 100).rounded()))%"
-    }
-}
-
-private final class MenuSectionHeaderView: NSView {
-    init(title: String, width: CGFloat) {
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 25))
-
-        let label = NSTextField(labelWithString: title)
-        label.frame = NSRect(x: 14, y: 3, width: width - 28, height: 17)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        addSubview(label)
-        setAccessibilityLabel(title)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
-    }
-}
-
-private final class ProductivityStatsView: NSView {
-    init(summary: ProductivitySummary) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 238))
-
-        addLabel(
-            "Your dictation impact",
-            frame: NSRect(x: 18, y: 207, width: 364, height: 19),
-            font: .systemFont(ofSize: 13, weight: .semibold),
-            color: .labelColor
-        )
-        addLabel(
-            "Compared with typing at 70 words per minute",
-            frame: NSRect(x: 18, y: 188, width: 364, height: 17),
-            font: .systemFont(ofSize: 10.5, weight: .regular),
-            color: .secondaryLabelColor
-        )
-
-        addLabel(
-            MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs),
-            frame: NSRect(x: 18, y: 145, width: 165, height: 35),
-            font: .monospacedDigitSystemFont(ofSize: 27, weight: .semibold),
-            color: summary.timeSavedMs > 0 ? .controlAccentColor : .secondaryLabelColor
-        )
-        addLabel(
-            "estimated time saved",
-            frame: NSRect(x: 18, y: 126, width: 165, height: 17),
-            font: .systemFont(ofSize: 10.5, weight: .medium),
-            color: .secondaryLabelColor
-        )
-
-        let verticalDivider = NSBox(frame: NSRect(x: 195, y: 122, width: 1, height: 58))
-        verticalDivider.boxType = .separator
-        addSubview(verticalDivider)
-
-        addLabel(
-            MenuStatsFormatter.count(summary.lifetimeWords),
-            frame: NSRect(x: 216, y: 151, width: 166, height: 29),
-            font: .monospacedDigitSystemFont(ofSize: 21, weight: .semibold),
-            color: .labelColor
-        )
-        addLabel(
-            "words dictated",
-            frame: NSRect(x: 216, y: 132, width: 166, height: 17),
-            font: .systemFont(ofSize: 10.5, weight: .medium),
-            color: .secondaryLabelColor
-        )
-        addLabel(
-            "\(MenuStatsFormatter.count(summary.lifetimeDictations)) dictations  ·  \(MenuStatsFormatter.percentage(summary.deliveryRate)) delivered",
-            frame: NSRect(x: 216, y: 113, width: 166, height: 17),
-            font: .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular),
-            color: .tertiaryLabelColor
-        )
-
-        let horizontalDivider = NSBox(frame: NSRect(x: 18, y: 98, width: 364, height: 1))
-        horizontalDivider.boxType = .separator
-        addSubview(horizontalDivider)
-
-        addLabel(
-            "Today",
-            frame: NSRect(x: 18, y: 71, width: 72, height: 17),
-            font: .systemFont(ofSize: 10.5, weight: .semibold),
-            color: .secondaryLabelColor
-        )
-        addLabel(
-            "\(MenuStatsFormatter.count(summary.todayWords)) words from \(MenuStatsFormatter.count(summary.todayDictations)) dictations",
-            frame: NSRect(x: 92, y: 71, width: 290, height: 17),
-            font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
-            color: .labelColor
-        )
-
-        addLabel(
-            "Speed",
-            frame: NSRect(x: 18, y: 49, width: 72, height: 17),
-            font: .systemFont(ofSize: 10.5, weight: .semibold),
-            color: .secondaryLabelColor
-        )
-        addLabel(
-            "Text is typically ready in \(MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP50Ms))",
-            frame: NSRect(x: 92, y: 49, width: 290, height: 17),
-            font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
-            color: .labelColor
-        )
-
-        let note = summary.usesEstimatedSpeakingDuration
-            ? "Based on 70 wpm typing. New dictations use your measured dictation time."
-            : "Based on 70 wpm typing and your measured dictation time."
-        addLabel(
-            note,
-            frame: NSRect(x: 18, y: 12, width: 364, height: 30),
-            font: .systemFont(ofSize: 9.5, weight: .regular),
-            color: .tertiaryLabelColor,
-            maximumLines: 2
-        )
-
-        setAccessibilityLabel(
-            "Dictation impact. \(MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs)) estimated time saved. "
-                + "\(summary.lifetimeWords) words dictated across \(summary.lifetimeDictations) dictations."
-        )
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    private func addLabel(
-        _ text: String,
-        frame: NSRect,
-        font: NSFont,
-        color: NSColor,
-        maximumLines: Int = 1
-    ) {
-        let label = maximumLines == 1
-            ? NSTextField(labelWithString: text)
-            : NSTextField(wrappingLabelWithString: text)
-        label.frame = frame
-        label.font = font
-        label.textColor = color
-        label.maximumNumberOfLines = maximumLines
-        label.lineBreakMode = maximumLines == 1 ? .byTruncatingTail : .byWordWrapping
-        addSubview(label)
-    }
-}
-
 /// Owns the status-bar item and its menu. Rebuilds the menu lazily via
 /// `NSMenuDelegate.menuNeedsUpdate`, so no work runs on the transcription path.
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
     private static let titleMaxLength = 54
-    private static let recentTranscriptLimit = 6
+    private static let recentTranscriptLimit = 5
     private static let menuWidth: CGFloat = 380
 
     private let store: TranscriptStore
@@ -362,13 +126,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let selectInputDevice: (String) -> Void
     private let canSelectInputDevice: () -> Bool
     private let microphoneLevelSnapshot: () -> MicrophoneLevelSnapshot
+    private var levelTimer: Timer?
+    private weak var levelItem: NSMenuItem?
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
     private var feedbackGeneration = 0
-    private var levelTimer: Timer?
-    private weak var levelItem: NSMenuItem?
     private var correctionEditorController: CorrectionEditorWindowController?
+    private var settingsController: SettingsWindowController?
 
     init(
         store: TranscriptStore,
@@ -398,9 +163,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         selectedInputDeviceUID: @escaping () -> String? = { nil },
         selectInputDevice: @escaping (String) -> Void = { _ in },
         canSelectInputDevice: @escaping () -> Bool = { true },
-        microphoneLevelSnapshot: @escaping () -> MicrophoneLevelSnapshot = {
-            MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
-        }
+        microphoneLevelSnapshot: @escaping () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -447,6 +210,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func showFeedback(_ event: UserFeedbackEvent) {
+        settingsController?.handleFeedback(event)
         transientFeedback = event
         feedbackGeneration &+= 1
         let generation = feedbackGeneration
@@ -460,7 +224,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         switch event {
         case .status:
             duration = 3
-        case .error:
+        case .error, .modelSwitchFailed:
             duration = 6
         }
 
@@ -476,21 +240,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        levelTimer?.invalidate()
-        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateLevelItem()
-            }
-        }
-        updateLevelItem()
-    }
-
-    func menuDidClose(_ menu: NSMenu) {
-        levelTimer?.invalidate()
-        levelTimer = nil
-        levelItem = nil
-    }
 
     // MARK: - NSMenuDelegate
 
@@ -499,6 +248,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.minimumWidth = Self.menuWidth
 
         addHeader(to: menu)
+        let level = NSMenuItem(title: "Live input level", action: nil, keyEquivalent: "")
+        let meter = NSProgressIndicator(frame: NSRect(x: 130, y: 8, width: 235, height: 12))
+        meter.minValue = 0
+        meter.maxValue = 1
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 30))
+        let label = NSTextField(labelWithString: "Live input level")
+        label.frame = NSRect(x: 14, y: 7, width: 110, height: 18)
+        label.font = .systemFont(ofSize: 11)
+        container.addSubview(label)
+        container.addSubview(meter)
+        level.view = container
+        levelItem = level
+        menu.addItem(level)
 
         if let transientFeedback {
             menu.addItem(.separator())
@@ -531,7 +293,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             empty.isEnabled = false
             menu.addItem(empty)
         } else {
-            addHistoryActions(records: Array(records), to: menu)
+            addHistoryActions(to: menu)
         }
 
         let cancelAvailable = canCancelDictation()
@@ -574,15 +336,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        addSectionTitle("Dictation Settings", to: menu)
-        addInvocationMode(to: menu)
-        addShortcutControls(to: menu)
-        addMicrophoneControls(to: menu)
-        addModelControls(to: menu)
-        addCorrectionControls(to: menu)
-        addDiagnostics(to: menu)
-
-        menu.addItem(.separator())
+        let settings = actionItem(title: "Settings…", action: #selector(showSettings), symbol: "gearshape")
+        settings.keyEquivalent = ","
+        settings.keyEquivalentModifierMask = [.command]
+        menu.addItem(settings)
         let quit = NSMenuItem(
             title: "Quit Speakeasy",
             action: #selector(NSApplication.terminate(_:)),
@@ -621,7 +378,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func addHistoryActions(records: [TranscriptRecord], to menu: NSMenu) {
+    private func addHistoryActions(to menu: NSMenu) {
         let pasteLast = actionItem(
             title: "Paste Last Transcript",
             action: #selector(pasteLastTranscriptAction),
@@ -640,248 +397,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         copyLast.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(copyLast)
 
-        let historyItem = NSMenuItem(
-            title: "All Transcripts (\(records.count))",
-            action: nil,
-            keyEquivalent: ""
-        )
-        historyItem.image = Self.symbol("clock.arrow.circlepath", accessibilityDescription: "All transcripts")
-
-        let historyMenu = NSMenu(title: "All Transcripts")
-        historyMenu.autoenablesItems = false
-
-        let clear = actionItem(
-            title: "Clear Transcript History…",
-            action: #selector(confirmClearHistory),
-            symbol: "trash"
-        )
-        historyMenu.addItem(clear)
-        historyMenu.addItem(.separator())
-
-        for record in records {
-            let item = NSMenuItem(
-                title: Self.displayTitle(for: record.finalText),
-                action: #selector(pasteHistoryItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = record.finalText
-            item.toolTip = record.finalText
-            historyMenu.addItem(item)
-        }
-
-        historyItem.submenu = historyMenu
-        menu.addItem(historyItem)
-    }
-
-    private func addInvocationMode(to menu: NSMenu) {
-        let selectedMode = currentInvocationMode()
-        let modeItem = NSMenuItem(
-            title: "Dictation Mode — \(Self.shortName(for: selectedMode))",
-            action: nil,
-            keyEquivalent: ""
-        )
-        modeItem.image = Self.symbol("hand.tap", accessibilityDescription: "Dictation mode")
-
-        let modeMenu = NSMenu(title: "Dictation Mode")
-        modeMenu.autoenablesItems = false
-        for mode in DictationInvocationMode.allCases {
-            let item = NSMenuItem(
-                title: mode.displayName,
-                action: #selector(selectInvocationModeItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = mode.rawValue
-            item.state = mode == selectedMode ? .on : .off
-            item.isEnabled = mode != selectedMode
-            modeMenu.addItem(item)
-        }
-        modeItem.submenu = modeMenu
-        menu.addItem(modeItem)
-    }
-
-    private func addShortcutControls(to menu: NSMenu) {
-        let shortcut = currentDictationShortcut()
-        let shortcutItem = NSMenuItem(
-            title: "Shortcut — \(shortcut.displayName)",
-            action: nil,
-            keyEquivalent: ""
-        )
-        shortcutItem.image = Self.symbol("keyboard", accessibilityDescription: "Dictation shortcut")
-
-        let shortcutMenu = NSMenu(title: "Dictation Shortcut")
-        shortcutMenu.autoenablesItems = false
-
-        let change = actionItem(
-            title: "Change Shortcut…",
-            action: #selector(changeShortcutAction),
-            symbol: "keyboard.badge.ellipsis"
-        )
-        change.isEnabled = canChangeDictationShortcut()
-        shortcutMenu.addItem(change)
-
-        let reset = actionItem(
-            title: "Reset to fn",
-            action: #selector(resetShortcutAction),
-            symbol: "arrow.counterclockwise"
-        )
-        reset.isEnabled = canChangeDictationShortcut() && shortcut != .defaultShortcut
-        shortcutMenu.addItem(reset)
-
-        shortcutItem.submenu = shortcutMenu
-        menu.addItem(shortcutItem)
-    }
-
-    private func addMicrophoneControls(to menu: NSMenu) {
-        let devices = availableInputDevices()
-        let selectedUID = selectedInputDeviceUID()
-        let selectedName = devices.first(where: { $0.uid == selectedUID })?.name ?? "System Default"
-        let microphoneItem = NSMenuItem(
-            title: "Microphone — \(Self.displayTitle(for: selectedName))",
-            action: nil,
-            keyEquivalent: ""
-        )
-        microphoneItem.image = Self.symbol("mic", accessibilityDescription: "Microphone")
-
-        let microphoneMenu = NSMenu(title: "Microphone")
-        microphoneMenu.autoenablesItems = false
-        let selectionEnabled = canSelectInputDevice()
-        if devices.isEmpty {
-            let empty = NSMenuItem(title: "No microphones available", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            microphoneMenu.addItem(empty)
-        } else {
-            for device in devices {
-                let item = NSMenuItem(
-                    title: device.name,
-                    action: #selector(selectInputDeviceItem(_:)),
-                    keyEquivalent: ""
-                )
-                item.target = self
-                item.representedObject = device.uid
-                item.state = device.uid == selectedUID ? .on : .off
-                item.isEnabled = selectionEnabled && device.uid != selectedUID
-                microphoneMenu.addItem(item)
-            }
-        }
-        microphoneItem.submenu = microphoneMenu
-        menu.addItem(microphoneItem)
-
-        if isRecording() {
-            let snapshot = microphoneLevelSnapshot()
-            let level = NSMenuItem(title: Self.levelTitle(for: snapshot), action: nil, keyEquivalent: "")
-            let levelView = MicrophoneLevelView(
-                frame: NSRect(x: 0, y: 0, width: Self.menuWidth, height: 44)
-            )
-            levelView.update(snapshot: snapshot)
-            level.view = levelView
-            levelItem = level
-            menu.addItem(level)
-        }
-    }
-
-    private func addModelControls(to menu: NSMenu) {
-        let selectedKind = currentASRModelKind()
-        let modelItem = NSMenuItem(
-            title: "Speech Model — \(Self.shortName(for: selectedKind))",
-            action: nil,
-            keyEquivalent: ""
-        )
-        modelItem.image = Self.symbol("waveform.badge.mic", accessibilityDescription: "Speech model")
-
-        let modelMenu = NSMenu(title: "Speech Model")
-        modelMenu.autoenablesItems = false
-        for kind in ASRModelKind.allCases {
-            let item = NSMenuItem(
-                title: kind.displayName,
-                action: #selector(selectModelItem(_:)),
-                keyEquivalent: ""
-            )
-            item.target = self
-            item.representedObject = kind.preferenceValue
-            item.state = kind == selectedKind ? .on : .off
-            item.isEnabled = kind != selectedKind
-            modelMenu.addItem(item)
-        }
-        modelItem.submenu = modelMenu
-        menu.addItem(modelItem)
-    }
-
-    private func addCorrectionControls(to menu: NSMenu) {
-        menu.addItem(
-            actionItem(
-                title: "Corrections…",
-                action: #selector(showCorrections),
-                symbol: "text.badge.checkmark"
-            )
-        )
-    }
-
-    private func addDiagnostics(to menu: NSMenu) {
-        let summary = diagnosticsStore?.productivitySummary()
-            ?? DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
-        let statsTitle = summary.lifetimeWords > 0
-            ? "Stats — \(MenuStatsFormatter.duration(milliseconds: summary.timeSavedMs)) saved"
-            : "Stats & Insights"
-        let diagnosticsItem = NSMenuItem(title: statsTitle, action: nil, keyEquivalent: "")
-        diagnosticsItem.image = Self.symbol("chart.bar.xaxis", accessibilityDescription: "Stats and insights")
-
-        let diagnosticsMenu = NSMenu(title: "Stats & Insights")
-        diagnosticsMenu.autoenablesItems = false
-        let summaryItem = NSMenuItem(title: "Dictation impact", action: nil, keyEquivalent: "")
-        summaryItem.isEnabled = false
-        summaryItem.view = ProductivityStatsView(summary: summary)
-        diagnosticsMenu.addItem(summaryItem)
-
-        diagnosticsMenu.addItem(.separator())
-        let technicalItem = NSMenuItem(title: "Technical Details", action: nil, keyEquivalent: "")
-        technicalItem.image = Self.symbol("gauge", accessibilityDescription: "Technical details")
-        let technicalMenu = NSMenu(title: "Technical Details")
-        technicalMenu.autoenablesItems = false
-        addTechnicalDetail(
-            title: "Typical release to text",
-            value: MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP50Ms),
-            to: technicalMenu
-        )
-        addTechnicalDetail(
-            title: "95% release to text",
-            value: MenuStatsFormatter.latency(milliseconds: summary.releaseToTextP95Ms),
-            to: technicalMenu
-        )
-        addTechnicalDetail(
-            title: "Estimated typing time",
-            value: MenuStatsFormatter.duration(milliseconds: summary.estimatedTypingDurationMs),
-            to: technicalMenu
-        )
-        addTechnicalDetail(
-            title: "Measured dictation time",
-            value: MenuStatsFormatter.duration(milliseconds: summary.speakingDurationMs),
-            to: technicalMenu
-        )
-        if summary.usesEstimatedSpeakingDuration {
-            addTechnicalDetail(
-                title: "Older dictation pace estimate",
-                value: "150 words/min",
-                to: technicalMenu
-            )
-        }
-        technicalItem.submenu = technicalMenu
-        diagnosticsMenu.addItem(technicalItem)
-
-        diagnosticsItem.submenu = diagnosticsMenu
-        menu.addItem(diagnosticsItem)
-    }
-
-    private func addTechnicalDetail(title: String, value: String, to menu: NSMenu) {
-        let item = NSMenuItem(title: "\(title) — \(value)", action: nil, keyEquivalent: "")
-        item.isEnabled = false
-        menu.addItem(item)
     }
 
     private func addSectionTitle(_ title: String, to menu: NSMenu) {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.view = MenuSectionHeaderView(title: title, width: Self.menuWidth)
+        item.isEnabled = false
         menu.addItem(item)
     }
 
@@ -907,19 +427,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         pasteLastTranscript()
     }
 
-    @objc private func confirmClearHistory() {
-        let alert = NSAlert()
-        alert.messageText = "Clear transcript history?"
-        alert.informativeText = "This permanently removes all saved transcripts from this Mac."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Clear History")
-        alert.buttons.first?.hasDestructiveAction = true
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        store.clear()
-    }
-
     @objc private func cancelDictationAction() {
         cancelDictation()
     }
@@ -930,29 +437,6 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func discardFailedCaptureAction() {
         discardFailedCapture()
-    }
-
-    @objc private func selectInputDeviceItem(_ sender: NSMenuItem) {
-        guard let uid = sender.representedObject as? String else { return }
-        selectInputDevice(uid)
-    }
-
-    @objc private func selectInvocationModeItem(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String,
-              let mode = DictationInvocationMode(rawValue: value) else {
-            return
-        }
-
-        selectInvocationMode(mode)
-    }
-
-    @objc private func selectModelItem(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? String,
-              let kind = ASRModelKind(preferenceValue: value) else {
-            return
-        }
-
-        selectASRModel(kind)
     }
 
     @objc private func changeShortcutAction() {
@@ -971,6 +455,32 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func resetShortcutAction() {
         guard canChangeDictationShortcut() else { return }
         applyShortcut(.defaultShortcut)
+    }
+
+    @objc private func showSettings() {
+        if settingsController == nil {
+            let model = SettingsModel(
+                store: store,
+                diagnosticsStore: diagnosticsStore,
+                currentMode: currentInvocationMode,
+                setMode: selectInvocationMode,
+                currentShortcut: currentDictationShortcut,
+                changeShortcut: { [weak self] in self?.changeShortcutAction() },
+                resetShortcut: { [weak self] in self?.resetShortcutAction() },
+                shortcutEnabled: canChangeDictationShortcut,
+                availableDevices: availableInputDevices,
+                selectedDevice: selectedInputDeviceUID,
+                selectDevice: selectInputDevice,
+                deviceEnabled: canSelectInputDevice,
+                currentModel: currentASRModelKind,
+                selectModel: selectASRModel,
+                openCorrections: { [weak self] in self?.showCorrections() },
+                pasteTranscript: pasteTranscript,
+                levelSnapshot: microphoneLevelSnapshot
+            )
+            settingsController = SettingsWindowController(model: model)
+        }
+        settingsController?.present()
     }
 
     @objc private func showCorrections() {
@@ -1015,6 +525,24 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    func menuWillOpen(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let meter = self.levelItem?.view?.subviews.last as? NSProgressIndicator else { return }
+                meter.doubleValue = Double(self.microphoneLevelSnapshot().normalizedLevel)
+            }
+        }
+        if let levelTimer { RunLoop.main.add(levelTimer, forMode: .common) }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = nil
+        levelItem = nil
+    }
+
+
     private func currentActivity() -> MenuBarActivity {
         if isRecording() {
             return .listening
@@ -1035,40 +563,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return String(collapsed[..<idx]) + "…"
     }
 
-    private static func shortName(for mode: DictationInvocationMode) -> String {
-        switch mode {
-        case .toggle:
-            return "Hands-Free"
-        case .pushToTalk:
-            return "Push to Talk"
-        }
-    }
-
-    private static func shortName(for kind: ASRModelKind) -> String {
-        switch kind {
-        case .parakeet110M:
-            return "Parakeet 110M"
-        case .parakeetUnified:
-            return "Parakeet Unified"
-        }
-    }
-
-    private static func levelTitle(for snapshot: MicrophoneLevelSnapshot) -> String {
-        "Microphone Level: \(Int((snapshot.normalizedLevel * 100).rounded()))%"
-    }
-
     private static func symbol(_ name: String, accessibilityDescription: String) -> NSImage? {
         let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription)
         image?.isTemplate = true
         return image
     }
 
-    private func updateLevelItem() {
-        guard let levelItem else { return }
-        let snapshot = microphoneLevelSnapshot()
-        levelItem.title = Self.levelTitle(for: snapshot)
-        (levelItem.view as? MicrophoneLevelView)?.update(snapshot: snapshot)
-    }
 }
 
 private extension UserFeedbackEvent {
@@ -1076,6 +576,7 @@ private extension UserFeedbackEvent {
         if case .error = self {
             return true
         }
+        if case .modelSwitchFailed = self { return true }
         return false
     }
 }
