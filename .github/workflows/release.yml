@@ -1,0 +1,45 @@
+name: Release
+
+# Push a tag that matches Info.plist, e.g. `git tag v0.4.1 && git push origin v0.4.1`.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build.sh derives the build number from the commit count
+
+      - name: Check tag matches Info.plist
+        run: |
+          version="$(plutil -extract CFBundleShortVersionString raw -o - Info.plist)"
+          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Info.plist version $version" >&2
+            exit 1
+          fi
+
+      - name: Build
+        # No signing identity on the runner, so build.sh signs ad hoc.
+        run: ./build.sh
+
+      - name: Package
+        run: |
+          ditto -c -k --keepParent build/Speakeasy.app "Speakeasy-$GITHUB_REF_NAME.zip"
+          shasum -a 256 "Speakeasy-$GITHUB_REF_NAME.zip" > "Speakeasy-$GITHUB_REF_NAME.zip.sha256"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "Speakeasy-$GITHUB_REF_NAME.zip" \
+            "Speakeasy-$GITHUB_REF_NAME.zip.sha256" \
+            --title "Speakeasy $GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "Apple Silicon only. This build is not notarized: see the README's Install section for the one-time Open Anyway step."

@@ -9,3 +9,6 @@ benchmarks/results/
 benchmarks/fixtures/audio/
 benchmarks/fixtures/manifest.json
 Fuzz/Findings/
+
+# Local working notes (not published)
+.local/
