@@ -100,8 +100,8 @@ impl CancellationState {
         }
 
         // A queued run has no token yet, even when another run is active.
-        // IDs are unique per handle; discard oldest never-started requests
-        // rather than letting late cancels grow this queue indefinitely.
+        // Late cancels for already-finished runs also land here; IDs are never
+        // reused per handle, so they are inert. Cap at 64, dropping the oldest.
         if !self.pending.contains(&id) {
             if self.pending.len() == 64 {
                 self.pending.pop_front();
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_state_ignores_stale_run_ids() {
+    fn cancellation_state_records_cancels_for_inactive_run_ids() {
         let mut state = CancellationState::default();
         let first = state.begin(7);
         assert!(state.cancel(7));

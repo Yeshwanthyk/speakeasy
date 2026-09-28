@@ -352,19 +352,24 @@ final class AppCoordinator: @unchecked Sendable {
         guard let (model, runID) = request else { return }
         rewarmQueue.async { [weak self] in
             guard let self else { return }
+            // Check and mark running under one lock so a concurrent stop either
+            // skips this rewarm or observes it as in flight and cancels it.
             let shouldRun = self.stateLock.withLock { () -> Bool in
-                guard !self.isShuttingDown, self.activeModelSwitchID == nil else { return false }
-                if case .transcribing = self.state { return false }
-                return true
-            }
-            guard shouldRun else {
-                self.stateLock.withLock { self.rewarmRunID = nil }
-                return
-            }
-            self.stateLock.withLock {
+                let blocked: Bool
+                if case .transcribing = self.state {
+                    blocked = true
+                } else {
+                    blocked = self.isShuttingDown || self.activeModelSwitchID != nil
+                }
+                guard !blocked else {
+                    self.rewarmRunID = nil
+                    return false
+                }
                 self.rewarmIsRunning = true
                 self.activeTrace?.rewarmStarted = true
+                return true
             }
+            guard shouldRun else { return }
             let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy idle model rewarm")
             defer { ProcessInfo.processInfo.endActivity(activity) }
             do {
