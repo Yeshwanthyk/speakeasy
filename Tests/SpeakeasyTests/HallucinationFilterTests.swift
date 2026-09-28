@@ -130,4 +130,13 @@ final class HallucinationFilterTests: XCTestCase {
             .accepted
         )
     }
+
+    func testHugeDurationsDoNotOverflowTheDensityBudget() {
+        // Regression: Int(ceil(duration * rate)) trapped above Int.max.
+        let filter = HallucinationFilter()
+        for duration in [1e300, .greatestFiniteMagnitude, Double(Int.max)] {
+            XCTAssertEqual(filter.verdict(for: "hello there", activeDurationSeconds: duration, activeRMS: 0.1), .accepted)
+        }
+    }
 }
+

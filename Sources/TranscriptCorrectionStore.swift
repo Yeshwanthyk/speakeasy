@@ -1,4 +1,11 @@
 import Foundation
+import os
+
+enum TranscriptCorrectionDocumentError: Error, Equatable {
+    case malformed
+    case unsupportedSchemaVersion(Int)
+    case invalidCorrections(TranscriptPostProcessorError)
+}
 
 struct TranscriptCorrectionDocument: Codable, Equatable, Sendable {
     static let currentSchemaVersion = 1
@@ -10,6 +17,26 @@ struct TranscriptCorrectionDocument: Codable, Equatable, Sendable {
         self.schemaVersion = schemaVersion
         self.corrections = corrections
     }
+
+    /// Decodes untrusted file bytes into corrections that are guaranteed to
+    /// compile into a `TranscriptPostProcessor`.
+    static func validatedCorrections(from data: Data) throws -> [TranscriptCorrection] {
+        let document: TranscriptCorrectionDocument
+        do {
+            document = try JSONDecoder().decode(Self.self, from: data)
+        } catch {
+            throw TranscriptCorrectionDocumentError.malformed
+        }
+        guard document.schemaVersion == currentSchemaVersion else {
+            throw TranscriptCorrectionDocumentError.unsupportedSchemaVersion(document.schemaVersion)
+        }
+        do {
+            _ = try TranscriptPostProcessor(corrections: document.corrections)
+        } catch let error as TranscriptPostProcessorError {
+            throw TranscriptCorrectionDocumentError.invalidCorrections(error)
+        }
+        return document.corrections
+    }
 }
 
 /// Local persistence for the user's exact corrections.
@@ -19,6 +46,8 @@ struct TranscriptCorrectionDocument: Codable, Equatable, Sendable {
 /// atomic write on a utility queue.
 @MainActor
 final class TranscriptCorrectionStore {
+    private static let logger = Logger(subsystem: "com.speakeasy.app", category: "corrections")
+
     private let fileURL: URL
     private let writer = OrderedSnapshotWriter(label: "com.speakeasy.corrections.write")
     private var corrections: [TranscriptCorrection]
@@ -62,16 +91,25 @@ final class TranscriptCorrectionStore {
         }
     }
 
+    /// Missing files mean no corrections. An unreadable or invalid file is
+    /// moved aside (replacing any earlier one) so the next save cannot
+    /// silently overwrite the user's only copy.
     private static func load(from url: URL) -> [TranscriptCorrection] {
-        guard
-            let data = try? Data(contentsOf: url),
-            let document = try? JSONDecoder().decode(TranscriptCorrectionDocument.self, from: data),
-            document.schemaVersion == TranscriptCorrectionDocument.currentSchemaVersion,
-            (try? TranscriptPostProcessor(corrections: document.corrections)) != nil
-        else {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: url)
+            return try TranscriptCorrectionDocument.validatedCorrections(from: data)
+        } catch {
+            logger.error("Ignoring unreadable corrections file: \(String(describing: error), privacy: .public)")
+            let invalidURL = invalidFileURL(for: url)
+            try? FileManager.default.removeItem(at: invalidURL)
+            try? FileManager.default.moveItem(at: url, to: invalidURL)
             return []
         }
-        return document.corrections
+    }
+
+    static func invalidFileURL(for url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("invalid.json")
     }
 
     private static func defaultFileURL() -> URL {

@@ -57,14 +57,12 @@ final class CorrectionEditorModel: ObservableObject {
     func save() async -> Bool {
         guard canSave else { return false }
 
-        let processor: TranscriptPostProcessor
         do {
-            processor = try TranscriptPostProcessor(corrections: corrections)
+            _ = try TranscriptPostProcessor(corrections: corrections)
         } catch {
             errorMessage = Self.message(for: error)
             return false
         }
-        _ = processor
 
         isSaving = true
         errorMessage = nil

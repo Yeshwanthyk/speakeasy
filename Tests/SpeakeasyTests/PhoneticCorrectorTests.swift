@@ -193,4 +193,30 @@ final class PhoneticPostProcessorIntegrationTests: XCTestCase {
         ])
         XCTAssertEqual(processor.process("hello wisp").finalText, "Hello, Wisp")
     }
+
+    func testDeletionRulesStillCompileWhenFuzzyMatchingIsOn() throws {
+        // Regression: a blank replacement became a blank phonetic canonical,
+        // which threw and made startup drop every correction.
+        let corrections = [
+            TranscriptCorrection(heard: "um", written: ""),
+            TranscriptCorrection(heard: "uh", written: "  "),
+            TranscriptCorrection(heard: "kudo", written: "CUDA"),
+            TranscriptCorrection(heard: "same", written: "same"),
+            TranscriptCorrection(heard: "off", written: "OFF", isEnabled: false),
+        ]
+        let terms = TranscriptPostProcessor.phoneticTerms(for: corrections)
+        XCTAssertEqual(terms, [PhoneticTerm(canonical: "CUDA", spokenForms: ["kudo"])])
+
+        let processor = try TranscriptPostProcessor(corrections: corrections, phoneticTerms: terms)
+        XCTAssertEqual(processor.process("um the coda").finalText, " the CUDA")
+    }
+
+    func testWordsAtLineBreaksOfTheCommonListAreProtected() throws {
+        // Regression: splitting on spaces only fused "your\nable".
+        XCTAssertTrue(PhoneticCorrector.commonWords.isSuperset(of: ["your", "able", "yesterday", "a"]))
+        XCTAssertFalse(PhoneticCorrector.commonWords.contains(where: { $0.contains(where: \.isWhitespace) }))
+        let orCorrector = try PhoneticCorrector(terms: [PhoneticTerm(canonical: "OR", spokenForms: ["or"])])
+        XCTAssertEqual(orCorrector.correct("your able"), "your able")
+    }
 }
+

@@ -8,3 +8,4 @@ build/
 benchmarks/results/
 benchmarks/fixtures/audio/
 benchmarks/fixtures/manifest.json
+Fuzz/Findings/

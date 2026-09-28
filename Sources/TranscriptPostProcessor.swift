@@ -131,6 +131,21 @@ struct TranscriptPostProcessor: Sendable {
         self.phoneticCorrector = try PhoneticCorrector(terms: phoneticTerms)
     }
 
+    /// Phonetic terms derived from the user's exact corrections for the
+    /// optional fuzzy pass. Disabled rules, identity rules, and deletions
+    /// (blank replacements) are skipped: fuzzy-matching toward an empty
+    /// canonical would delete similar-sounding words, and the phonetic
+    /// compiler rejects blank canonicals.
+    static func phoneticTerms(for corrections: [TranscriptCorrection]) -> [PhoneticTerm] {
+        corrections
+            .filter {
+                $0.isEnabled
+                    && $0.heard != $0.written
+                    && !$0.written.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            .map { PhoneticTerm(canonical: $0.written, spokenForms: [$0.heard]) }
+    }
+
     func process(_ rawText: String) -> ProcessedTranscript {
         // Phonetic rescue runs on the raw transcript so misheard domain
         // terms become canonical words before command and exact matching.
@@ -274,16 +289,18 @@ struct TranscriptPostProcessor: Sendable {
             .precomposedStringWithCompatibilityMapping
     }
 
+    // Trimming in place keeps each command O(trimmed) instead of copying
+    // the whole output, which matters for long dictations with many commands.
     private static func removeTrailingWhitespace(from value: inout String) {
-        value = String(value.reversed().drop(while: { $0.isWhitespace }).reversed())
+        while let last = value.last, last.isWhitespace {
+            value.removeLast()
+        }
     }
 
     private static func removeTrailingInlineWhitespace(from value: inout String) {
-        value = String(
-            value.reversed()
-                .drop(while: { $0.isWhitespace && $0 != "\n" && $0 != "\r" })
-                .reversed()
-        )
+        while let last = value.last, last.isWhitespace, last != "\n", last != "\r" {
+            value.removeLast()
+        }
     }
 
     struct Token: Sendable {

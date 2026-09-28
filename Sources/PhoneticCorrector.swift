@@ -8,11 +8,6 @@ struct PhoneticTerm: Equatable, Sendable {
     /// Heard spellings that should be rewritten to `canonical`, e.g.
     /// `["koo dnn", "cu dnn"]`.
     let spokenForms: [String]
-
-    init(canonical: String, spokenForms: [String]) {
-        self.canonical = canonical
-        self.spokenForms = spokenForms
-    }
 }
 
 enum PhoneticCorrectorError: Error, Equatable {
@@ -54,10 +49,10 @@ struct PhoneticCorrector: Sendable {
     /// Edit distance allowed on words of at least six characters.
     private static let relaxedEditDistance = 2
     // Common speech must never be turned into a taught technical term.
-    private static let commonWords: Set<String> = Set("""
+    static let commonWords: Set<String> = Set("""
     a about above across act after again against age ago air all almost along already also always am an and another any anyone anything are area around as ask at away back bad be because become been before began begin behind being best better between big both bring but by call came can car care case change child children city clear close code come common could country course cut day days did different do does done down during each early earth easy end enough even ever every example eye face fact family far fast father feel few find first five for form found four free friend from full game gave get girl give go god going good got great group grow had half hand happen hard has have he head hear heard heart help her here high him his history home hope hot hour house how however human i if important in include inside into is it its itself just keep kind know known land large last later law lead learn leave left less let life light like line little live local long look lost lot love low made main make man many may me mean men might mind miss more most mother move much must my name near need never new next night no not nothing now number of off often old on once one only open or order other our out over own part past people perhaps person place plan play point possible power present problem public put question quite rather real really reason red remember result right room run said same saw say school see seem set seven she short should show side since six small so some someone something sometimes soon sound start state still stop story such sure system take talk tell ten than thank thanks that the their them then there these they thing things think this those though thought three through time to today together too took top true try turn two under understand until up upon us use used using usual very voice wait want was water way we well went were what when where which while white who whole why will with within without woman women word work world would write wrong year years yes yet you young your
     able account actually add address adult afternoon ahead allow alone although amount animal answer appear apple arm art attention available baby ball bank base beautiful bed begin beginning believe black blood blue board body book born box boy break brother build building business busy buy camera chance character check class clean clock cold college color company complete condition continue control cost create current dark data daughter deal death decide deep demand design develop die difference difficult dinner direct direction doctor door drive drop due eat education effect effort either else employ energy enjoy enter environment especially establish evening event exact expect experience explain express fall fear field figure fill final fine fire fish floor fly follow food foot force foreign forget forward future front future garden general get given glass goal government green ground hair happen happy health heavy held hit hold horse hospital idea imagine increase industry information instead interest issue job join key kitchen language late laugh lay letter listen long longer machine major market matter measure meeting member memory middle minute model money month morning mostly music natural nature nearly necessary network news nice nobody normal north note notice object office oil option outside page paper parent pass pay peace phone physical picture piece pitch plant police policy position price probably produce project provide quality reach ready receive record reduce relationship remain report research rest return rich ride river road rock role rule safe save science search season second security seem sense series serious service shape share shoot sight similar simple single sit situation size sleep slow social society son song sorry sort source space speak special speed spend sport spring stand star stay step stock store street strong student study style subject success summer support table task teach teacher team technology test theory third throw thus title tool town trade train travel treatment tree trouble trust truth unit university value video view visit volume walk wall war watch week weight west whether wife window wish wonder worry worth yesterday
-    """.split(separator: " ").map(String.init))
+    """.split(whereSeparator: \.isWhitespace).map(String.init))
 
     private struct CompiledForm: Sendable {
         /// Normalized words of the spoken form.
@@ -69,17 +64,14 @@ struct PhoneticCorrector: Sendable {
         let canonical: String
     }
 
-    private struct WindowEntry: Sendable {
-        let form: CompiledForm
-    }
-
     private struct EditDistanceEntry: Sendable {
         let word: String
         let canonical: String
     }
 
     private let forms: [CompiledForm]
-    private let windowsBySkeleton: [String: WindowEntry]
+    private let windowsBySkeleton: [String: CompiledForm]
+    private let maxWordWindowSize: Int
     private let skeletonsByWord: [String: String]
     private let editDistanceEntries: [EditDistanceEntry]
 
@@ -172,11 +164,7 @@ struct PhoneticCorrector: Sendable {
             }
         }
 
-        var windowsBySkeleton: [String: WindowEntry] = [:]
-        for (key, entry) in windowCandidates where !ambiguousWindowKeys.contains(key) {
-            windowsBySkeleton[key] = WindowEntry(form: entry)
-        }
-        self.windowsBySkeleton = windowsBySkeleton
+        self.windowsBySkeleton = windowCandidates.filter { !ambiguousWindowKeys.contains($0.key) }
 
         var skeletonsByWord: [String: String] = [:]
         for form in forms where form.words.count == 1 {
@@ -199,6 +187,7 @@ struct PhoneticCorrector: Sendable {
         }
         self.editDistanceEntries = editDistanceEntries
         self.forms = forms
+        self.maxWordWindowSize = forms.map(\.words.count).max() ?? 1
     }
 
     /// Rewrites misheard term occurrences in `text`, leaving everything
@@ -272,10 +261,6 @@ struct PhoneticCorrector: Sendable {
         let width: Int
     }
 
-    private var maxWordWindowSize: Int {
-        forms.map(\.words.count).max() ?? 1
-    }
-
     private func appendWindowCandidate(
         words: [TranscriptPostProcessor.Token],
         start: Int,
@@ -292,10 +277,10 @@ struct PhoneticCorrector: Sendable {
         guard window.reduce(0, { $0 + $1.normalized.count }) >= 4,
               window.allSatisfy({ !Self.commonWords.contains($0.normalized) }) else { return }
         let key = skeletons.joined(separator: "\u{1F}")
-        guard let entry = windowsBySkeleton[key] else { return }
+        guard let form = windowsBySkeleton[key] else { return }
         candidates.append(Candidate(
             range: words[start].range.lowerBound..<words[start + windowSize - 1].range.upperBound,
-            replacement: entry.form.canonical,
+            replacement: form.canonical,
             tier: 3,
             width: windowSize
         ))
@@ -410,6 +395,6 @@ struct PhoneticCorrector: Sendable {
             if rowMinimum > limit { return limit + 1 }
             swap(&previousRow, &currentRow)
         }
-        return previousRow[right.count]
+        return min(previousRow[right.count], limit + 1)
     }
 }

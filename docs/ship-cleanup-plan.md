@@ -18,13 +18,11 @@ Start state (2026-09-28, branch `feat/long-dictation-redux-ui`):
 6. **Verify:** run `swift test`, `cargo test` if Rust was touched, `./build.sh`, and a manual check in the app where there is UI.
 7. **Commit:** one commit per domain.
 
-## Tooling decisions to make first
+## Tooling (decided 2026-09-28)
 
-- **Property testing:** there are no package dependencies today. Options:
-  - add SwiftCheck;
-  - write a small in-repo seeded generator with shrinking;
-  - use swift-testing parameterized tests with generated cases.
-- **Fuzzing:** Swift supports `-sanitize=fuzzer` on the open-source toolchain, and the Rust bridge can use `cargo-fuzz`. Decide where fuzz targets live (for example a `Fuzz/` directory with a script) and the time budget per run.
+- **Property testing:** in-repo harness, `Tests/SpeakeasyTests/Support/PropertyTesting.swift`. It has a seeded SplitMix64, `Gen` combinators with greedy shrinking, and `forAll`. Reproduce a failure with `SPEAKEASY_PROPERTY_SEED`. Scale it up with `SPEAKEASY_PROPERTY_ITERATIONS` (default 200).
+- **Swift fuzzing:** Xcode's toolchain rejects `-sanitize=fuzzer`, so fuzzing uses an in-repo mutation fuzzer that runs inside XCTest (`Support/Fuzzing.swift`). Each target replays `Fuzz/Corpus/<target>/`, then mutates for 1,500 iterations under `swift test`. `script/fuzz.sh [seconds]` runs longer (`SPEAKEASY_FUZZ_SECONDS`), and `SPEAKEASY_FUZZ_SEED` reproduces a run. Findings land in `Fuzz/Findings/` (gitignored). There is no coverage guidance; add libFuzzer through an OSS toolchain later if needed.
+- **Rust fuzzing:** install `cargo-fuzz` in domain 4.
 - **Test pollution:** UserDefaults suites now go through `Tests/SpeakeasyTests/TestDefaults.swift` (temp-path suites, no leftovers). Temp files and directories are still left in `$TMPDIR` (about 1,100 entries). Fix this during the persistence domain.
 
 ## Domains (suggested order: core logic first, UI last)
@@ -40,5 +38,16 @@ Start state (2026-09-28, branch `feat/long-dictation-redux-ui`):
 | 7 | App shell and permissions | `AppDelegate`, `Onboarding*`, `Permissions`, `AppInstanceSelector` | Onboarding gating states. Confirm whether Input Monitoring is really required. Startup failure paths. |
 | 8 | UI | `MenuBarController`, `Settings*`, `BottomOverlay`, `OverlayModel`, `RecordingIndicator`, `SpeakeasyBrand` | View-model tests, accessibility labels, light and dark checks. |
 | 9 | Release | `build.sh`, `script/`, `Info.plist`, `README`, `THIRD_PARTY_NOTICES` | Developer ID signing, notarization, hardened runtime, update mechanism, crash/log privacy, model license notices (CC-BY-4.0). |
+
+## Progress
+
+- **Domain 1 (text pipeline): done.** Bugs fixed:
+  - With fuzzy matching on, a deletion rule (blank replacement) made the phonetic compiler throw, and startup then dropped *all* corrections. Blank, identity and disabled rules are now excluded in `TranscriptPostProcessor.phoneticTerms(for:)`.
+  - `PhoneticCorrector.commonWords` split only on spaces, so line-boundary words ("your", "able", …) were unprotected from fuzzy rewrites.
+  - `HallucinationFilter` trapped converting a huge duration to `Int`.
+  - An invalid `corrections.json` was silently ignored and then overwritten on the next save. It is now logged and moved aside to `corrections.invalid.json`.
+  - Capped `levenshtein` could return more than `limit + 1`. This was harmless to callers but broke the documented contract.
+  - Command whitespace trimming copied the whole output per command (quadratic on long dictations).
+  - Left open for domain 8: toggling fuzzy matching applies only after the next corrections edit or a restart, and the UI text says so.
 
 Also triage the old planning docs (`plan.md`, `NEXT.md`, `MISSION.md`, `plans/`) and delete or archive what is stale.

@@ -782,9 +782,7 @@ final class AppCoordinator: @unchecked Sendable {
 
     private static func makePostProcessor(corrections: [TranscriptCorrection]) throws -> TranscriptPostProcessor {
         let terms = FuzzyCorrectionPreference.isEnabled
-            ? corrections.filter { $0.isEnabled && $0.heard != $0.written }.map {
-                PhoneticTerm(canonical: $0.written, spokenForms: [$0.heard])
-            }
+            ? TranscriptPostProcessor.phoneticTerms(for: corrections)
             : []
         return try TranscriptPostProcessor(corrections: corrections, phoneticTerms: terms)
     }

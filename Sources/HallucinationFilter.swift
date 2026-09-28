@@ -153,7 +153,10 @@ struct HallucinationFilter {
         perSecond: Double,
         duration: TimeInterval
     ) -> Int {
-        max(minimum, Int(ceil(duration * perSecond)))
+        // Int(_:) traps above Int.max; a huge duration means no density cap.
+        let scaled = (duration * perSecond).rounded(.up)
+        guard scaled < Double(Int.max) else { return Int.max }
+        return max(minimum, Int(scaled))
     }
 
     private static func normalize(_ text: String) -> String {
