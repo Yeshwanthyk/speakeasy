@@ -125,6 +125,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let selectedInputDeviceUID: () -> String?
     private let selectInputDevice: (String) -> Void
     private let canSelectInputDevice: () -> Bool
+    private let microphoneLevelSnapshot: () -> MicrophoneLevelSnapshot
+    private var levelTimer: Timer?
+    private weak var levelItem: NSMenuItem?
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
@@ -159,7 +162,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         availableInputDevices: @escaping () -> [MicrophoneDevice] = { [] },
         selectedInputDeviceUID: @escaping () -> String? = { nil },
         selectInputDevice: @escaping (String) -> Void = { _ in },
-        canSelectInputDevice: @escaping () -> Bool = { true }
+        canSelectInputDevice: @escaping () -> Bool = { true },
+        microphoneLevelSnapshot: @escaping () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -189,6 +193,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.selectedInputDeviceUID = selectedInputDeviceUID
         self.selectInputDevice = selectInputDevice
         self.canSelectInputDevice = canSelectInputDevice
+        self.microphoneLevelSnapshot = microphoneLevelSnapshot
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
 
@@ -205,6 +210,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func showFeedback(_ event: UserFeedbackEvent) {
+        settingsController?.handleFeedback(event)
         transientFeedback = event
         feedbackGeneration &+= 1
         let generation = feedbackGeneration
@@ -242,6 +248,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.minimumWidth = Self.menuWidth
 
         addHeader(to: menu)
+        let level = NSMenuItem(title: "Live input level", action: nil, keyEquivalent: "")
+        let meter = NSProgressIndicator(frame: NSRect(x: 130, y: 8, width: 235, height: 12))
+        meter.minValue = 0
+        meter.maxValue = 1
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 30))
+        let label = NSTextField(labelWithString: "Live input level")
+        label.frame = NSRect(x: 14, y: 7, width: 110, height: 18)
+        label.font = .systemFont(ofSize: 11)
+        container.addSubview(label)
+        container.addSubview(meter)
+        level.view = container
+        levelItem = level
+        menu.addItem(level)
 
         if let transientFeedback {
             menu.addItem(.separator())
@@ -456,7 +475,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 currentModel: currentASRModelKind,
                 selectModel: selectASRModel,
                 openCorrections: { [weak self] in self?.showCorrections() },
-                pasteTranscript: pasteTranscript
+                pasteTranscript: pasteTranscript,
+                levelSnapshot: microphoneLevelSnapshot
             )
             settingsController = SettingsWindowController(model: model)
         }
@@ -504,6 +524,23 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             alert.runModal()
         }
     }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let meter = self.levelItem?.view?.subviews.last as? NSProgressIndicator else { return }
+                meter.doubleValue = Double(self.microphoneLevelSnapshot().normalizedLevel)
+            }
+        }
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        levelTimer?.invalidate()
+        levelTimer = nil
+        levelItem = nil
+    }
+
 
     private func currentActivity() -> MenuBarActivity {
         if isRecording() {

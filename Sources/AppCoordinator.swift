@@ -48,7 +48,7 @@ typealias ASRModelResolver = (_ kind: ASRModelKind) async throws -> ASRModelConf
 typealias TranscriberFactory = (_ model: ASRModelConfiguration) throws -> Transcriber
 typealias ASRModelArtifactVerifier = (_ model: ASRModelConfiguration) throws -> Void
 typealias ASRModelSelectionStore = (_ kind: ASRModelKind) -> Void
-typealias InputDeviceSelectionStore = (_ uid: String) -> Void
+typealias InputDeviceSelectionStore = (_ uid: String?) -> Void
 typealias DictationShortcutSelectionStore = (_ shortcut: DictationShortcut) -> Void
 
 enum TranscriptCorrectionUpdateError: Error, Equatable {
@@ -363,7 +363,7 @@ final class AppCoordinator: @unchecked Sendable {
             guard activeInputDeviceSwitchUID == nil else { return "Microphone change already in progress" }
             guard activeModelSwitchID == nil else { return "Wait for model switching to finish" }
             guard case .idle = state else { return "Finish dictation before changing microphones" }
-            guard audioCapture.selectedInputDeviceUID() != uid else { return nil }
+            guard (audioCapture.selectedInputDeviceUID() ?? "") != uid else { return nil }
             activeInputDeviceSwitchUID = uid
             return nil
         }
@@ -967,7 +967,7 @@ final class AppCoordinator: @unchecked Sendable {
                 return true
             }
             guard isCurrent else { return }
-            inputDeviceSelectionStore(uid)
+            inputDeviceSelectionStore(uid.isEmpty ? nil : uid)
             feedback.notify(event: .status("Microphone changed"))
 
         case .inputDeviceSelectionFailed(let uid, let rollback):
@@ -1645,6 +1645,7 @@ final class AppCoordinator: @unchecked Sendable {
                 withExtendedLifetime(previousTranscriber) {}
             }
             modelSelectionStore(kind)
+            feedback.notify(event: .status("Switched to \(kind.displayName)"))
             logger.info("Switched ASR model to \(kind.displayName) at \(model.url.path)")
 
         case .failure(let error):

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import Speakeasy
@@ -52,7 +53,7 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(pasted, "Hello")
     }
 
-    func testDisabledActionsDoNotInvokeCallbacksAndModelRequestKeepsCurrentSelection() {
+    func testDisabledActionsAndRejectedModelRequestClearsPendingState() {
         let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         var changes = 0
@@ -82,6 +83,107 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(changes, 1)
         XCTAssertEqual(model.modelKind, .parakeet110M)
         XCTAssertEqual(model.requestedModel, .parakeetUnified)
+        model.becameVisible()
+        model.handleFeedback(.error("Model warming up, please wait"))
+        XCTAssertNil(model.requestedModel)
+        XCTAssertEqual(model.modelError, "Model warming up, please wait")
+        model.becameHidden()
+        XCTAssertFalse(model.isVisible)
+    }
+
+    func testSystemDefaultAndHiddenRefresh() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
+        var selected: String?
+        var enumerations = 0
+        let model = SettingsModel(
+            store: store, diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in },
+            currentShortcut: { .defaultShortcut }, changeShortcut: {}, resetShortcut: {},
+            shortcutEnabled: { true },
+            availableDevices: { enumerations += 1; return [MicrophoneDevice(uid: "usb", name: "USB")] },
+            selectedDevice: { selected }, selectDevice: { selected = $0.isEmpty ? nil : $0 },
+            deviceEnabled: { true }, currentModel: { .parakeet110M }, selectModel: { _ in },
+            openCorrections: {}, pasteTranscript: { _ in }
+        )
+        XCTAssertNil(model.selectedDeviceUID)
+        model.chooseDevice("usb")
+        XCTAssertEqual(model.selectedDeviceUID, "usb")
+        model.chooseDevice("")
+        XCTAssertNil(model.selectedDeviceUID)
+        let count = enumerations
+        model.becameHidden()
+        model.handleFeedback(.status("Unrelated"))
+        XCTAssertEqual(enumerations, count)
+    }
+
+    func testHistoryPasteWithoutPreviousAppCopiesWithFeedback() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
+        let model = SettingsModel(
+            store: store, diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in },
+            currentShortcut: { .defaultShortcut }, changeShortcut: {}, resetShortcut: {},
+            shortcutEnabled: { true }, availableDevices: { [] }, selectedDevice: { nil },
+            selectDevice: { _ in }, deviceEnabled: { false }, currentModel: { .parakeet110M },
+            selectModel: { _ in }, openCorrections: {}, pasteTranscript: { _ in XCTFail("No paste target") },
+            frontmostApp: { nil }
+        )
+        model.rememberPasteTarget()
+        XCTAssertFalse(model.hasPasteTarget)
+        model.pasteHistory("Hello")
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), "Hello")
+        XCTAssertNotNil(model.historyFeedback)
+    }
+
+    func testHistoryPasteRestoresPreviousAppBeforeDelivery() throws {
+        guard let app = NSWorkspace.shared.runningApplications.first(where: {
+            $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
+        }) else { throw XCTSkip("No other running application") }
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
+        var activated = false
+        var pasted = false
+        let model = SettingsModel(
+            store: store, diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in },
+            currentShortcut: { .defaultShortcut }, changeShortcut: {}, resetShortcut: {},
+            shortcutEnabled: { true }, availableDevices: { [] }, selectedDevice: { nil },
+            selectDevice: { _ in }, deviceEnabled: { false }, currentModel: { .parakeet110M },
+            selectModel: { _ in }, openCorrections: {},
+            pasteTranscript: { _ in pasted = activated }, frontmostApp: { app },
+            activateTarget: { _ in activated = true; return true }
+        )
+        model.rememberPasteTarget()
+        XCTAssertTrue(model.hasPasteTarget)
+        model.pasteHistory("Hello")
+        let expectation = expectation(description: "Delivery follows activation")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expectation.fulfill() }
+        wait(for: [expectation], timeout: 1)
+        XCTAssertTrue(pasted)
+    }
+
+    func testWindowControllerReusesWindowAndStopsUpdatesOnClose() {
+        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
+        let model = SettingsModel(
+            store: store, diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in },
+            currentShortcut: { .defaultShortcut }, changeShortcut: {}, resetShortcut: {},
+            shortcutEnabled: { true }, availableDevices: { [] }, selectedDevice: { nil },
+            selectDevice: { _ in }, deviceEnabled: { false }, currentModel: { .parakeet110M },
+            selectModel: { _ in }, openCorrections: {}, pasteTranscript: { _ in },
+            frontmostApp: { nil }
+        )
+        let controller = SettingsWindowController(model: model)
+        let window = controller.window
+        controller.present()
+        XCTAssertTrue(model.isVisible)
+        controller.window?.close()
+        XCTAssertFalse(model.isVisible)
+        controller.present()
+        XCTAssertTrue(controller.window === window)
+        controller.window?.close()
     }
 
     func testClearHistoryRefreshesVisibleRecords() async {

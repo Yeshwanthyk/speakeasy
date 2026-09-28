@@ -662,7 +662,7 @@ final class AudioCapture: @unchecked Sendable {
                         rollback: .restored
                     )
                 } else {
-                    activeInputDeviceUID = inputDeviceSwitchCandidateUID
+                    activeInputDeviceUID = inputDeviceSwitchCandidateUID?.isEmpty == true ? nil : inputDeviceSwitchCandidateUID
                     routeEvent = .inputDeviceSelectionSucceeded(uid: inputDeviceSwitchCandidateUID ?? "")
                 }
                 inputDeviceSwitchGeneration = nil
@@ -1213,7 +1213,7 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     private func beginInputDeviceSwitch(to uid: String) {
-        guard inputDeviceProvider.enumerateInputDevices().contains(where: { $0.uid == uid }) else {
+        guard uid.isEmpty || inputDeviceProvider.enumerateInputDevices().contains(where: { $0.uid == uid }) else {
             emit(event: .inputDeviceSelectionFailed(uid: uid, rollback: .restored))
             return
         }
@@ -1233,7 +1233,7 @@ final class AudioCapture: @unchecked Sendable {
                   canSwitch,
                   !isRecording,
                   inputDeviceSwitchGeneration == nil,
-                  activeInputDeviceUID != uid else {
+                  (activeInputDeviceUID ?? "") != uid else {
                 return nil
             }
             let previousUID = activeInputDeviceUID ?? systemDefaultUID
@@ -1259,7 +1259,7 @@ final class AudioCapture: @unchecked Sendable {
                 generation: switchState.generation,
                 recoveryTrigger: nil,
                 recoveryAttempt: nil,
-                inputDeviceUID: uid
+                inputDeviceUID: uid.isEmpty ? nil : uid
             )
         } catch {
             rollbackInputDeviceSwitch(generation: switchState.generation)

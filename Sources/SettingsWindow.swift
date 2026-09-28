@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import SwiftUI
 
 @MainActor
@@ -11,6 +12,10 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var canChangeDevice = false
     @Published private(set) var modelKind: ASRModelKind = .parakeet110M
     @Published private(set) var requestedModel: ASRModelKind?
+    @Published private(set) var modelError: String?
+    private var failedModel: ASRModelKind?
+    @Published private(set) var microphoneLevel: Float = 0
+    @Published private(set) var historyFeedback: String?
     @Published private(set) var records: [TranscriptRecord] = []
     @Published private(set) var summary: ProductivitySummary = DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
 
@@ -28,6 +33,12 @@ final class SettingsModel: ObservableObject {
     private let deviceEnabled: () -> Bool
     private let currentModel: () -> ASRModelKind
     private let selectModel: (ASRModelKind) -> Void
+    private let levelSnapshot: () -> MicrophoneLevelSnapshot
+    private let frontmostApp: () -> NSRunningApplication?
+    private let activateTarget: (NSRunningApplication) -> Bool
+    private var pasteTarget: NSRunningApplication?
+    private var levelTimer: Timer?
+    private(set) var isVisible = false
     let openCorrections: () -> Void
     let pasteTranscript: (String) -> Void
 
@@ -47,7 +58,10 @@ final class SettingsModel: ObservableObject {
         currentModel: @escaping () -> ASRModelKind,
         selectModel: @escaping (ASRModelKind) -> Void,
         openCorrections: @escaping () -> Void,
-        pasteTranscript: @escaping (String) -> Void
+        pasteTranscript: @escaping (String) -> Void,
+        levelSnapshot: @escaping () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) },
+        frontmostApp: @escaping () -> NSRunningApplication? = { NSWorkspace.shared.frontmostApplication },
+        activateTarget: @escaping (NSRunningApplication) -> Bool = { $0.activate(options: [.activateIgnoringOtherApps]) }
     ) {
         self.store = store
         self.diagnosticsStore = diagnosticsStore
@@ -65,21 +79,103 @@ final class SettingsModel: ObservableObject {
         self.selectModel = selectModel
         self.openCorrections = openCorrections
         self.pasteTranscript = pasteTranscript
+        self.levelSnapshot = levelSnapshot
+        self.frontmostApp = frontmostApp
+        self.activateTarget = activateTarget
+        devices = availableDevices()
         refresh()
     }
 
     func refresh() {
-        mode = currentMode()
-        shortcut = currentShortcut()
-        canChangeShortcut = shortcutEnabled()
-        devices = availableDevices()
-        selectedDeviceUID = selectedDevice()
-        canChangeDevice = deviceEnabled()
-        modelKind = currentModel()
+        let newMode = currentMode()
+        if mode != newMode { mode = newMode }
+        let newShortcut = currentShortcut()
+        if shortcut != newShortcut { shortcut = newShortcut }
+        let shortcutAvailable = shortcutEnabled()
+        if canChangeShortcut != shortcutAvailable { canChangeShortcut = shortcutAvailable }
+        let uid = selectedDevice()
+        if selectedDeviceUID != uid { selectedDeviceUID = uid }
+        let deviceAvailable = deviceEnabled()
+        if canChangeDevice != deviceAvailable { canChangeDevice = deviceAvailable }
+        let kind = currentModel()
+        if modelKind != kind { modelKind = kind }
         if requestedModel == modelKind { requestedModel = nil }
-        records = store.allRecords().reversed()
-        summary = diagnosticsStore?.productivitySummary()
+        let latest = Array(store.allRecords().reversed())
+        if records.map(\.id) != latest.map(\.id) { records = latest }
+        let metrics = diagnosticsStore?.productivitySummary()
             ?? DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
+        if summary != metrics { summary = metrics }
+    }
+
+    var deviceEnumerator: () -> [MicrophoneDevice] { availableDevices }
+
+    func updateDevices(_ latest: [MicrophoneDevice]) {
+        guard isVisible else { return }
+        if devices != latest { devices = latest }
+        refresh()
+    }
+
+    func becameVisible() {
+        isVisible = true
+        refresh()
+        if levelTimer == nil {
+            levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let level = self.levelSnapshot().normalizedLevel
+                    if self.microphoneLevel != level { self.microphoneLevel = level }
+                }
+            }
+        }
+    }
+
+    func becameHidden() {
+        isVisible = false
+        levelTimer?.invalidate()
+        levelTimer = nil
+    }
+
+    func rememberPasteTarget() {
+        guard let app = frontmostApp(), app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        pasteTarget = app
+    }
+
+    var hasPasteTarget: Bool { pasteTarget?.isTerminated == false }
+
+    func pasteHistory(_ text: String) {
+        guard let target = pasteTarget, !target.isTerminated, activateTarget(target) else {
+            NSPasteboard.general.clearContents()
+            let copied = NSPasteboard.general.setString(text, forType: .string)
+            historyFeedback = copied ? "Transcript copied; no previous app available to paste into." : "Could not copy transcript."
+            return
+        }
+        historyFeedback = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for _ in 0..<20 {
+                if self.frontmostApp()?.processIdentifier == target.processIdentifier {
+                    self.pasteTranscript(text)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            NSPasteboard.general.clearContents()
+            let copied = NSPasteboard.general.setString(text, forType: .string)
+            self.historyFeedback = copied ? "Transcript copied; previous app did not become active." : "Could not copy transcript."
+        }
+    }
+
+    func handleFeedback(_ event: UserFeedbackEvent) {
+        if requestedModel != nil, case .error(let message) = event,
+           message == "Failed to switch audio model" || message == "Model switching unavailable"
+            || message == "Model warming up, please wait" || message == "Model switching already in progress"
+            || message == "Wait for microphone change to finish" || message == "Wait for microphone reconnection"
+            || message == "Stop recording before switching models" || message == "Wait for transcription to finish" {
+            failedModel = requestedModel
+            modelError = message
+            requestedModel = nil
+        }
+        if isVisible { refresh() }
     }
 
     func chooseMode(_ value: DictationInvocationMode) {
@@ -101,16 +197,22 @@ final class SettingsModel: ObservableObject {
     }
 
     func chooseDevice(_ uid: String) {
-        guard canChangeDevice, uid != selectedDeviceUID, devices.contains(where: { $0.uid == uid }) else { return }
+        guard canChangeDevice, uid != (selectedDeviceUID ?? ""), uid.isEmpty || devices.contains(where: { $0.uid == uid }) else { return }
         selectDevice(uid)
         refresh()
     }
 
     func chooseModel(_ kind: ASRModelKind) {
         guard kind != modelKind else { return }
+        modelError = nil
+        failedModel = nil
         requestedModel = kind
         selectModel(kind)
         refresh()
+    }
+
+    func retryModel() {
+        if let failedModel { chooseModel(failedModel) }
     }
 
     func clearHistory() async -> Bool {
@@ -174,10 +276,6 @@ private struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, minHeight: 480)
-        .onAppear { model.refresh() }
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            model.refresh()
-        }
         .alert("Clear transcript history?", isPresented: $confirmClear) {
             Button("Clear History", role: .destructive) {
                 Task { historyError = !(await model.clearHistory()) }
@@ -228,24 +326,21 @@ private struct SettingsView: View {
         case .microphone:
             Form {
                 Section("Input device") {
-                    if model.devices.isEmpty {
-                        Text("No microphones available")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        if model.selectedDeviceUID == nil {
-                            Text("System Default is currently selected")
-                                .foregroundStyle(.secondary)
+                    Picker("Microphone", selection: Binding(
+                        get: { model.selectedDeviceUID ?? "" },
+                        set: { model.chooseDevice($0) }
+                    )) {
+                        Text("System Default").tag("")
+                        ForEach(model.devices) { device in
+                            Text(device.name).tag(device.uid)
                         }
-                        Picker("Microphone", selection: Binding(
-                            get: { model.selectedDeviceUID ?? "" },
-                            set: { model.chooseDevice($0) }
-                        )) {
-                            ForEach(model.devices) { device in
-                                Text(device.name).tag(device.uid)
-                            }
-                        }
-                        .disabled(!model.canChangeDevice)
                     }
+                    .disabled(!model.canChangeDevice)
+                    Text("Live input level")
+                    ProgressView(value: Double(model.microphoneLevel), total: 1)
+                        .accessibilityLabel("Microphone input level")
+                    Text("\(Int(model.microphoneLevel * 100))%")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     Text("Switch microphones when dictation is idle. Changes take effect after the input is ready.")
                         .foregroundStyle(.secondary)
                 }
@@ -275,8 +370,11 @@ private struct SettingsView: View {
                     Text("Switching may download and verify the model, then warm it locally. Your current model stays active until the new one is ready.")
                         .foregroundStyle(.secondary)
                     if model.requestedModel != nil {
-                        Text("Switch requested. Check the menu bar for errors if the active model does not change.")
-                            .foregroundStyle(.secondary)
+                        ProgressView("Switching model…")
+                    }
+                    if let error = model.modelError {
+                        Text(error).foregroundStyle(.red)
+                        Button("Retry") { model.retryModel() }
                     }
                 }
             }
@@ -300,15 +398,18 @@ private struct SettingsView: View {
                         Spacer()
                         Button("Clear History…") { confirmClear = true }
                     }
+                    if let feedback = model.historyFeedback {
+                        Text(feedback).foregroundStyle(.secondary)
+                    }
                     ForEach(model.records) { record in
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(record.finalText).textSelection(.enabled)
-                                Text(record.createdAt, style: .date)
+                                Text(SettingsMetrics.historyDate.string(from: record.createdAt))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Paste") { model.pasteTranscript(record.finalText) }
+                            Button(model.hasPasteTarget ? "Paste" : "Copy") { model.pasteHistory(record.finalText) }
                         }
                         Divider()
                     }
@@ -358,6 +459,12 @@ private struct SettingsRow: View {
 }
 
 private enum SettingsMetrics {
+    static let historyDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
     static func duration(_ milliseconds: Double) -> String {
         let seconds = max(milliseconds, 0) / 1_000
         if seconds < 60 { return "\(Int(seconds.rounded())) sec" }
@@ -379,8 +486,10 @@ private enum SettingsMetrics {
 }
 
 @MainActor
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
+    private let deviceQueue = DispatchQueue(label: "speakeasy.settings.devices", qos: .utility)
+    private var listening = false
 
     init(model: SettingsModel) {
         self.model = model
@@ -395,16 +504,87 @@ final class SettingsWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
+        window.delegate = self
         window.contentViewController = NSHostingController(rootView: SettingsView(model: model))
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    func handleFeedback(_ event: UserFeedbackEvent) { model.handleFeedback(event) }
+
     func present() {
-        model.refresh()
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        model.rememberPasteTarget()
+        installMainMenu()
+        if #available(macOS 14, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+        window?.orderFrontRegardless()
+        model.becameVisible()
+        refreshDevicesInBackground()
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        model.rememberPasteTarget()
+        model.becameVisible()
+        refreshDevicesInBackground()
+        guard !listening else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, deviceQueue
+        ) { [weak self] _, _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.model.isVisible else { return }
+                self.refreshDevicesInBackground()
+            }
+        }
+        listening = status == noErr
+    }
+
+    private func refreshDevicesInBackground() {
+        let enumerate = model.deviceEnumerator
+        deviceQueue.async { [weak self] in
+            let devices = enumerate()
+            DispatchQueue.main.async { [weak self] in self?.model.updateDevices(devices) }
+        }
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        model.becameHidden()
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        model.becameVisible()
+        refreshDevicesInBackground()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        model.becameHidden()
+    }
+
+    private func installMainMenu() {
+        let main = NSApp.mainMenu ?? NSMenu()
+        guard main.items.first(where: { $0.title == "Edit" }) == nil else { return }
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+        NSApp.mainMenu = main
     }
 }
