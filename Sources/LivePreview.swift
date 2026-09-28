@@ -107,6 +107,12 @@ final class LivePreviewController: @unchecked Sendable {
         }
     }
 
+    /// Audio window changed after a background commit; retain the visible
+    /// revision while restarting growth accounting for the new tail.
+    func rebaseAudioCursor() {
+        lock.withLock { lastPassSampleCount = 0 }
+    }
+
     /// Current preview text, if any preview has been adopted.
     var previewText: String? {
         lock.withLock { currentText }

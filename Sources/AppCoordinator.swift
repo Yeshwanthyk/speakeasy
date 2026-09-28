@@ -1,3 +1,4 @@
+import Accelerate
 import CoreGraphics
 import Foundation
 import os
@@ -22,6 +23,13 @@ protocol AudioCapturing {
     /// Buffered audio for live-preview re-transcription; implementations
     /// without preview support return an empty buffer.
     func livePreviewSamples() -> ContiguousArray<Float>
+    func recordingSampleCount() -> Int
+    func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float>
+}
+
+extension AudioCapturing {
+    func recordingSampleCount() -> Int { 0 }
+    func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float> { [] }
 }
 
 protocol Pasting {
@@ -195,6 +203,12 @@ final class AppCoordinator: @unchecked Sendable {
     /// so a settling preview never blocks finalization bookkeeping.
     private let previewQueue = DispatchQueue(label: "com.speakeasy.app.live-preview", qos: .utility)
     private var previewTimer: DispatchSourceTimer?
+    private let segmentQueue = DispatchQueue(label: "com.speakeasy.app.segment-scan", qos: .userInitiated)
+    private var segmentTimer: DispatchSourceTimer?
+    private var segmenter = OnlineSegmenter()
+    private var segmentCommit: OnlineSegmentCommit?
+    private var segmentScanOffset = 0
+    private var previewCommittedEnd = 0
     /// Latest adopted preview text, published for UI/tests.
     private(set) var livePreviewText: String?
     /// Callback fired on main when an adopted preview replaces the previous.
@@ -327,6 +341,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
         failedCaptureReplayBuffer.clear()
         transitionRecordingFeedback(to: .hidden)
+        stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
         audioCapture.shutdown()
     }
 
@@ -904,6 +919,11 @@ final class AppCoordinator: @unchecked Sendable {
                     return
                 }
 
+                stateLock.withLock {
+                    segmentCommit = OnlineSegmentCommit(transcriber: transcriber, filter: hallucinationFilter) { [weak self] in
+                        self?.stateLock.withLock { self?.nextRunID() ?? 0 } ?? 0
+                    }
+                }
                 startLivePreviewLoop()
                 transitionRecordingFeedback(to: .recording)
             } catch {
@@ -927,11 +947,15 @@ final class AppCoordinator: @unchecked Sendable {
             }
             stopLivePreviewLoop()
             transitionRecordingFeedback(to: .processing)
+            stateLock.withLock { segmentCommit?.beginStopping() }
+            segmentQueue.sync {}
+            // The commit worker keeps its capture until finalization joins it.
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
 
         case .discardCapture(let trace, let notify):
             stopLivePreviewLoop()
             audioCapture.discardRecording()
+            stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
             transitionRecordingFeedback(to: .hidden)
             if let trace {
                 recordTerminal(trace: trace, outcome: .cancelled)
@@ -944,6 +968,7 @@ final class AppCoordinator: @unchecked Sendable {
             transitionRecordingFeedback(to: .hidden)
             let transcriber = stateLock.withLock { self.transcriber }
             transcriber.cancel(runID: runID)
+            stateLock.withLock { segmentCommit?.cancel(excluding: runID) }
             recordTerminal(trace: trace, outcome: .cancelled)
             feedback.notify(event: .error("Transcription cancelled"))
 
@@ -1009,6 +1034,8 @@ final class AppCoordinator: @unchecked Sendable {
                 return
             }
             if interruption.shouldHideFeedback {
+                stopLivePreviewLoop()
+                stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
                 transitionRecordingFeedback(to: .hidden)
             }
             logger.error("Recording interrupted by microphone configuration change")
@@ -1044,6 +1071,8 @@ final class AppCoordinator: @unchecked Sendable {
                 }
             }
             if shouldHideFeedback {
+                stopLivePreviewLoop()
+                stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
                 transitionRecordingFeedback(to: .hidden)
             }
             logger.error("Microphone reconnection failed")
@@ -1121,6 +1150,7 @@ final class AppCoordinator: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         let samples = captureResult.samples
+        let commit = stateLock.withLock { segmentCommit }
 
         var trace = trace
         trace.markStopReturned(
@@ -1146,6 +1176,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         guard !captureResult.wasInterrupted else {
+            commit?.cancel()
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .captureInterrupted)
                 feedback.notify(event: .error("Recording interrupted by microphone change"))
@@ -1192,7 +1223,8 @@ final class AppCoordinator: @unchecked Sendable {
             token: token,
             runID: runID,
             trace: trace,
-            target: target
+            target: target,
+            segmentCommit: commit
         )
     }
 
@@ -1203,7 +1235,8 @@ final class AppCoordinator: @unchecked Sendable {
         token: UUID,
         runID: UInt64,
         trace: TranscriptionTrace,
-        target: TranscriptDeliveryTarget
+        target: TranscriptDeliveryTarget,
+        segmentCommit: OnlineSegmentCommit? = nil
     ) {
         let timeoutTrace = trace
         var trace = trace
@@ -1244,7 +1277,7 @@ final class AppCoordinator: @unchecked Sendable {
                 let transcriber = self.stateLock.withLock { self.transcriber }
                 let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy native transcription")
                 defer { ProcessInfo.processInfo.endActivity(activity) }
-                let (text, timings) = try FinalTranscription.run(samples: samples, transcriber: transcriber, runID: runID) {
+                let cancelled = {
                     self.stateLock.withLock {
                         guard case let .transcribing(current, currentRunID, didTimeOut, didCancel) = self.state else {
                             return true
@@ -1252,7 +1285,22 @@ final class AppCoordinator: @unchecked Sendable {
                         return current != token || currentRunID != runID || didTimeOut || didCancel || self.isShuttingDown
                     }
                 }
-                trace.nativeTimings = timings
+                let text: String
+                if let segmentCommit {
+                    let end = segmentCommit.committedEnd
+                    let tailStart = max(0, end - segmentCommit.tailOverlapSamples)
+                    let tail = ContiguousArray(samples[min(tailStart, samples.count)...])
+                    let completed = try segmentCommit.finish(tail: tail, tailStart: tailStart, finalRunID: runID, isCancelled: cancelled)
+                    text = completed.text
+                    trace.segmentCount = completed.count
+                    trace.committedAudioSeconds = completed.committedSeconds
+                    trace.tailSeconds = completed.tailSeconds
+                    trace.segmentWaitMs = completed.waitMs
+                } else {
+                    let (raw, timings) = try FinalTranscription.run(samples: samples, transcriber: transcriber, runID: runID, isCancelled: cancelled)
+                    text = raw
+                    trace.nativeTimings = timings
+                }
                 result = .success(text)
             } catch {
                 result = .failure(error)
@@ -1540,6 +1588,8 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
             state = .idle
+            segmentCommit?.cancel()
+            segmentCommit = nil
             activeTranscriptionTrace = nil
             activeReplayLease = nil
             if didTimeOut { return .timedOut }
@@ -1613,6 +1663,7 @@ final class AppCoordinator: @unchecked Sendable {
         transitionRecordingFeedback(to: .hidden)
         let transcriber = stateLock.withLock { self.transcriber }
         transcriber.cancel(runID: cancellation.runID)
+        stateLock.withLock { segmentCommit?.cancel(excluding: cancellation.runID) }
         recordTerminal(trace: trace, outcome: .timedOut)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
@@ -1626,8 +1677,8 @@ final class AppCoordinator: @unchecked Sendable {
     private var previewRunSequence: UInt64 = 0
 
     private func startLivePreviewLoop() {
-        guard let controller = livePreviewController else { return }
-        controller.reset()
+        livePreviewController?.reset()
+        stateLock.withLock { previewCommittedEnd = 0 }
         stateLock.withLock { livePreviewText = nil }
 
         let timer = DispatchSource.makeTimerSource(queue: previewQueue)
@@ -1638,6 +1689,16 @@ final class AppCoordinator: @unchecked Sendable {
         }
         timer.resume()
         stateLock.withLock { previewTimer = timer }
+        segmentQueue.async { [weak self] in
+            guard let self else { return }
+            self.segmenter = OnlineSegmenter()
+            self.segmentScanOffset = 0
+        }
+        let segmentTimer = DispatchSource.makeTimerSource(queue: segmentQueue)
+        segmentTimer.schedule(deadline: .now() + 0.35, repeating: 0.35)
+        segmentTimer.setEventHandler { [weak self] in self?.pollSegments() }
+        segmentTimer.resume()
+        stateLock.withLock { self.segmentTimer = segmentTimer }
     }
 
     private func stopLivePreviewLoop() {
@@ -1647,6 +1708,11 @@ final class AppCoordinator: @unchecked Sendable {
             return timer
         }
         timer?.cancel()
+        let segmentTimer = stateLock.withLock { () -> DispatchSourceTimer? in
+            defer { self.segmentTimer = nil }
+            return self.segmentTimer
+        }
+        segmentTimer?.cancel()
         if let controller = livePreviewController {
             _ = controller.finishPass(candidate: nil) // clear in-flight flag only
             controller.reset()
@@ -1654,9 +1720,55 @@ final class AppCoordinator: @unchecked Sendable {
         stateLock.withLock { livePreviewText = nil }
     }
 
+    private func pollSegments() {
+        let allowed = stateLock.withLock { () -> Bool in
+            guard case .recording = state else { return false }
+            return segmentCommit?.canAcceptCut == true
+        }
+        guard allowed else { return }
+        let count = audioCapture.recordingSampleCount()
+        let frame = OnlineSegmenter.frameSamples
+        // At most one second of PCM per tick; never copy the full recording.
+        let end = min(count / frame * frame, segmentScanOffset + 50 * frame)
+        guard end > segmentScanOffset else { return }
+        let chunk = audioCapture.recordingSamples(in: segmentScanOffset..<end)
+        guard chunk.count == end - segmentScanOffset else { return }
+        chunk.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return }
+            for offset in stride(from: 0, to: chunk.count, by: frame) {
+                let energy = vDSP.meanSquare(UnsafeBufferPointer(start: base + offset, count: frame)).squareRoot()
+                segmenter.feed(offset: segmentScanOffset + offset, rms: energy)
+            }
+        }
+        segmentScanOffset = end
+        while let cut = segmenter.nextCut {
+            let samples = audioCapture.recordingSamples(in: cut.start..<cut.end)
+            guard let commit = stateLock.withLock({ segmentCommit }),
+                  commit.enqueue(cut, samples: samples) else { break }
+            segmenter.acceptCut()
+        }
+    }
+
     func pollLivePreview(nowMs: Double) {
         guard let controller = livePreviewController else { return }
-        let samples = audioCapture.livePreviewSamples()
+        let recordingCount = audioCapture.recordingSampleCount()
+        let committedEnd = stateLock.withLock { segmentCommit?.committedEnd ?? 0 }
+        let changedWindow = stateLock.withLock { () -> Bool in
+            guard committedEnd != previewCommittedEnd else { return false }
+            previewCommittedEnd = committedEnd
+            return true
+        }
+        if changedWindow {
+            controller.rebaseAudioCursor()
+        }
+        let samples: ContiguousArray<Float>
+        if recordingCount > 0 {
+            samples = audioCapture.recordingSamples(in: max(committedEnd, recordingCount - 240_000)..<recordingCount)
+        } else {
+            samples = audioCapture.livePreviewSamples()
+        }
+        guard !stateLock.withLock({ segmentCommit?.hasWork ?? false }) else { return }
+        let prefix = stateLock.withLock { segmentCommit?.committedText ?? "" }
         guard controller.shouldTranscribe(nowMs: nowMs, bufferedSampleCount: samples.count) else {
             return
         }
@@ -1681,7 +1793,13 @@ final class AppCoordinator: @unchecked Sendable {
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                let adopted = self.livePreviewController?.finishPass(candidate: text)
+                let stillRecording = self.stateLock.withLock { () -> Bool in
+                    if case .recording = self.state { return true }
+                    return false
+                }
+                guard stillRecording else { return }
+                let combined = [prefix, text ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+                let adopted = self.livePreviewController?.finishPass(candidate: combined)
                 if let adopted, !adopted.isEmpty {
                     let changed = self.stateLock.withLock { () -> Bool in
                         let previous = self.livePreviewText

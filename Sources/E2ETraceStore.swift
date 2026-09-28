@@ -31,6 +31,10 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
     var nativeWaitMs: Double? = nil
     var rewarmStarted: Bool? = nil
     var rewarmInFlightAtFinalStart: Bool? = nil
+    var segmentCount: Int? = nil
+    var committedAudioSeconds: Double? = nil
+    var tailSeconds: Double? = nil
+    var segmentWaitMs: Double? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -51,6 +55,10 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
         case nativeWaitMs = "native_wait_ms"
         case rewarmStarted = "rewarm_started"
         case rewarmInFlightAtFinalStart = "rewarm_in_flight_at_final_start"
+        case segmentCount = "segment_count"
+        case committedAudioSeconds = "committed_audio_seconds"
+        case tailSeconds = "tail_seconds"
+        case segmentWaitMs = "segment_wait_ms"
     }
 }
 
@@ -101,7 +109,11 @@ enum E2ETraceRecordFactory {
             nativeTotalMs: trace.nativeTimings?.totalMs,
             nativeWaitMs: trace.nativeTimings?.waitMs,
             rewarmStarted: trace.rewarmStarted,
-            rewarmInFlightAtFinalStart: trace.rewarmInFlightAtFinalStart
+            rewarmInFlightAtFinalStart: trace.rewarmInFlightAtFinalStart,
+            segmentCount: trace.segmentCount,
+            committedAudioSeconds: trace.committedAudioSeconds,
+            tailSeconds: trace.tailSeconds,
+            segmentWaitMs: trace.segmentWaitMs
         )
     }
 

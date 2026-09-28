@@ -345,6 +345,29 @@ final class AudioCapture: @unchecked Sendable {
         }
     }
 
+    /// Range reads lock both capture buffers; only the requested slice is copied.
+    func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float> {
+        backLock.withLock {
+            frontLock.withLock {
+                let count = frontBuffer.count + backBuffer.count
+                guard range.lowerBound >= 0, range.upperBound <= count else { return [] }
+                var result = ContiguousArray<Float>()
+                result.reserveCapacity(range.count)
+                if range.lowerBound < frontBuffer.count {
+                    result.append(contentsOf: frontBuffer[range.lowerBound..<min(range.upperBound, frontBuffer.count)])
+                }
+                if range.upperBound > frontBuffer.count {
+                    result.append(contentsOf: backBuffer[max(0, range.lowerBound - frontBuffer.count)..<(range.upperBound - frontBuffer.count)])
+                }
+                return result
+            }
+        }
+    }
+
+    func recordingSampleCount() -> Int {
+        backLock.withLock { frontLock.withLock { frontBuffer.count + backBuffer.count } }
+    }
+
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
         levelPreview.latest()
     }

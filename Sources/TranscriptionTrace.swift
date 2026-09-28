@@ -37,6 +37,10 @@ struct TranscriptionTrace: Sendable {
     var rewarmStarted = false
     var rewarmInFlightAtFinalStart = false
     var nativeTimings: NativeASRTimings?
+    var segmentCount: Int?
+    var committedAudioSeconds: Double?
+    var tailSeconds: Double?
+    var segmentWaitMs: Double?
 
     init(
         id: UUID = UUID(),
