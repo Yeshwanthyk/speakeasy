@@ -136,23 +136,12 @@ final class BottomOverlay {
         }
     }
 
-    private var height: CGFloat {
-        let rows = max(1, min(3, (model.displayedText.count + 49) / 50))
-        return CGFloat(92 + (rows - 1) * 20)
-    }
+    /// Fixed panel height: chips row + a two-line transcript window. The
+    /// pill never resizes or moves while text grows; older lines scroll off.
+    private let height: CGFloat = 112
 
-    private func resize() {
-        guard let panel else { return }
-        var frame = panel.frame
-        let newHeight = height
-        guard frame.height != newHeight else { return }
-        frame.size.height = newHeight
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.18
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(frame, display: true)
-        }
-    }
+    /// Kept as a no-op hook: the panel size is fixed by design.
+    private func resize() {}
 }
 
 private final class OverlayPanel: NSPanel {
@@ -161,6 +150,9 @@ private final class OverlayPanel: NSPanel {
 }
 
 private struct BottomOverlayView: View {
+    /// Two lines of 13 pt medium text.
+    static let transcriptWindowHeight: CGFloat = 36
+
     @ObservedObject var model: OverlayModel
     let meter: OverlayMeterView
     let selectMode: (DictationInvocationMode) -> Void
@@ -192,8 +184,19 @@ private struct BottomOverlayView: View {
                     Text(model.displayedText)
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white.opacity(0.94))
-                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        // Two-line window pinned to the newest text: overflow
+                        // exits through the top edge, never truncating the tail.
+                        .frame(height: Self.transcriptWindowHeight, alignment: .bottomLeading)
+                        .clipped()
+                        .mask(
+                            LinearGradient(
+                                stops: [.init(color: .black.opacity(0.35), location: 0),
+                                        .init(color: .black, location: 0.3)],
+                                startPoint: .top, endPoint: .bottom
+                            )
+                        )
                     HStack {
                         if model.phase == .transcribing { ProgressView().controlSize(.mini).tint(.white) }
                         else { MeterRepresentable(meter: meter).frame(width: 24, height: 15) }
