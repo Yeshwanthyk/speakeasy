@@ -304,7 +304,10 @@ final class AppCoordinator: @unchecked Sendable {
 
     /// Warm up the transcription model; blocks hotkey until complete.
     /// Must be called once at startup. Safe to `await` from any context.
-    func warmUpModel() async {
+    /// Returns whether warmup succeeded; a failed warmup still permits
+    /// transcription attempts.
+    @discardableResult
+    func warmUpModel() async -> Bool {
         stateLock.withLock { warmupState = .warming }
         logger.info("Model warmup started")
 
@@ -318,10 +321,12 @@ final class AppCoordinator: @unchecked Sendable {
                 warmupState = .ready
             }
             logger.info("Model warmup completed successfully")
+            return true
         } catch {
             stateLock.withLock { warmupState = .failed(error) }
             // Distinct failure log — model may still handle real transcriptions
             logger.error("Model warmup failed (will still attempt transcription): \(error)")
+            return false
         }
     }
 

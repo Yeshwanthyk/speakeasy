@@ -24,6 +24,75 @@ struct URLSessionModelFileDownloader: ModelFileDownloading {
     }
 }
 
+/// Downloads with byte progress and cooperative cancellation. Each download
+/// uses its own session so progress callbacks never cross between files.
+final class ProgressReportingModelFileDownloader: NSObject, ModelFileDownloading, URLSessionDownloadDelegate, @unchecked Sendable {
+    typealias ProgressHandler = @Sendable (_ received: Int64, _ expected: Int64?) -> Void
+
+    private let progress: ProgressHandler
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var task: URLSessionDownloadTask?
+
+    init(progress: @escaping ProgressHandler) {
+        self.progress = progress
+    }
+
+    func download(from url: URL) async throws -> URL {
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let task = session.downloadTask(with: url)
+                lock.withLock {
+                    self.continuation = continuation
+                    self.task = task
+                }
+                task.resume()
+            }
+        } onCancel: {
+            lock.withLock { task }?.cancel()
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        progress(totalBytesWritten, totalBytesExpectedToWrite > 0 ? totalBytesExpectedToWrite : nil)
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // The system deletes `location` when this method returns.
+        let result: Result<URL, Error>
+        if let response = downloadTask.response as? HTTPURLResponse,
+           !(200..<300).contains(response.statusCode),
+           let url = downloadTask.originalRequest?.url {
+            result = .failure(ASRModelInstallError.invalidHTTPStatus(url, response.statusCode))
+        } else {
+            let kept = FileManager.default.temporaryDirectory
+                .appendingPathComponent("speakeasy-model-\(UUID().uuidString)")
+            result = Result { try FileManager.default.moveItem(at: location, to: kept); return kept }
+        }
+        finish(result)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error { finish(.failure(error)) }
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        let continuation = lock.withLock { () -> CheckedContinuation<URL, Error>? in
+            defer { self.continuation = nil; self.task = nil }
+            return self.continuation
+        }
+        continuation?.resume(with: result)
+    }
+}
+
 final class ASRModelInstaller {
     typealias ArtifactProvider = (ASRModelKind) -> ASRModelArtifact
 
@@ -84,7 +153,9 @@ final class ASRModelInstaller {
             throw ASRModelInstallError.downloadedFileMissing(artifact.filename)
         }
 
-        try fileManager.copyItem(at: downloadedURL, to: stagingURL)
+        // Downloaders return a disposable temporary file; move it so large
+        // models are never duplicated on disk.
+        try fileManager.moveItem(at: downloadedURL, to: stagingURL)
         do {
             try ModelPathResolver.verifyArtifact(artifact, at: stagingURL)
         } catch let error as ModelArtifactVerificationError {

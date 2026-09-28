@@ -36,17 +36,10 @@ private final class MenuHeaderView: NSView {
     init(activity: MenuBarActivity, shortcut: DictationShortcut) {
         super.init(frame: NSRect(x: 0, y: 0, width: 380, height: 68))
 
-        let iconBackground = NSView(frame: NSRect(x: 14, y: 14, width: 40, height: 40))
-        iconBackground.wantsLayer = true
-        iconBackground.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.14).cgColor
-        iconBackground.layer?.cornerRadius = 10
-        addSubview(iconBackground)
-
-        let icon = NSImageView(frame: NSRect(x: 10, y: 10, width: 20, height: 20))
-        icon.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Speakeasy")
-        icon.contentTintColor = .controlAccentColor
-        icon.imageScaling = .scaleProportionallyDown
-        iconBackground.addSubview(icon)
+        let icon = NSImageView(frame: NSRect(x: 12, y: 12, width: 44, height: 44))
+        icon.image = SpeakeasyBrand.appIcon
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(icon)
 
         let title = NSTextField(labelWithString: "Speakeasy")
         title.frame = NSRect(x: 66, y: 36, width: 196, height: 20)
@@ -64,17 +57,25 @@ private final class MenuHeaderView: NSView {
         statusLabel.textColor = .secondaryLabelColor
         addSubview(statusLabel)
 
+        let keycap = NSView()
+        keycap.wantsLayer = true
+        keycap.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.18).cgColor
+        keycap.layer?.borderColor = NSColor.separatorColor.cgColor
+        keycap.layer?.borderWidth = 1
+        keycap.layer?.cornerRadius = 6
+        keycap.toolTip = "\(shortcut.accessibilityName) starts and stops dictation"
         let shortcutLabel = NSTextField(labelWithString: shortcut.displayName)
-        shortcutLabel.frame = NSRect(x: 274, y: 24, width: 90, height: 20)
-        shortcutLabel.alignment = .center
-        shortcutLabel.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        shortcutLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.alignment = .center
         shortcutLabel.lineBreakMode = .byTruncatingMiddle
-        shortcutLabel.wantsLayer = true
-        shortcutLabel.layer?.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(0.12).cgColor
-        shortcutLabel.layer?.cornerRadius = 6
-        shortcutLabel.toolTip = "\(shortcut.accessibilityName) starts and stops dictation"
-        addSubview(shortcutLabel)
+        shortcutLabel.sizeToFit()
+        let labelHeight = shortcutLabel.frame.height
+        let keycapWidth = min(max(shortcutLabel.frame.width + 18, 36), 120)
+        keycap.frame = NSRect(x: 366 - keycapWidth, y: 22, width: keycapWidth, height: 24)
+        shortcutLabel.frame = NSRect(x: 0, y: (24 - labelHeight) / 2, width: keycapWidth, height: labelHeight)
+        keycap.addSubview(shortcutLabel)
+        addSubview(keycap)
 
         update(activity: activity)
     }
@@ -127,13 +128,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let canSelectInputDevice: () -> Bool
     private let microphoneLevelSnapshot: () -> MicrophoneLevelSnapshot
     private var levelTimer: Timer?
-    private weak var levelItem: NSMenuItem?
+    private weak var levelMeter: LevelMeterView?
+    private weak var levelStatus: NSTextField?
+    private var levelSampler = LiveLevelSampler()
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
     private var transientFeedback: UserFeedbackEvent?
     private var feedbackGeneration = 0
     private var correctionEditorController: CorrectionEditorWindowController?
     private var settingsController: SettingsWindowController?
+    /// Reopens first-run setup; the menu item is hidden when nil.
+    var openSetupGuide: (() -> Void)?
 
     init(
         store: TranscriptStore,
@@ -198,8 +203,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
 
         if let button = statusItem.button {
-            let image = Self.symbol("waveform", accessibilityDescription: "Speakeasy")
-            button.image = image
+            button.image = SpeakeasyBrand.statusBarImage
             button.toolTip = statusToolTip
         }
 
@@ -248,19 +252,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.minimumWidth = Self.menuWidth
 
         addHeader(to: menu)
-        let level = NSMenuItem(title: "Live input level", action: nil, keyEquivalent: "")
-        let meter = NSProgressIndicator(frame: NSRect(x: 130, y: 8, width: 235, height: 12))
-        meter.minValue = 0
-        meter.maxValue = 1
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 30))
-        let label = NSTextField(labelWithString: "Live input level")
-        label.frame = NSRect(x: 14, y: 7, width: 110, height: 18)
-        label.font = .systemFont(ofSize: 11)
-        container.addSubview(label)
-        container.addSubview(meter)
-        level.view = container
-        levelItem = level
-        menu.addItem(level)
+        menu.addItem(makeLevelItem())
 
         if let transientFeedback {
             menu.addItem(.separator())
@@ -340,6 +332,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         settings.keyEquivalent = ","
         settings.keyEquivalentModifierMask = [.command]
         menu.addItem(settings)
+        if openSetupGuide != nil {
+            menu.addItem(actionItem(title: "Setup Guide…", action: #selector(showSetupGuide), symbol: "sparkles"))
+        }
         let quit = NSMenuItem(
             title: "Quit Speakeasy",
             action: #selector(NSApplication.terminate(_:)),
@@ -358,6 +353,42 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             shortcut: currentDictationShortcut()
         )
         menu.addItem(item)
+    }
+
+    private func makeLevelItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Input level", action: nil, keyEquivalent: "")
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: Self.menuWidth, height: 34))
+
+        let mic = NSImageView(frame: NSRect(x: 16, y: 9, width: 16, height: 16))
+        mic.image = Self.symbol("mic.fill", accessibilityDescription: "Microphone")
+        mic.contentTintColor = .secondaryLabelColor
+        container.addSubview(mic)
+
+        let meter = LevelMeterView(frame: NSRect(x: 40, y: 8, width: 250, height: 18))
+        meter.setAccessibilityLabel("Microphone input level")
+        container.addSubview(meter)
+
+        let status = NSTextField(labelWithString: "")
+        status.frame = NSRect(x: 296, y: 9, width: 70, height: 16)
+        status.alignment = .right
+        status.font = .systemFont(ofSize: 11, weight: .medium)
+        container.addSubview(status)
+
+        item.view = container
+        levelMeter = meter
+        levelStatus = status
+        levelSampler = LiveLevelSampler()
+        updateLevel()
+        return item
+    }
+
+    private func updateLevel() {
+        let level = levelSampler.next(microphoneLevelSnapshot())
+        levelMeter?.isLive = levelSampler.isLive
+        levelMeter?.level = level
+        levelStatus?.stringValue = levelSampler.isLive ? "Live" : "Idle"
+        levelStatus?.textColor = levelSampler.isLive ? .systemGreen : .tertiaryLabelColor
+        levelStatus?.toolTip = levelSampler.isLive ? nil : "Waiting for microphone audio"
     }
 
     private func addRecentTranscripts(_ records: [TranscriptRecord], to menu: NSMenu) {
@@ -452,6 +483,15 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    @objc private func showSetupGuide() {
+        openSetupGuide?()
+    }
+
+    /// Opens the shortcut recorder, e.g. from first-run setup.
+    func changeShortcut() {
+        changeShortcutAction()
+    }
+
     @objc private func resetShortcutAction() {
         guard canChangeDictationShortcut() else { return }
         applyShortcut(.defaultShortcut)
@@ -527,11 +567,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         levelTimer?.invalidate()
-        levelTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let meter = self.levelItem?.view?.subviews.last as? NSProgressIndicator else { return }
-                meter.doubleValue = Double(self.microphoneLevelSnapshot().normalizedLevel)
-            }
+        // Timer callbacks arrive on the main run loop (including menu tracking mode).
+        levelTimer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateLevel() }
         }
         if let levelTimer { RunLoop.main.add(levelTimer, forMode: .common) }
     }
@@ -539,7 +577,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func menuDidClose(_ menu: NSMenu) {
         levelTimer?.invalidate()
         levelTimer = nil
-        levelItem = nil
+        levelMeter = nil
+        levelStatus = nil
     }
 
 
