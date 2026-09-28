@@ -8,7 +8,7 @@ final class E2ETraceStoreTests: XCTestCase {
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        directory = FileManager.default.temporaryDirectory
+        directory = testScratchDirectory
             .appendingPathComponent("speakeasy-e2e-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         fileURL = directory.appendingPathComponent("dictation-e2e.jsonl")
@@ -138,8 +138,36 @@ final class E2ETraceStoreTests: XCTestCase {
         XCTAssertEqual(store.allRecords().count, 1, "corrupt lines skipped, valid kept")
 
         store.append(good)
-        let reloaded = E2ETraceStore(fileURL: fileURL)
-        waitUntil { reloaded.allRecords().count == 2 }
+        XCTAssertTrue(waitUntil { E2ETraceStore(fileURL: self.fileURL).allRecords().count == 2 })
+    }
+
+    func testTornFinalLineIsRepairedBeforeTheNextAppend() throws {
+        let good = try XCTUnwrap(E2ETraceRecordFactory.record(from: completeTrace(), outcome: .eventsPosted, deliveredText: "x"))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var data = try encoder.encode(good)
+        data.append(0x0A)
+        data.append(contentsOf: Data(#"{"id":"torn-by-a-cra"#.utf8))
+        try data.write(to: fileURL)
+
+        let store = E2ETraceStore(fileURL: fileURL)
+        XCTAssertEqual(store.allRecords().count, 1)
+        store.append(good)
+
+        XCTAssertTrue(waitUntilFileContains(count: 2))
+        XCTAssertTrue(E2ETraceStore.parse(try Data(contentsOf: fileURL)).isClean)
+        XCTAssertEqual(E2ETraceStore(fileURL: fileURL).allRecords().count, 2)
+    }
+
+    func testOversizedLogIsTrimmedOnLoad() throws {
+        let record = try XCTUnwrap(E2ETraceRecordFactory.record(from: completeTrace(), outcome: .noSpeech, deliveredText: nil))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let line = try encoder.encode(record) + Data([0x0A])
+        try Data((0..<10).flatMap { _ in line }).write(to: fileURL)
+
+        XCTAssertEqual(E2ETraceStore(fileURL: fileURL, maxRecords: 4).allRecords().count, 4)
+        XCTAssertEqual(E2ETraceStore.parse(try Data(contentsOf: fileURL)).records.count, 4)
     }
 
     func testWrapAroundKeepsNewestHalfAndStaysBounded() {
@@ -256,7 +284,8 @@ final class E2ETraceStoreTests: XCTestCase {
         )
     }
 
-    private func waitUntilFileContains(count expected: Int, timeout: TimeInterval = 2) {
+    @discardableResult
+    private func waitUntilFileContains(count expected: Int, timeout: TimeInterval = 2) -> Bool {
         waitUntil(timeout: timeout) {
             let data = try? Data(contentsOf: self.fileURL)
             return (data?.split(separator: 0x0A).count ?? -1) == expected

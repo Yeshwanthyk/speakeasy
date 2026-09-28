@@ -16,6 +16,36 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
     var warmupBlocked = 0
     var accessibilityDenied = 0
 
+    init() {}
+
+    /// Missing keys decode as zero, like the other counter types, so adding
+    /// an outcome never invalidates existing stats files.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func count(_ key: CodingKeys) throws -> Int {
+            try container.decodeIfPresent(Int.self, forKey: key) ?? 0
+        }
+        eventsPosted = try count(.eventsPosted)
+        clipboardUpdated = try count(.clipboardUpdated)
+        clipboardWriteFailed = try count(.clipboardWriteFailed)
+        transcriptPersisted = try count(.transcriptPersisted)
+        transcriptPersistenceFailed = try count(.transcriptPersistenceFailed)
+        noSpeech = try count(.noSpeech)
+        emptyAudio = try count(.emptyAudio)
+        captureInterrupted = try count(.captureInterrupted)
+        transcriptionFailed = try count(.transcriptionFailed)
+        timedOut = try count(.timedOut)
+        cancelled = try count(.cancelled)
+        warmupBlocked = try count(.warmupBlocked)
+        accessibilityDenied = try count(.accessibilityDenied)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case eventsPosted, clipboardUpdated, clipboardWriteFailed, transcriptPersisted
+        case transcriptPersistenceFailed, noSpeech, emptyAudio, captureInterrupted
+        case transcriptionFailed, timedOut, cancelled, warmupBlocked, accessibilityDenied
+    }
+
     mutating func increment(_ outcome: TranscriptionTrace.Outcome) {
         switch outcome {
         case .eventsPosted: eventsPosted += 1
@@ -32,6 +62,14 @@ struct OutcomeCounters: Codable, Equatable, Sendable {
         case .warmupBlocked: warmupBlocked += 1
         case .accessibilityDenied: accessibilityDenied += 1
         }
+    }
+
+    var all: [Int] {
+        [
+            eventsPosted, clipboardUpdated, clipboardWriteFailed, transcriptPersisted,
+            transcriptPersistenceFailed, noSpeech, emptyAudio, captureInterrupted,
+            transcriptionFailed, timedOut, cancelled, warmupBlocked, accessibilityDenied
+        ]
     }
 
     var total: Int {
@@ -62,6 +100,10 @@ struct BackendCounters: Codable, Equatable, Sendable {
         case "parakeet-unified-en": parakeetUnified += 1
         default: unknown += 1
         }
+    }
+
+    var all: [Int] {
+        [parakeet110M, parakeetUnified, unknown]
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -121,6 +163,15 @@ struct AggregateStats: Codable, Equatable, Sendable {
         }
         outcomes.increment(outcome)
         backends.increment(backend)
+    }
+
+    /// True when every counter fits a stored document's bounds.
+    var isInStoredRange: Bool {
+        let counts = [attemptCount, deliveryCount, wordCount, characterCount, measuredWordCount]
+            + outcomes.all + backends.all
+        return counts.allSatisfy { (0...DiagnosticsDocument.maxStoredCount).contains($0) }
+            && speakingDurationMs.isFinite
+            && speakingDurationMs >= 0
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -213,6 +264,27 @@ struct DiagnosticsDocument: Codable, Equatable, Sendable {
         self.dailyBuckets = dailyBuckets
         self.latencySamples = latencySamples
     }
+
+    /// Largest counter a stored document may hold. Far below `Int.max`, so
+    /// summing every counter in a document cannot overflow.
+    static let maxStoredCount = 1 << 53
+
+    /// Decodes a stored stats file and normalizes it: the first bucket wins
+    /// for a repeated day, and buckets and samples are trimmed to the store's
+    /// caps. Throws `PersistedDocumentError`.
+    static func validated(from data: Data) throws -> DiagnosticsDocument {
+        let decoded = try PersistedDocumentFile.decode(Self.self, from: data, schemaVersion: currentSchemaVersion)
+        guard decoded.lifetime.isInStoredRange, decoded.dailyBuckets.allSatisfy(\.aggregate.isInStoredRange) else {
+            throw PersistedDocumentError.outOfRange
+        }
+        var seenDays: Set<String> = []
+        let buckets = decoded.dailyBuckets.filter { seenDays.insert($0.day).inserted }
+        return DiagnosticsDocument(
+            lifetime: decoded.lifetime,
+            dailyBuckets: Array(buckets.suffix(DiagnosticsStore.maxDailyBuckets)),
+            latencySamples: Array(decoded.latencySamples.suffix(DiagnosticsStore.maxLatencySamples))
+        )
+    }
 }
 
 struct ProductivitySummary: Equatable, Sendable {
@@ -303,10 +375,10 @@ enum DiagnosticsFormatter {
 /// counters, numeric aggregates, day keys, and a small ring of timing samples.
 @MainActor
 final class DiagnosticsStore {
-    static let maxDailyBuckets = 31
-    static let maxLatencySamples = 256
+    nonisolated static let maxDailyBuckets = 31
+    nonisolated static let maxLatencySamples = 256
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "diagnostics")
+    private static let logger = Logger(subsystem: "com.speakeasy.app", category: "diagnostics")
     private let fileURL: URL
     private let writer = OrderedSnapshotWriter(label: "com.speakeasy.diagnostics.write")
     private var document: DiagnosticsDocument
@@ -315,11 +387,12 @@ final class DiagnosticsStore {
 
     init(fileURL: URL? = nil) {
         self.fileURL = fileURL ?? Self.defaultFileURL()
-        let loaded = Self.load(from: self.fileURL)
-        self.document = loaded.document
-        if loaded.shouldPersist {
-            scheduleWrite()
-        }
+        // Normalization on load reaches disk with the next recorded trace.
+        self.document = PersistedDocumentFile.load(
+            from: self.fileURL,
+            logger: Self.logger,
+            decode: DiagnosticsDocument.validated(from:)
+        ) ?? DiagnosticsDocument()
     }
 
     func snapshot() -> DiagnosticsDocument {
@@ -340,7 +413,8 @@ final class DiagnosticsStore {
     func record(
         trace: TranscriptionTrace,
         outcome: TranscriptionTrace.Outcome,
-        text: String? = nil
+        text: String? = nil,
+        now: Date = Date()
     ) -> Task<Bool, Never> {
         guard recordedTraceIDs.insert(trace.id).inserted else {
             return Task { true }
@@ -369,7 +443,7 @@ final class DiagnosticsStore {
             speakingDurationMs: speakingDurationMs
         )
 
-        let day = Self.dayKey(for: Date())
+        let day = Self.dayKey(for: now)
         if let index = document.dailyBuckets.firstIndex(where: { $0.day == day }) {
             document.dailyBuckets[index].aggregate.record(
                 backend: trace.backend,
@@ -431,7 +505,7 @@ final class DiagnosticsStore {
     private func scheduleWrite() -> Task<Bool, Never> {
         let snapshot = document
         let url = fileURL
-        return writer.enqueue { [logger] in
+        return writer.enqueue { [logger = Self.logger] in
             do {
                 let data = try JSONEncoder().encode(snapshot)
                 try FileManager.default.createDirectory(
@@ -447,42 +521,8 @@ final class DiagnosticsStore {
         }
     }
 
-    private struct LoadResult {
-        let document: DiagnosticsDocument
-        let shouldPersist: Bool
-    }
-
-    private static func load(from url: URL) -> LoadResult {
-        guard
-            let data = try? Data(contentsOf: url),
-            let decoded = try? JSONDecoder().decode(DiagnosticsDocument.self, from: data),
-            decoded.schemaVersion == DiagnosticsDocument.currentSchemaVersion
-        else {
-            return LoadResult(document: DiagnosticsDocument(), shouldPersist: false)
-        }
-
-        var bounded = DiagnosticsDocument(
-            lifetime: decoded.lifetime,
-            dailyBuckets: decoded.dailyBuckets,
-            latencySamples: decoded.latencySamples
-        )
-        if bounded.dailyBuckets.count > maxDailyBuckets {
-            bounded.dailyBuckets = Array(bounded.dailyBuckets.suffix(maxDailyBuckets))
-        }
-        if bounded.latencySamples.count > maxLatencySamples {
-            bounded.latencySamples = Array(bounded.latencySamples.suffix(maxLatencySamples))
-        }
-        return LoadResult(document: bounded, shouldPersist: bounded != decoded)
-    }
-
     private static func dayKey(for date: Date) -> String {
-        let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
-        return String(
-            format: "%04d-%02d-%02d",
-            components.year ?? 0,
-            components.month ?? 0,
-            components.day ?? 0
-        )
+        SettingsInsights.dayKey(for: date, calendar: .current)
     }
 
     private static func defaultFileURL() -> URL {

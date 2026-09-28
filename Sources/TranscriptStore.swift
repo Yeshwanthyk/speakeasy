@@ -21,6 +21,12 @@ struct TranscriptHistoryDocument: Codable, Equatable, Sendable {
         self.schemaVersion = schemaVersion
         self.records = records
     }
+
+    /// Decodes a stored history file; throws `PersistedDocumentError`.
+    static func validatedRecords(from data: Data) throws -> [TranscriptRecord] {
+        let document = try PersistedDocumentFile.decode(Self.self, from: data, schemaVersion: currentSchemaVersion)
+        return document.records
+    }
 }
 
 struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
@@ -63,7 +69,7 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
 final class TranscriptStore {
     static let capacity = 50
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcripts")
+    private static let logger = Logger(subsystem: "com.speakeasy.app", category: "transcripts")
     private let fileURL: URL
     private let writer = OrderedSnapshotWriter(label: "com.speakeasy.app.transcripts.write")
     private var records: [TranscriptRecord]
@@ -81,14 +87,14 @@ final class TranscriptStore {
         let resolvedURL = fileURL ?? Self.defaultFileURL()
         self.fileURL = resolvedURL
 
-        if FileManager.default.fileExists(atPath: resolvedURL.path) {
-            let loaded = Self.load(from: resolvedURL)
-            self.records = loaded.records
-            if loaded.shouldPersist {
-                scheduleWrite()
-            }
-        } else {
-            self.records = []
+        let loaded = PersistedDocumentFile.load(
+            from: resolvedURL,
+            logger: Self.logger,
+            decode: TranscriptHistoryDocument.validatedRecords(from:)
+        ) ?? []
+        self.records = Array(loaded.suffix(Self.capacity))
+        if records.count != loaded.count {
+            scheduleWrite()
         }
     }
 
@@ -152,7 +158,7 @@ final class TranscriptStore {
     private func scheduleWrite() -> Task<Bool, Never> {
         let snapshot = TranscriptHistoryDocument(records: records)
         let url = fileURL
-        return writer.enqueue { [logger] in
+        return writer.enqueue { [logger = Self.logger] in
             do {
                 let data = try JSONEncoder().encode(snapshot)
                 try FileManager.default.createDirectory(
@@ -166,31 +172,6 @@ final class TranscriptStore {
                 return false
             }
         }
-    }
-
-    private struct LoadResult {
-        let records: [TranscriptRecord]
-        let shouldPersist: Bool
-    }
-
-    private static func load(from url: URL) -> LoadResult {
-        guard let data = try? Data(contentsOf: url) else {
-            return LoadResult(records: [], shouldPersist: false)
-        }
-
-        if let document = try? JSONDecoder().decode(TranscriptHistoryDocument.self, from: data),
-           document.schemaVersion == TranscriptHistoryDocument.currentSchemaVersion
-        {
-            let bounded = Array(document.records.suffix(capacity))
-            return LoadResult(
-                records: bounded,
-                shouldPersist: bounded.count != document.records.count
-            )
-        }
-
-        // A malformed or unknown file is left untouched rather than replaced
-        // by an empty snapshot.
-        return LoadResult(records: [], shouldPersist: false)
     }
 
     private static func defaultFileURL() -> URL {

@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class MenuBarControllerTests: XCTestCase {
     private func makeStore() -> TranscriptStore {
-        TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-menu-\(UUID().uuidString)/history.json"))
     }
 

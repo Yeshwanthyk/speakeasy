@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class DiagnosticsStoreTests: XCTestCase {
     private func temporaryStatsURL() -> URL {
-        FileManager.default.temporaryDirectory
+        testScratchDirectory
             .appendingPathComponent("speakeasy-diagnostics-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("stats.json")
@@ -93,9 +93,113 @@ final class DiagnosticsStoreTests: XCTestCase {
         XCTAssertFalse(store.report().contains("DICTATED-PRIVATE-CANARY"))
     }
 
-    func testMissingBackendKeysDefaultToZero() throws {
+    func testUnreadableStatsAreSetAsideAndSurviveTheNextRecord() async throws {
+        let url = temporaryStatsURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let newer = #"{"schemaVersion":4,"lifetime":{}}"#
+        try Data(newer.utf8).write(to: url)
+
+        let store = DiagnosticsStore(fileURL: url)
+        let didPersist = await store.record(trace: trace(), outcome: .eventsPosted, text: "one").value
+
+        XCTAssertTrue(didPersist)
+        XCTAssertEqual(store.snapshot().lifetime.attemptCount, 1)
+        let setAside = PersistedDocumentFile.invalidFileURL(for: url)
+        XCTAssertEqual(try String(contentsOf: setAside, encoding: .utf8), newer)
+    }
+
+    func testOutOfRangeCountersAreRejected() {
+        func error(_ lifetime: String, days: String = "[]") -> PersistedDocumentError? {
+            let json = #"{"schemaVersion":3,"lifetime":\#(lifetime),"dailyBuckets":\#(days),"latencySamples":[]}"#
+            do {
+                _ = try DiagnosticsDocument.validated(from: Data(json.utf8))
+                return nil
+            } catch {
+                return error as? PersistedDocumentError
+            }
+        }
+
+        XCTAssertNil(error("{}"))
+        XCTAssertEqual(error(#"{"wordCount":-1}"#), .outOfRange)
+        XCTAssertEqual(error(#"{"speakingDurationMs":-5}"#), .outOfRange)
+        // Summing Int.max counters used to trap in the Settings stats page.
+        XCTAssertEqual(error(#"{"outcomes":{"timedOut":9223372036854775807,"cancelled":1}}"#), .outOfRange)
+        XCTAssertEqual(error("{}", days: #"[{"day":"2026-09-28","aggregate":{"attemptCount":-2}}]"#), .outOfRange)
+        XCTAssertEqual(error(#"{"wordCount":1e999}"#), .malformed)
+        XCTAssertEqual(error(#""nope""#), .malformed)
+    }
+
+    func testLoadKeepsTheFirstBucketForARepeatedDayAndRecordsIntoIt() async throws {
+        let url = temporaryStatsURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let now = Date()
+        let today = SettingsInsights.dayKey(for: now, calendar: .current)
+        var first = AggregateStats()
+        first.attemptCount = 2
+        var second = AggregateStats()
+        second.attemptCount = 7
+        let document = DiagnosticsDocument(dailyBuckets: [
+            DailyStats(day: today, aggregate: first),
+            DailyStats(day: today, aggregate: second)
+        ])
+        try JSONEncoder().encode(document).write(to: url)
+
+        let store = DiagnosticsStore(fileURL: url)
+        XCTAssertEqual(store.snapshot().dailyBuckets.map(\.aggregate.attemptCount), [2])
+
+        _ = await store.record(trace: trace(), outcome: .eventsPosted, text: "hi", now: now).value
+        XCTAssertEqual(store.snapshot().dailyBuckets.map(\.aggregate.attemptCount), [3])
+        XCTAssertEqual(store.productivitySummary(now: now).todayDictations, 3)
+        XCTAssertEqual(SettingsInsights.make(document: store.snapshot(), now: now).days.last?.dictations, 3)
+    }
+
+    func testDailyBucketsRollOverAndKeepTheNewestDays() async {
+        let store = DiagnosticsStore(fileURL: temporaryStatsURL())
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        var lastWrite: Task<Bool, Never>?
+        for day in 0..<40 {
+            lastWrite = store.record(
+                trace: trace(withTimings: false),
+                outcome: .noSpeech,
+                now: start.addingTimeInterval(Double(day) * 86_400)
+            )
+        }
+        _ = await lastWrite?.value
+
+        let days = store.snapshot().dailyBuckets.map(\.day)
+        XCTAssertEqual(days.count, DiagnosticsStore.maxDailyBuckets)
+        XCTAssertEqual(Set(days).count, days.count)
+        XCTAssertEqual(days.last, SettingsInsights.dayKey(for: start.addingTimeInterval(39 * 86_400), calendar: .current))
+        XCTAssertEqual(store.snapshot().lifetime.attemptCount, 40)
+        XCTAssertTrue(store.snapshot().latencySamples.isEmpty)
+    }
+
+    func testReloadTrimsOversizedDocumentsToTheStoreCaps() throws {
+        let url = temporaryStatsURL()
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let document = DiagnosticsDocument(
+            dailyBuckets: (0..<40).map { DailyStats(day: "day-\($0)", aggregate: AggregateStats()) },
+            latencySamples: (0..<300).map {
+                LatencySample(captureStartMs: Double($0), releaseToTextMs: nil, releaseToPasteMs: nil)
+            }
+        )
+        try JSONEncoder().encode(document).write(to: url)
+
+        let snapshot = DiagnosticsStore(fileURL: url).snapshot()
+
+        XCTAssertEqual(snapshot.dailyBuckets.first?.day, "day-9")
+        XCTAssertEqual(snapshot.dailyBuckets.count, DiagnosticsStore.maxDailyBuckets)
+        XCTAssertEqual(snapshot.latencySamples.first?.captureStartMs, 44)
+        XCTAssertEqual(snapshot.latencySamples.count, DiagnosticsStore.maxLatencySamples)
+    }
+
+    func testMissingCounterKeysDefaultToZero() throws {
         let counters = try JSONDecoder().decode(BackendCounters.self, from: Data("{}".utf8))
         XCTAssertEqual(counters, BackendCounters())
+        let outcomes = try JSONDecoder().decode(OutcomeCounters.self, from: Data(#"{"noSpeech":3}"#.utf8))
+        var expected = OutcomeCounters()
+        expected.noSpeech = 3
+        XCTAssertEqual(outcomes, expected)
     }
 
     func testBackendCountersOnlyCountCurrentNames() {

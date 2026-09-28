@@ -23,7 +23,7 @@ Start state (2026-09-28, branch `feat/long-dictation-redux-ui`):
 - **Property testing:** in-repo harness, `Tests/SpeakeasyTests/Support/PropertyTesting.swift`. It has a seeded SplitMix64, `Gen` combinators with greedy shrinking, and `forAll`. Reproduce a failure with `SPEAKEASY_PROPERTY_SEED`. Scale it up with `SPEAKEASY_PROPERTY_ITERATIONS` (default 200).
 - **Swift fuzzing:** Xcode's toolchain rejects `-sanitize=fuzzer`, so fuzzing uses an in-repo mutation fuzzer that runs inside XCTest (`Support/Fuzzing.swift`). Each target replays `Fuzz/Corpus/<target>/`, then mutates for 1,500 iterations under `swift test`. `script/fuzz.sh [seconds]` runs longer (`SPEAKEASY_FUZZ_SECONDS`), and `SPEAKEASY_FUZZ_SEED` reproduces a run. Findings land in `Fuzz/Findings/` (gitignored). There is no coverage guidance; add libFuzzer through an OSS toolchain later if needed.
 - **Rust fuzzing:** install `cargo-fuzz` in domain 4.
-- **Test pollution:** UserDefaults suites now go through `Tests/SpeakeasyTests/TestDefaults.swift` (temp-path suites, no leftovers). Temp files and directories are still left in `$TMPDIR` (about 1,100 entries). Fix this during the persistence domain.
+- **Test pollution:** UserDefaults suites now go through `Tests/SpeakeasyTests/TestDefaults.swift` (temp-path suites, no leftovers). Temp files now go under a per-process scratch root (`Tests/SpeakeasyTests/TestScratch.swift`), which is removed when the bundle finishes; roots left by crashed runs are swept on the next run.
 
 ## Domains (suggested order: core logic first, UI last)
 
@@ -49,5 +49,13 @@ Start state (2026-09-28, branch `feat/long-dictation-redux-ui`):
   - Capped `levenshtein` could return more than `limit + 1`. This was harmless to callers but broke the documented contract.
   - Command whitespace trimming copied the whole output per command (quadratic on long dictations).
   - Left open for domain 8: toggling fuzzy matching applies only after the next corrections edit or a restart, and the UI text says so.
+- **Domain 2 (persistence): done.** Bugs fixed:
+  - A corrupt or newer-schema `history.json` / `stats.json` was silently reset and then overwritten on the next save. Both now share `PersistedDocumentFile`, which logs the problem and moves the file aside to `*.invalid.json`. Set-aside files are not restored automatically.
+  - Stats counters loaded from disk were not range-checked. `Int.max` or negative values could trap when summed (insights failure sum, averages). Such documents are now rejected as out of range.
+  - Duplicate day buckets: recording and the summary used the first bucket, but insights used the last. They are deduped on load (first wins), and insights also uses the first.
+  - A torn final line in `dictation-e2e.jsonl` (after a crash) made the next append glue onto it, losing that record. The log is repaired on load, and oversized logs are trimmed on load.
+  - Adding an outcome counter would have reset every existing stats file. Counter decoding now defaults missing keys to 0.
+  - A vacuous E2E corrupt-log test assertion now checks the loaded records.
+  - Tests leaked about 11 entries into `$TMPDIR` per run (see Tooling).
 
 Also triage the old planning docs (`plan.md`, `NEXT.md`, `MISSION.md`, `plans/`) and delete or archive what is stale.

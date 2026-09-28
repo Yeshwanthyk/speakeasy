@@ -1,0 +1,1 @@
+{"schemaVersion":3,"lifetime":{"outcomes":{"timedOut":9223372036854775807,"cancelled":1}},"dailyBuckets":[{"day":"x","aggregate":{"attemptCount":-1}},{"day":"x","aggregate":{}}],"latencySamples":[]}

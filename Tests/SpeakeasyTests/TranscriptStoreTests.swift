@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class TranscriptStoreTests: XCTestCase {
     private func temporaryHistoryURL() -> URL {
-        FileManager.default.temporaryDirectory
+        testScratchDirectory
             .appendingPathComponent("speakeasy-transcript-store-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("history.json")
@@ -78,7 +78,7 @@ final class TranscriptStoreTests: XCTestCase {
     }
 
     func testAppendReportsDiskFailureButRetainsInMemoryEntry() async throws {
-        let blockedParent = FileManager.default.temporaryDirectory
+        let blockedParent = testScratchDirectory
             .appendingPathComponent("speakeasy-transcript-store-blocker-\(UUID().uuidString)")
         try Data("not-a-directory".utf8).write(to: blockedParent)
         let store = TranscriptStore(fileURL: blockedParent.appendingPathComponent("history.json"))
@@ -131,17 +131,38 @@ final class TranscriptStoreTests: XCTestCase {
     }
 
 
-    func testMalformedHistoryIsNotOverwritten() throws {
-        let currentURL = temporaryHistoryURL()
-        try FileManager.default.createDirectory(
-            at: currentURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try Data("not-json".utf8).write(to: currentURL)
-        let store = TranscriptStore(fileURL: currentURL)
+    func testUnreadableHistoryIsSetAsideAndSurvivesTheNextSave() async throws {
+        for contents in ["not-json", #"{"schemaVersion":2,"records":[]}"#, #"{"schemaVersion":1,"records":[{}]}"#] {
+            let currentURL = temporaryHistoryURL()
+            try FileManager.default.createDirectory(
+                at: currentURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(contents.utf8).write(to: currentURL)
+            let store = TranscriptStore(fileURL: currentURL)
 
-        XCTAssertTrue(store.allEntries().isEmpty)
-        XCTAssertEqual(try Data(contentsOf: currentURL), Data("not-json".utf8))
+            XCTAssertTrue(store.allEntries().isEmpty)
+            let didPersist = await store.append("fresh").value
+            XCTAssertTrue(didPersist)
+            let setAside = PersistedDocumentFile.invalidFileURL(for: currentURL)
+            XCTAssertEqual(try String(contentsOf: setAside, encoding: .utf8), contents)
+        }
+    }
+
+    func testHistoryValidationReportsEachFailureKind() {
+        func error(_ json: String) -> PersistedDocumentError? {
+            do {
+                _ = try TranscriptHistoryDocument.validatedRecords(from: Data(json.utf8))
+                return nil
+            } catch {
+                return error as? PersistedDocumentError
+            }
+        }
+
+        XCTAssertEqual(error("[]"), .malformed)
+        XCTAssertEqual(error(#"{"schemaVersion":9,"records":"new shape"}"#), .unsupportedSchemaVersion(9))
+        XCTAssertEqual(error(#"{"schemaVersion":1,"records":[{"id":"x"}]}"#), .malformed)
+        XCTAssertNil(error(#"{"schemaVersion":1,"records":[]}"#))
     }
 
     func testRecordOutcomeAndTimingsUpdateDurably() async {

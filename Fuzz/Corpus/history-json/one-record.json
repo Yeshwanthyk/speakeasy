@@ -1,0 +1,1 @@
+{"schemaVersion":1,"records":[{"id":"0F1D2C3B-4A59-6877-8695-A4B3C2D1E0F9","createdAt":780000000.5,"rawText":"hello new line","finalText":"hello\n","backend":"parakeet-unified-en","outcome":"eventsPosted","timings":{"captureStartMs":12,"transcriptionMs":80.25,"releaseToPasteMs":140},"correctionsUndone":true,"stageChanges":[{"stage":"commands","count":1}]}]}

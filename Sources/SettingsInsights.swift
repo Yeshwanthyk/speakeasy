@@ -40,7 +40,7 @@ struct SettingsInsights: Equatable {
     func usage(of kind: ASRModelKind) -> Int { modelUsage[kind.preferenceValue, default: 0] }
 
     static func make(document: DiagnosticsDocument, now: Date, calendar: Calendar = .current) -> SettingsInsights {
-        let byDay = Dictionary(document.dailyBuckets.map { ($0.day, $0.aggregate) }, uniquingKeysWith: { _, last in last })
+        let byDay = Dictionary(document.dailyBuckets.map { ($0.day, $0.aggregate) }, uniquingKeysWith: { first, _ in first })
         let today = calendar.startOfDay(for: now)
 
         let days: [Day] = (0..<chartDayCount).reversed().compactMap { offset in
@@ -118,7 +118,7 @@ struct SettingsInsights: Equatable {
         return zip(buckets, counts).map { Share(id: $0.label, count: $1, tone: $0.tone) }
     }
 
-    /// Mirrors `DiagnosticsStore`'s bucket key format (`yyyy-MM-dd`, local calendar).
+    /// Daily bucket key (`yyyy-MM-dd` in `calendar`), shared with `DiagnosticsStore`.
     static func dayKey(for date: Date, calendar: Calendar) -> String {
         let components = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)

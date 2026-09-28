@@ -7,7 +7,7 @@ import Foundation
 /// ~/Library/Preferences (cfprefsd recreates an empty plist there even after
 /// `removePersistentDomain(forName:)`).
 func testDefaultsSuiteName(_ prefix: String) -> String {
-    FileManager.default.temporaryDirectory
+    testScratchDirectory
         .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
         .path
 }

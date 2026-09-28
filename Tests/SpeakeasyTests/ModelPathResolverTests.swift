@@ -20,7 +20,7 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testEnvironmentOverrideReturnsExistingGGUF() throws {
-        let url = FileManager.default.temporaryDirectory
+        let url = testScratchDirectory
             .appendingPathComponent("speakeasy-model-path-tests")
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
@@ -28,7 +28,7 @@ final class ModelPathResolverTests: XCTestCase {
 
         let resolved = try ModelPathResolver.configuredASRModel(
             kind: .parakeetUnified,
-            appSupport: FileManager.default.temporaryDirectory,
+            appSupport: testScratchDirectory,
             bundleIdentifier: "com.speakeasy.app",
             environment: ["PARAKEET_UNIFIED_GGUF_PATH": url.path],
             artifactProvider: { _ in Self.testArtifact }
@@ -38,12 +38,12 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testEnvironmentOverrideThrowsForMissingFile() {
-        let url = FileManager.default.temporaryDirectory
+        let url = testScratchDirectory
             .appendingPathComponent(UUID().uuidString)
 
         XCTAssertThrowsError(try ModelPathResolver.configuredASRModel(
             kind: .parakeetUnified,
-            appSupport: FileManager.default.temporaryDirectory,
+            appSupport: testScratchDirectory,
             bundleIdentifier: "com.speakeasy.app",
             environment: ["PARAKEET_UNIFIED_GGUF_PATH": url.path]
         )) { error in
@@ -55,7 +55,7 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testConfiguredModelDefaultsToParakeet110M() throws {
-        let appSupport = FileManager.default.temporaryDirectory
+        let appSupport = testScratchDirectory
             .appendingPathComponent("speakeasy-model-path-tests")
             .appendingPathComponent(UUID().uuidString)
         let modelURL = appSupport
@@ -88,7 +88,7 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testCanonicalPathUsesPinnedArtifactFilename() {
-        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupport = testScratchDirectory.appendingPathComponent(UUID().uuidString)
         let url = ModelPathResolver.preferredInstallURL(
             kind: .parakeet110M,
             appSupport: appSupport,
@@ -121,7 +121,7 @@ final class ModelPathResolverTests: XCTestCase {
 
 
     func testWrongSizedGGUFIsRejected() throws {
-        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupport = testScratchDirectory.appendingPathComponent(UUID().uuidString)
         let modelURL = appSupport
             .appendingPathComponent("com.speakeasy.app/models")
             .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)
@@ -147,7 +147,7 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testSameSizedCorruptGGUFIsRejectedByChecksum() throws {
-        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let appSupport = testScratchDirectory.appendingPathComponent(UUID().uuidString)
         let modelURL = appSupport
             .appendingPathComponent("com.speakeasy.app/models")
             .appendingPathComponent(ASRModelKind.parakeetUnified.artifact.filename)

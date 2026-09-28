@@ -49,7 +49,7 @@ final class OverlayModelTests: XCTestCase {
     }
 
     func testUndoMarkerPersistsOnRecord() async {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("overlay-\(UUID().uuidString).json")
+        let url = testScratchDirectory.appendingPathComponent("overlay-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
         let store = TranscriptStore(fileURL: url)
         let record = TranscriptRecord(rawText: "spoken", finalText: "corrected", backend: "test", outcome: .eventsPosted)

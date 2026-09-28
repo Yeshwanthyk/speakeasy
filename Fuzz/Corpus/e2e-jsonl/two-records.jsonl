@@ -1,0 +1,2 @@
+{"backend":"test","delivered_character_count":5,"id":"0F1D2C3B-4A59-6877-8695-A4B3C2D1E0F9","outcome":"eventsPosted","recorded_at":1790000000.25,"release_to_paste_request_ms":160,"stage_change_counts":{"commands":2},"succeeded":true,"transcription_ms":50,"utterance_ms":1000}
+{"backend":"test","id":"1F1D2C3B-4A59-6877-8695-A4B3C2D1E0F9","outcome":"noSpeech","recorded_at":1790000001,"succeeded":false,"utterance_ms":0,"segment_count":3,"tail_seconds":0.5}

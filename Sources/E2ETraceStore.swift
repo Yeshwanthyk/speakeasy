@@ -140,7 +140,9 @@ final class E2ETraceStore: @unchecked Sendable {
     private var pendingRecords: [E2ETraceRecord]
 
     /// Loads up to `maxRecords` existing records; failures start fresh so a
-    /// corrupt log never blocks dictation.
+    /// corrupt log never blocks dictation. A log with undecodable lines, a
+    /// torn final line, or too many records is rewritten from what survived,
+    /// so the next append never lands on a partial line.
     init(fileURL: URL, maxRecords: Int = E2ETraceStore.defaultMaxRecords) {
         precondition(maxRecords >= 4, "retention window must allow a wrap")
         self.fileURL = fileURL
@@ -154,11 +156,11 @@ final class E2ETraceStore: @unchecked Sendable {
             Logger(subsystem: "com.speakeasy.app", category: "e2e-traces")
                 .error("Could not initialize dictation-e2e.jsonl: \(String(describing: error), privacy: .public)")
         }
-        let records = Self.loadRecords(from: fileURL)
-        if records.count > maxRecords {
-            self.pendingRecords = Array(records.suffix(maxRecords))
-        } else {
-            self.pendingRecords = records
+        let data = (try? Data(contentsOf: fileURL)) ?? Data()
+        let parsed = Self.parse(data)
+        self.pendingRecords = Array(parsed.records.suffix(maxRecords))
+        if !parsed.isClean || parsed.records.count > maxRecords {
+            rewriteOnQueue(pendingRecords)
         }
     }
 
@@ -230,17 +232,21 @@ final class E2ETraceStore: @unchecked Sendable {
         }
     }
 
-    private static func loadRecords(from url: URL) -> [E2ETraceRecord] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
+    /// Decodes JSONL, skipping lines that fail. `isClean` is false when any
+    /// line was skipped or the data does not end with a newline.
+    static func parse(_ data: Data) -> (records: [E2ETraceRecord], isClean: Bool) {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         var records: [E2ETraceRecord] = []
+        var isClean = data.isEmpty || data.last == 0x0A
         for line in data.split(separator: 0x0A) where !line.isEmpty {
             if let record = try? decoder.decode(E2ETraceRecord.self, from: Data(line)) {
                 records.append(record)
+            } else {
+                isClean = false
             }
         }
-        return records
+        return (records, isClean)
     }
 }
 

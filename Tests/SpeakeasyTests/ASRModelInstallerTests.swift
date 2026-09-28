@@ -85,7 +85,7 @@ final class ASRModelInstallerTests: XCTestCase {
     }
 
     private func makeTargetURL() -> URL {
-        FileManager.default.temporaryDirectory
+        testScratchDirectory
             .appendingPathComponent("speakeasy-installer-tests")
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("model.gguf")
@@ -107,7 +107,7 @@ private final class FakeModelFileDownloader: ModelFileDownloading {
 
     func download(from url: URL) async throws -> URL {
         lock.withLock { requested.append(url) }
-        let tempURL = FileManager.default.temporaryDirectory
+        let tempURL = testScratchDirectory
             .appendingPathComponent("speakeasy-installer-tests-\(UUID().uuidString)")
         try contents.write(to: tempURL)
         return tempURL

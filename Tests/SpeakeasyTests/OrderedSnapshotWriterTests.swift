@@ -34,6 +34,27 @@ final class OrderedSnapshotWriterTests: XCTestCase {
         XCTAssertTrue(newestResult)
         XCTAssertEqual(written.values, [1, 2, 3])
     }
+
+    func testEveryWriteRunsOnceInEnqueueOrderAndReportsItsOwnResult() async {
+        let writer = OrderedSnapshotWriter(label: "com.speakeasy.tests.ordered-writer.many")
+        let written = LockedIntegers()
+        let tasks = (0..<500).map { index in
+            writer.enqueue {
+                written.append(index)
+                return index.isMultiple(of: 3)
+            }
+        }
+
+        var results: [Bool] = []
+        for task in tasks.reversed() {
+            results.append(await task.value)
+        }
+        let again = await tasks[7].value
+
+        XCTAssertEqual(written.values, Array(0..<500))
+        XCTAssertEqual(results.reversed(), (0..<500).map { $0.isMultiple(of: 3) })
+        XCTAssertFalse(again)
+    }
 }
 
 private final class LockedIntegers: @unchecked Sendable {

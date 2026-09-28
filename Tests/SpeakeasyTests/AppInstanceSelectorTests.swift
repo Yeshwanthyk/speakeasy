@@ -5,7 +5,7 @@ import XCTest
 final class AppInstanceSelectorTests: XCTestCase {
     private let installedURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Applications/Speakeasy.app")
-    private let buildURL = FileManager.default.temporaryDirectory
+    private let buildURL = testScratchDirectory
         .appendingPathComponent("speakeasy-build/Speakeasy.app")
 
     func testProceedWhenNoOtherInstancesAreRunning() {

@@ -7,7 +7,7 @@ final class TranscriptCorrectionStoreTests: XCTestCase {
     private var directory: URL!
 
     override func setUp() async throws {
-        directory = FileManager.default.temporaryDirectory
+        directory = testScratchDirectory
             .appendingPathComponent("speakeasy-corrections-\(UUID().uuidString)", isDirectory: true)
     }
 
@@ -94,7 +94,7 @@ final class TranscriptCorrectionStoreTests: XCTestCase {
 
         XCTAssertEqual(store.allCorrections(), [])
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
-        let setAside = TranscriptCorrectionStore.invalidFileURL(for: fileURL)
+        let setAside = PersistedDocumentFile.invalidFileURL(for: fileURL)
         XCTAssertEqual(try String(contentsOf: setAside, encoding: .utf8), invalid)
 
         let didPersist = try await store.replace([TranscriptCorrection(heard: "a", written: "b")]).value

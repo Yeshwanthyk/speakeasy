@@ -91,25 +91,13 @@ final class TranscriptCorrectionStore {
         }
     }
 
-    /// Missing files mean no corrections. An unreadable or invalid file is
-    /// moved aside (replacing any earlier one) so the next save cannot
-    /// silently overwrite the user's only copy.
+    /// Missing files mean no corrections; an invalid file is set aside.
     private static func load(from url: URL) -> [TranscriptCorrection] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        do {
-            let data = try Data(contentsOf: url)
-            return try TranscriptCorrectionDocument.validatedCorrections(from: data)
-        } catch {
-            logger.error("Ignoring unreadable corrections file: \(String(describing: error), privacy: .public)")
-            let invalidURL = invalidFileURL(for: url)
-            try? FileManager.default.removeItem(at: invalidURL)
-            try? FileManager.default.moveItem(at: url, to: invalidURL)
-            return []
-        }
-    }
-
-    static func invalidFileURL(for url: URL) -> URL {
-        url.deletingPathExtension().appendingPathExtension("invalid.json")
+        PersistedDocumentFile.load(
+            from: url,
+            logger: logger,
+            decode: TranscriptCorrectionDocument.validatedCorrections(from:)
+        ) ?? []
     }
 
     private static func defaultFileURL() -> URL {

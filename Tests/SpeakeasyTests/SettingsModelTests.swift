@@ -7,7 +7,7 @@ import XCTest
 @MainActor
 final class SettingsModelTests: XCTestCase {
     func testRefreshAndActionsUseInjectedSettingsCallbacks() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         store.append("Hello")
         var mode = DictationInvocationMode.toggle
@@ -57,7 +57,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testDisabledActionsAndRejectedModelRequestClearsPendingState() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         var changes = 0
         let model = SettingsModel(
@@ -95,7 +95,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testSystemDefaultAndHiddenRefresh() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         var selected: String?
         var enumerations = 0
@@ -123,7 +123,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testHistoryPasteWithoutPreviousAppCopiesWithFeedback() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         let model = SettingsModel(
             store: store, diagnosticsStore: nil,
@@ -145,7 +145,7 @@ final class SettingsModelTests: XCTestCase {
         guard let app = NSWorkspace.shared.runningApplications.first(where: {
             $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
         }) else { throw XCTSkip("No other running application") }
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         var activated = false
         var pasted = false
@@ -169,7 +169,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testWindowControllerReusesWindowAndStopsUpdatesOnClose() {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         let model = SettingsModel(
             store: store, diagnosticsStore: nil,
@@ -220,7 +220,7 @@ final class SettingsModelTests: XCTestCase {
         }
         guard apps.count >= 2 else { throw XCTSkip("Need two running applications") }
         var activatedPID: pid_t?
-        let model = SettingsModel(store: TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let model = SettingsModel(store: TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json")), diagnosticsStore: nil,
             currentMode: { .toggle }, setMode: { _ in }, currentShortcut: { .defaultShortcut },
             changeShortcut: {}, resetShortcut: {}, shortcutEnabled: { true }, availableDevices: { [] },
@@ -251,7 +251,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     private func makeIsolatedModel(level: @escaping () -> MicrophoneLevelSnapshot) -> SettingsModel {
-        SettingsModel(store: TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        SettingsModel(store: TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json")), diagnosticsStore: nil,
             currentMode: { .toggle }, setMode: { _ in }, currentShortcut: { .defaultShortcut },
             changeShortcut: {}, resetShortcut: {}, shortcutEnabled: { true }, availableDevices: { [] },
@@ -261,7 +261,7 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testClearHistoryRefreshesVisibleRecords() async {
-        let store = TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+        let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
         store.append("Hello")
         let model = SettingsModel(
