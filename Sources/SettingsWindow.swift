@@ -30,6 +30,18 @@ final class SettingsMicrophoneMeter: ObservableObject {
 @MainActor
 final class SettingsModel: ObservableObject {
     @Published private(set) var mode: DictationInvocationMode = .toggle
+    @Published private(set) var overlayStyle = OverlayPreferences.style()
+    @Published private(set) var showsLiveTranscript = OverlayPreferences.showsLiveText()
+
+    func chooseOverlayStyle(_ style: OverlayStyle) {
+        OverlayPreferences.setStyle(style)
+        overlayStyle = style
+    }
+
+    func chooseLiveTranscript(_ enabled: Bool) {
+        OverlayPreferences.setShowsLiveText(enabled)
+        showsLiveTranscript = enabled
+    }
     @Published private(set) var shortcut: DictationShortcut = .defaultShortcut
     @Published private(set) var canChangeShortcut = false
     @Published private(set) var devices: [MicrophoneDevice] = []
@@ -342,6 +354,17 @@ private struct SettingsView: View {
                     }
                     Text("Hands-Free starts and stops with a press. Push to Talk records while you hold the shortcut.")
                         .foregroundStyle(.secondary)
+                    Picker("Overlay style", selection: Binding(
+                        get: { model.overlayStyle }, set: { model.chooseOverlayStyle($0) }
+                    )) {
+                        ForEach(OverlayStyle.allCases, id: \.rawValue) { style in
+                            Text(style.title).tag(style)
+                        }
+                    }
+                    Toggle("Show live transcript", isOn: Binding(
+                        get: { model.showsLiveTranscript }, set: { model.chooseLiveTranscript($0) }
+                    ))
+                    .disabled(model.overlayStyle == .topIndicator)
                 }
             }
         case .shortcut:

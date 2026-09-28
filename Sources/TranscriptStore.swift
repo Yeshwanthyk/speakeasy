@@ -31,6 +31,7 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
     let backend: String
     var outcome: TranscriptionTrace.Outcome
     var timings: TimingSnapshot?
+    var correctionsUndone: Bool? = nil
 
     init(
         id: UUID = UUID(),
@@ -128,6 +129,13 @@ final class TranscriptStore {
         }
         records[index].outcome = outcome
         records[index].timings = timings
+        return scheduleWrite()
+    }
+
+    @discardableResult
+    func markCorrectionsUndone(id: UUID) -> Task<Bool, Never> {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return Task { false } }
+        records[index].correctionsUndone = true
         return scheduleWrite()
     }
 

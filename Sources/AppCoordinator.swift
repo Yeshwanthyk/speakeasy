@@ -737,6 +737,14 @@ final class AppCoordinator: @unchecked Sendable {
             transcriptPostProcessor: postProcessor,
             transcriptCorrectionStore: correctionStore
         )
+        recordingFeedback.configureBottom(
+            mode: { [weak self] in self?.selectedInvocationMode() ?? .toggle },
+            selectMode: { [weak self] in self?.setInvocationMode($0) },
+            copyLast: { [weak self] in _ = self?.copyLastTranscript() },
+            pasteLast: { [weak self] in _ = self?.pasteLastTranscript() },
+            undoLast: { [weak self] in self?.undoLastCorrections() }
+        )
+        onLivePreviewTextChange = { [weak recordingFeedback] in recordingFeedback?.updatePreview($0) }
     }
 
     /// Production e2e latency log under Application Support, beside the
@@ -1288,6 +1296,7 @@ final class AppCoordinator: @unchecked Sendable {
                         self.recordTerminal(trace: settledTrace, outcome: .transcriptionFailed)
                         self.logger.error("Transcription failed: \(String(describing: error))")
                         self.feedback.notify(event: .error("Transcription failed"))
+                        self.recordingFeedback.showError("Transcription failed")
                     }
                 case .timedOut:
                     self.retainFailedCapture(samples: samples, reason: .timedOut)
@@ -1377,6 +1386,7 @@ final class AppCoordinator: @unchecked Sendable {
                     text: settledTranscript.finalText
                 )
                 self.feedback.notify(event: .error("Transcript could not be saved"))
+                self.recordingFeedback.showError("Transcript could not be saved")
                 return
             }
             self.deliverPersistedTranscript(
@@ -1442,6 +1452,18 @@ final class AppCoordinator: @unchecked Sendable {
         let outcome = paster.copy(text)
         notifyDeliveryOutcome(outcome, operation: .copy, target: nil)
         return outcome
+    }
+
+    @MainActor
+    func undoLastCorrections() {
+        guard let record = transcriptStore?.allRecords().last else {
+            feedback.notify(event: .error("No transcript available"))
+            return
+        }
+        _ = paster.copy(record.rawText)
+        let target = deliveryTargetProvider.currentTarget()
+        let outcome = pasteTranscript(record.rawText, operation: .pasteLast, target: target)
+        if outcome == .eventsPosted { _ = transcriptStore?.markCorrectionsUndone(id: record.id) }
     }
 
     /// Post a new paste request for the newest transcript without retranscribing it.
