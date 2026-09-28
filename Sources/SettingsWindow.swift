@@ -43,6 +43,9 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var hasPasteTarget = false
     @Published private(set) var historyFeedback: String?
     @Published private(set) var records: [TranscriptRecord] = []
+    @Published var fuzzyCorrectionsEnabled = FuzzyCorrectionPreference.isEnabled {
+        didSet { UserDefaults.standard.set(fuzzyCorrectionsEnabled, forKey: FuzzyCorrectionPreference.key) }
+    }
     @Published private(set) var summary: ProductivitySummary = DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
 
     private let store: TranscriptStore
@@ -415,6 +418,18 @@ private struct SettingsView: View {
                     Text("Replace exact words or phrases after transcription. Rules stay on this Mac.")
                         .foregroundStyle(.secondary)
                     Button("Open Corrections Editor…", action: model.openCorrections)
+                }
+                Section("Post-processing") {
+                    Toggle("Fuzzy-match my correction terms (experimental)", isOn: $model.fuzzyCorrectionsEnabled)
+                    Text("Takes effect after the next correction edit or app restart. May substitute similar-sounding words.")
+                        .foregroundStyle(.secondary)
+                    let changed = model.records.filter { !($0.stageChanges ?? []).isEmpty }.count
+                    Text("Changed \(changed) of last \(model.records.count) dictations")
+                    let counts = Dictionary(model.records.flatMap { $0.stageChanges ?? [] }
+                        .map { ($0.stage, $0.count) }, uniquingKeysWith: +)
+                    ForEach(counts.keys.sorted(), id: \.self) { stage in
+                        Text("\(stage): \(counts[stage, default: 0])")
+                    }
                 }
             }
         case .history:

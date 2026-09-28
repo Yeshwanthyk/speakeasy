@@ -31,6 +31,7 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
     let backend: String
     var outcome: TranscriptionTrace.Outcome
     var timings: TimingSnapshot?
+    var stageChanges: [StageChange]?
 
     init(
         id: UUID = UUID(),
@@ -39,7 +40,8 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
         finalText: String,
         backend: String,
         outcome: TranscriptionTrace.Outcome,
-        timings: TimingSnapshot? = nil
+        timings: TimingSnapshot? = nil,
+        stageChanges: [StageChange]? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -48,6 +50,7 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
         self.backend = backend
         self.outcome = outcome
         self.timings = timings
+        self.stageChanges = stageChanges
     }
 }
 

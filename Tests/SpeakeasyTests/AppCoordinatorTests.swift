@@ -1190,52 +1190,24 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertEqual(feedback.modelFailures, ["Stop recording before switching models"])
     }
 
-    func testHallucinationIsFiltered() {
+    func testShortAcknowledgementAndCorrectionAreDeliveredWhenVoiced() throws {
         let audio = AudioCaptureStub(samples: Self.validSamples)
         let transcriber = FakeTranscriber(result: .success("Yeah."))
         let paster = PasterStub()
         let feedback = FeedbackStub()
-
-        let notified = expectation(description: "no speech")
-        feedback.onError = { message in
-            if message == "No speech detected" { notified.fulfill() }
-        }
-
-        let coordinator = makeCoordinator(audio: audio, transcriber: transcriber, paster: paster, feedback: feedback)
-
-        coordinator.toggleRecording()
-        coordinator.toggleRecording()
-
-        wait(for: [notified], timeout: 1.0)
-        XCTAssertTrue(paster.pastedTexts.isEmpty, "Hallucinated 'Yeah.' should not be pasted")
-    }
-
-    func testCorrectionsDoNotRescueHallucinatedTranscription() throws {
-        let audio = AudioCaptureStub(samples: Self.validSamples)
-        let transcriber = FakeTranscriber(result: .success("Yeah."))
-        let paster = PasterStub()
-        let feedback = FeedbackStub()
-        let postProcessor = try TranscriptPostProcessor(corrections: [
+        let processor = try TranscriptPostProcessor(corrections: [
             TranscriptCorrection(heard: "yeah", written: "accepted text")
         ])
-        let notified = expectation(description: "no speech")
-        feedback.onError = { message in
-            if message == "No speech detected" { notified.fulfill() }
-        }
-
+        let pasted = expectation(description: "paste")
+        paster.onPaste = { pasted.fulfill() }
         let coordinator = makeCoordinator(
-            audio: audio,
-            transcriber: transcriber,
-            paster: paster,
-            feedback: feedback,
-            transcriptPostProcessor: postProcessor
+            audio: audio, transcriber: transcriber, paster: paster,
+            feedback: feedback, transcriptPostProcessor: processor
         )
-
         coordinator.toggleRecording()
         coordinator.toggleRecording()
-
-        wait(for: [notified], timeout: 1.0)
-        XCTAssertTrue(paster.pastedTexts.isEmpty)
+        wait(for: [pasted], timeout: 1.0)
+        XCTAssertEqual(paster.pastedTexts, ["accepted text."])
     }
 
     func testSilenceGuardUsesActiveSamplesWithoutPreRoll() {

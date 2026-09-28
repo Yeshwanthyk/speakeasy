@@ -31,6 +31,7 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
     var nativeWaitMs: Double? = nil
     var rewarmStarted: Bool? = nil
     var rewarmInFlightAtFinalStart: Bool? = nil
+    var stageChangeCounts: [String: Int]? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -51,6 +52,7 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
         case nativeWaitMs = "native_wait_ms"
         case rewarmStarted = "rewarm_started"
         case rewarmInFlightAtFinalStart = "rewarm_in_flight_at_final_start"
+        case stageChangeCounts = "stage_change_counts"
     }
 }
 
@@ -101,7 +103,8 @@ enum E2ETraceRecordFactory {
             nativeTotalMs: trace.nativeTimings?.totalMs,
             nativeWaitMs: trace.nativeTimings?.waitMs,
             rewarmStarted: trace.rewarmStarted,
-            rewarmInFlightAtFinalStart: trace.rewarmInFlightAtFinalStart
+            rewarmInFlightAtFinalStart: trace.rewarmInFlightAtFinalStart,
+            stageChangeCounts: Dictionary(uniqueKeysWithValues: trace.stageChanges.map { ($0.stage, $0.count) })
         )
     }
 

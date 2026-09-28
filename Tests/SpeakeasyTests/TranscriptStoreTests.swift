@@ -29,6 +29,20 @@ final class TranscriptStoreTests: XCTestCase {
         return decoded.records
     }
 
+    func testStageChangesRoundTripAndOldRecordsDecodeWithoutField() throws {
+        let record = TranscriptRecord(rawText: "kudo", finalText: "CUDA", backend: "test",
+                                      outcome: .eventsPosted,
+                                      stageChanges: [StageChange(stage: "exactCorrections", count: 1)])
+        let encoded = try JSONEncoder().encode(record)
+        XCTAssertEqual(try JSONDecoder().decode(TranscriptRecord.self, from: encoded), record)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "stageChanges")
+        let oldData = try JSONSerialization.data(withJSONObject: legacy)
+        let decoded = try JSONDecoder().decode(TranscriptRecord.self, from: oldData)
+        XCTAssertNil(decoded.stageChanges)
+        XCTAssertEqual(decoded.rawText, "kudo")
+    }
+
     func testAppendEvictsOldestEntriesPastCapacity() {
         let store = TranscriptStore(fileURL: temporaryHistoryURL())
 

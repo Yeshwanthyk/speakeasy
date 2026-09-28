@@ -23,9 +23,26 @@ enum TranscriptPostProcessorError: Error, Equatable {
     case duplicateHeard(index: Int, duplicateOf: Int)
 }
 
+enum FuzzyCorrectionPreference {
+    static let key = "fuzzyCorrectionTermsEnabled"
+    static var isEnabled: Bool { UserDefaults.standard.bool(forKey: key) }
+}
+
+struct StageChange: Codable, Equatable, Sendable {
+    let stage: String
+    let count: Int
+}
+
 struct ProcessedTranscript: Equatable, Sendable {
     let rawText: String
     let finalText: String
+    let stageChanges: [StageChange]
+
+    init(rawText: String, finalText: String, stageChanges: [StageChange] = []) {
+        self.rawText = rawText
+        self.finalText = finalText
+        self.stageChanges = stageChanges
+    }
 }
 
 /// A bounded, immutable text cleanup pass for accepted ASR output.
@@ -120,7 +137,11 @@ struct TranscriptPostProcessor: Sendable {
         let phoneticText = phoneticCorrector?.correct(rawText) ?? rawText
         let commandText = rewriteCommands(in: phoneticText)
         let finalText = correctionMatcher.rewrite(in: commandText)
-        return ProcessedTranscript(rawText: rawText, finalText: finalText)
+        var changes: [StageChange] = []
+        if phoneticText != rawText { changes.append(StageChange(stage: "phonetic", count: 1)) }
+        if commandText != phoneticText { changes.append(StageChange(stage: "commands", count: 1)) }
+        if finalText != commandText { changes.append(StageChange(stage: "exactCorrections", count: 1)) }
+        return ProcessedTranscript(rawText: rawText, finalText: finalText, stageChanges: changes)
     }
 
     private func rewriteCommands(in text: String) -> String {
