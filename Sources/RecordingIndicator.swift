@@ -17,6 +17,11 @@ protocol RecordingFeedbackPresenting: AnyObject {
     func showRecording()
     func showProcessing()
     func hide()
+    func showError(_ message: String)
+}
+
+extension RecordingFeedbackPresenting {
+    func showError(_ message: String) {}
 }
 
 struct RecordingIndicatorGeometry: Equatable, Sendable {
@@ -162,6 +167,23 @@ final class RecordingIndicator: RecordingFeedbackPresenting {
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "recording-indicator")
     private let levelProvider: LevelProvider
+    private let bottomOverlay = BottomOverlay()
+
+    func configureBottom(mode: @escaping () -> DictationInvocationMode,
+                         selectMode: @escaping (DictationInvocationMode) -> Void,
+                         copyLast: @escaping () -> Void,
+                         pasteLast: @escaping () -> Void,
+                         undoLast: @escaping () -> Void) {
+        bottomOverlay.currentMode = mode
+        bottomOverlay.selectMode = selectMode
+        bottomOverlay.copyLast = copyLast
+        bottomOverlay.pasteLast = pasteLast
+        bottomOverlay.undoLast = undoLast
+        bottomOverlay.model.start(mode: mode())
+    }
+
+    func updatePreview(_ text: String) { bottomOverlay.updatePreview(text) }
+    func showError(_ message: String) { bottomOverlay.showError(message) }
     private var panel: NSPanel?
     private var indicatorView: RecordingIndicatorView?
     private var animationTimer: Timer?
@@ -173,6 +195,7 @@ final class RecordingIndicator: RecordingFeedbackPresenting {
 
     init(levelProvider: @escaping LevelProvider) {
         self.levelProvider = levelProvider
+        bottomOverlay.levelProvider = { levelProvider().normalizedLevel }
     }
 
     deinit {
@@ -180,15 +203,24 @@ final class RecordingIndicator: RecordingFeedbackPresenting {
     }
 
     func showRecording() {
+        if OverlayPreferences.style() == .bottomPill {
+            bottomOverlay.showRecording()
+            return
+        }
         levelNormalizer.reset()
         show(phase: .recording, lockToCurrentDisplay: true)
     }
 
     func showProcessing() {
+        if OverlayPreferences.style() == .bottomPill {
+            bottomOverlay.showProcessing()
+            return
+        }
         show(phase: .processing, lockToCurrentDisplay: panel == nil)
     }
 
     func hide() {
+        bottomOverlay.hide()
         presentationGeneration &+= 1
         let generation = presentationGeneration
         stopAnimationTimer()
