@@ -706,7 +706,8 @@ final class AppCoordinator: @unchecked Sendable {
             onLimitReached: { [feedback] in
                 feedback.notify(event: .error("Recording stopped at the 60-minute memory safety limit"))
             },
-            initialInputDeviceUID: MicrophoneSelectionStore.selectedUID()
+            initialInputDeviceUID: MicrophoneSelectionStore.selectedUID(),
+            e2eAudio: E2EAudioFixtureSource.fromEnvironment()
         )
         let paster = PasteboardPaster()
         let recordingFeedback = RecordingIndicator {
@@ -1310,6 +1311,7 @@ final class AppCoordinator: @unchecked Sendable {
                     trace.committedAudioSeconds = completed.committedSeconds
                     trace.tailSeconds = completed.tailSeconds
                     trace.segmentWaitMs = completed.waitMs
+                    trace.nativeTimings = completed.tailTimings
                 } else {
                     let (raw, timings) = try FinalTranscription.run(samples: samples, transcriber: transcriber, runID: runID, isCancelled: cancelled)
                     text = raw

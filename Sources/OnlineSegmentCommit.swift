@@ -184,7 +184,7 @@ final class OnlineSegmentCommit: @unchecked Sendable {
 
     /// Stop gives the tail priority over any queued commit. Caller is off-main.
     func finish(tail: ContiguousArray<Float>, tailStart: Int, finalRunID: UInt64,
-                isCancelled: () -> Bool) throws -> (text: String, count: Int, committedSeconds: Double, tailSeconds: Double, waitMs: Double) {
+                isCancelled: () -> Bool) throws -> (text: String, count: Int, committedSeconds: Double, tailSeconds: Double, waitMs: Double, tailTimings: NativeASRTimings?) {
         let start = DispatchTime.now().uptimeNanoseconds
         lock.lock()
         stopped = true
@@ -209,9 +209,10 @@ final class OnlineSegmentCommit: @unchecked Sendable {
         if let error { throw error }
         // The native session is free now: tail first, then the outstanding commit.
         let tailText: String
+        let tailTimings: NativeASRTimings?
         if !tail.isEmpty && SpeechGate.analyze(tail).hasSpeech {
-            tailText = try FinalTranscription.run(samples: tail, transcriber: transcriber, runID: finalRunID, isCancelled: isCancelled).0
-        } else { tailText = "" }
+            (tailText, tailTimings) = try FinalTranscription.run(samples: tail, transcriber: transcriber, runID: finalRunID, isCancelled: isCancelled)
+        } else { (tailText, tailTimings) = ("", nil) }
         var parts = prior
         if let queued, SpeechGate.analyze(queued.samples).hasSpeech {
             if isCancelled() { throw CancellationError() }
@@ -234,7 +235,7 @@ final class OnlineSegmentCommit: @unchecked Sendable {
         }
         joined = tailStart < end ? FinalTranscription.merge(joined, tailText)
             : [joined, tailText].filter { !$0.isEmpty }.joined(separator: " ")
-        return (joined, count, Double(end) / 16_000, Double(tail.count) / 16_000, waitMs)
+        return (joined, count, Double(end) / 16_000, Double(tail.count) / 16_000, waitMs, tailTimings)
     }
 
     func cancel(excluding runID: UInt64? = nil) {

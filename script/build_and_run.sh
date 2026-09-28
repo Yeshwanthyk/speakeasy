@@ -56,6 +56,9 @@ case "$MODE" in
     build_and_install
     open_app
     ;;
+  install)
+    build_and_install
+    ;;
   --debug|debug)
     build_and_install
     lldb -- "$APP_BINARY"
@@ -77,7 +80,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|install|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

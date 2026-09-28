@@ -112,6 +112,19 @@ cargo test --locked --manifest-path rust/asr_bridge/Cargo.toml
 
 `swift test` covers the Swift library. The ABI smoke test exercises the real Swift↔Rust C boundary. `build.sh` also compiles app-only startup and native-transcriber wiring, embeds `libasr_bridge.dylib`, signs the bundle, and verifies its icon and structure.
 
+### Desktop end-to-end test
+
+`./script/e2e.sh [full|quick] [--no-install]` installs the signed app, quits the running instance, and relaunches `~/Applications/Speakeasy.app` through LaunchServices with `SPEAKEASY_E2E_AUDIO`. It presses the real fn shortcut with synthesized events. It polls the bottom overlay through Accessibility, pastes into the Apple Note named exactly "Test Audio", reads `dictation-e2e.jsonl`, and scores WER against the fixture references. Cases: short, 10 s, ~30 s, ~6.5 min (full only), and cancel. Full takes about 9 minutes; quick takes about 1 minute. `SPEAKEASY_E2E_MAX_WER=0.20` changes the default 0.15 WER ceiling.
+
+Requirements:
+- `/opt/zerobrew/prefix/bin/ffmpeg`.
+- A single note named "Test Audio" whose first line is the title. Each case resets the note to that title line.
+- For the terminal app that runs the script: Accessibility and Automation → Notes.
+- For Speakeasy: Input Monitoring. Without it, Escape does not cancel.
+
+At the end, the driver relaunches the normal app without the environment variable. Do not type or change focus while it runs.
+
+With `SPEAKEASY_E2E_AUDIO` set (colon-separated 16 kHz mono WAVs, one per recording), each real microphone callback is replaced by the same number of fixture samples. Without the variable, capture is unchanged.
 For the execution path and state ownership, see [`ARCHITECTURE.md`](ARCHITECTURE.md). For the standalone model harness, see [`benchmarks/README.md`](benchmarks/README.md).
 
 ---

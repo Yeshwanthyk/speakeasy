@@ -202,6 +202,8 @@ final class AudioCapture: @unchecked Sendable {
     private let levelPreview: LatestMicrophoneLevel
     private let ringBuffer = FloatRingBuffer(capacity: AudioCapture.ringBufferCapacity)
     private let graceSemaphore = DispatchSemaphore(value: 0)
+    /// Present only when launched with `SPEAKEASY_E2E_AUDIO`; inert otherwise.
+    private let e2eAudio: E2EAudioFixtureSource?
 
     private let frontLock = UnfairLock()
     private let backLock = UnfairLock()
@@ -252,7 +254,8 @@ final class AudioCapture: @unchecked Sendable {
         callbackFreshnessNs: UInt64 = AudioCapture.defaultCallbackFreshnessNs,
         firstCallbackTimeout: TimeInterval = AudioCapture.defaultFirstCallbackTimeout,
         inputDeviceProvider: AudioInputDeviceProviding = CoreAudioInputDeviceProvider(),
-        initialInputDeviceUID: String? = nil
+        initialInputDeviceUID: String? = nil,
+        e2eAudio: E2EAudioFixtureSource? = nil
     ) throws {
         self.maxRecordingSamples = maxRecordingSamples
         self.onLimitReached = onLimitReached
@@ -268,6 +271,7 @@ final class AudioCapture: @unchecked Sendable {
         self.levelPreview = LatestMicrophoneLevel()
         self.activeInputDeviceUID = nil
         self.initialInputDeviceUID = initialInputDeviceUID
+        self.e2eAudio = e2eAudio
 
         configurationObserver = notificationCenter.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -485,6 +489,7 @@ final class AudioCapture: @unchecked Sendable {
         logger.info(
             "Recording started with \(preRoll.count) preroll samples; callback_age_ms=\(callbackAgeMs, format: .fixed(precision: 1))"
         )
+        e2eAudio?.arm()
     }
 
     func endRecording() -> AudioCaptureResult {
@@ -516,6 +521,9 @@ final class AudioCapture: @unchecked Sendable {
             swap(&result, &frontBuffer)
             return result
         }
+        // Snapshot taken: fixture playback ends here. A callback already in
+        // flight can only reach the back buffer, which the next begin clears.
+        e2eAudio?.disarm()
 
         let recordingMetadata = stateLock.withLock { () -> (prependedCount: Int, wasInterrupted: Bool) in
             let metadata = (prependedSampleCount, recordingWasInterrupted)
@@ -537,6 +545,7 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func discardRecording() {
+        e2eAudio?.disarm()
         var shouldSignalGrace = false
         stateLock.withLock {
             shouldSignalGrace = awaitingGraceSignal
@@ -558,6 +567,7 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     func shutdown() {
+        e2eAudio?.disarm()
         var shouldSignalGrace = false
         let shouldShutdown = stateLock.withLock { () -> Bool in
             guard !isShutdown else {
@@ -618,7 +628,20 @@ final class AudioCapture: @unchecked Sendable {
         }
 
         let conversionError = context.withConvertedSamples(from: pcmBuffer) { [weak self] samples in
-            self?.consume(samples: samples, context: context)
+            guard let self else { return }
+            guard let e2eAudio = self.e2eAudio else {
+                self.consume(samples: samples, context: context, capturesSamples: true)
+                return
+            }
+            // The real callback still drives lifecycle and cadence; only its
+            // PCM is replaced, on this same tap thread.
+            e2eAudio.substitute(count: samples.count) { fixtureSamples in
+                self.consume(
+                    samples: fixtureSamples ?? samples,
+                    context: context,
+                    capturesSamples: fixtureSamples != nil
+                )
+            }
         }
         if let conversionError {
             logger.error("Audio conversion failed: \(String(describing: conversionError))")
@@ -627,7 +650,8 @@ final class AudioCapture: @unchecked Sendable {
 
     private func consume(
         samples: UnsafeBufferPointer<Float>,
-        context: ConversionContext
+        context: ConversionContext,
+        capturesSamples: Bool
     ) {
         let now = clock()
         var becameReadyAfterRecovery = false
@@ -708,7 +732,9 @@ final class AudioCapture: @unchecked Sendable {
             return
         }
 
-        levelPreview.publish(samples: samples)
+        if capturesSamples {
+            levelPreview.publish(samples: samples)
+        }
 
         var routeEvent: AudioCaptureEvent?
         stateLock.withLock {
@@ -753,7 +779,14 @@ final class AudioCapture: @unchecked Sendable {
         stopTimingLock.withLock {
             stopTiming.recordCallback(timestampNs: now)
         }
-        ringBuffer.write(samples)
+        guard capturesSamples else {
+            return
+        }
+        // Fixture audio never feeds pre-roll, so no clip can leak into a later
+        // recording; with a fixture source the ring buffer stays empty.
+        if e2eAudio == nil {
+            ringBuffer.write(samples)
+        }
 
         var shouldAppend = false
         var shouldSignalGrace = false
