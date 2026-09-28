@@ -60,9 +60,6 @@ struct BackendCounters: Codable, Equatable, Sendable {
         switch backend {
         case "parakeet-tdt-ctc-110m": parakeet110M += 1
         case "parakeet-unified-en": parakeetUnified += 1
-        case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3",
-             "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
-            parakeetUnified += 1
         default: unknown += 1
         }
     }
@@ -70,8 +67,6 @@ struct BackendCounters: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case parakeet110M
         case parakeetUnified
-        case parakeetTDT
-        case nemotron
         case unknown
     }
 
@@ -80,10 +75,7 @@ struct BackendCounters: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         parakeet110M = try container.decodeIfPresent(Int.self, forKey: .parakeet110M) ?? 0
-        let unified = try container.decodeIfPresent(Int.self, forKey: .parakeetUnified) ?? 0
-        let legacyTDT = try container.decodeIfPresent(Int.self, forKey: .parakeetTDT) ?? 0
-        let legacyNemotron = try container.decodeIfPresent(Int.self, forKey: .nemotron) ?? 0
-        parakeetUnified = unified + legacyTDT + legacyNemotron
+        parakeetUnified = try container.decodeIfPresent(Int.self, forKey: .parakeetUnified) ?? 0
         unknown = try container.decodeIfPresent(Int.self, forKey: .unknown) ?? 0
     }
 
@@ -464,7 +456,7 @@ final class DiagnosticsStore {
         guard
             let data = try? Data(contentsOf: url),
             let decoded = try? JSONDecoder().decode(DiagnosticsDocument.self, from: data),
-            (1...DiagnosticsDocument.currentSchemaVersion).contains(decoded.schemaVersion)
+            decoded.schemaVersion == DiagnosticsDocument.currentSchemaVersion
         else {
             return LoadResult(document: DiagnosticsDocument(), shouldPersist: false)
         }

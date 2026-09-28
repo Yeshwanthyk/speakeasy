@@ -3,8 +3,6 @@ import Foundation
 import os
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let legacyBundleIdentifier = "com.wisp.app"
-
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "app")
     private var coordinator: AppCoordinator?
     private var menuBarController: MenuBarController?
@@ -227,9 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pid: currentPID,
             bundleURL: Bundle.main.bundleURL
         )
-        let bundleIdentifiers = [bundleIdentifier, Self.legacyBundleIdentifier]
-        let othersByPID = bundleIdentifiers
-            .flatMap { NSRunningApplication.runningApplications(withBundleIdentifier: $0) }
+        let othersByPID = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .filter { $0.processIdentifier != currentPID }
             .reduce(into: [Int32: AppInstanceSelector.Descriptor]()) { result, application in
                 result[application.processIdentifier] = AppInstanceSelector.Descriptor(

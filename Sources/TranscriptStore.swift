@@ -72,24 +72,17 @@ final class TranscriptStore {
         records
     }
 
-    /// Compatibility projection used by the history menu and recovery actions.
+    /// Text projection used by the history menu and recovery actions.
     func allEntries() -> [String] {
         records.map(\.finalText)
     }
 
-    init(fileURL: URL? = nil, legacyFileURL: URL? = nil) {
+    init(fileURL: URL? = nil) {
         let resolvedURL = fileURL ?? Self.defaultFileURL()
-        let fallbackURL = legacyFileURL ?? (fileURL == nil ? Self.defaultLegacyFileURL() : nil)
         self.fileURL = resolvedURL
 
         if FileManager.default.fileExists(atPath: resolvedURL.path) {
             let loaded = Self.load(from: resolvedURL)
-            self.records = loaded.records
-            if loaded.shouldPersist {
-                scheduleWrite()
-            }
-        } else if let fallbackURL, FileManager.default.fileExists(atPath: fallbackURL.path) {
-            let loaded = Self.load(from: fallbackURL)
             self.records = loaded.records
             if loaded.shouldPersist {
                 scheduleWrite()
@@ -107,7 +100,7 @@ final class TranscriptStore {
         return scheduleWrite()
     }
 
-    /// Keeps the old test/tooling convenience while writing the new envelope.
+    /// Convenience for text-only transcript entries.
     @discardableResult
     func append(_ text: String) -> Task<Bool, Never> {
         append(
@@ -195,24 +188,9 @@ final class TranscriptStore {
             )
         }
 
-        guard let legacyEntries = try? JSONDecoder().decode([String].self, from: data) else {
-            // A malformed canonical file is intentionally not replaced by a
-            // legacy fallback or an empty snapshot.
-            return LoadResult(records: [], shouldPersist: false)
-        }
-
-        let migratedAt = Date()
-        let records = legacyEntries.suffix(capacity).map { text in
-            TranscriptRecord(
-                createdAt: migratedAt,
-                rawText: text,
-                finalText: text,
-                backend: "unknown",
-                outcome: .eventsPosted,
-                timings: nil
-            )
-        }
-        return LoadResult(records: Array(records), shouldPersist: true)
+        // A malformed or unknown file is left untouched rather than replaced
+        // by an empty snapshot.
+        return LoadResult(records: [], shouldPersist: false)
     }
 
     private static func defaultFileURL() -> URL {
@@ -221,14 +199,6 @@ final class TranscriptStore {
         let identifier = Bundle.main.bundleIdentifier ?? "Speakeasy"
         return base
             .appendingPathComponent(identifier, isDirectory: true)
-            .appendingPathComponent("history.json")
-    }
-
-    private static func defaultLegacyFileURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return base
-            .appendingPathComponent("com.wisp.app", isDirectory: true)
             .appendingPathComponent("history.json")
     }
 }

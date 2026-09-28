@@ -61,9 +61,9 @@ final class OverlayModelTests: XCTestCase {
     }
 
     func testPreferencesPersistAndDefault() {
-        let name = "overlay-test-\(UUID().uuidString)"
+        let name = testDefaultsSuiteName("overlay-test")
         guard let defaults = UserDefaults(suiteName: name) else { return XCTFail("defaults suite") }
-        defer { defaults.removePersistentDomain(forName: name) }
+        defer { removeTestDefaults(name) }
         XCTAssertEqual(OverlayPreferences.style(in: defaults), .bottomPill)
         XCTAssertTrue(OverlayPreferences.showsLiveText(in: defaults))
         OverlayPreferences.setStyle(.topIndicator, in: defaults)

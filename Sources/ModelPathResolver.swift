@@ -60,10 +60,6 @@ enum ASRModelKind: CaseIterable, Equatable, Sendable {
             self = .parakeet110M
         case "parakeet", "parakeet-unified", "parakeet-unified-en":
             self = .parakeetUnified
-        case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3":
-            self = .parakeetUnified
-        case "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
-            self = .parakeetUnified
         default:
             throw ModelPathError.unsupportedModel(value)
         }
@@ -135,15 +131,6 @@ enum ASRModelKind: CaseIterable, Equatable, Sendable {
         }
     }
 
-    static func isRemovedLegacyAlias(_ value: String) -> Bool {
-        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "parakeet-tdt", "parakeet-v3", "parakeet-tdt-v3",
-             "nemotron", "nemotron-3", "nemotron-3.5", "nemotron-3.5-asr":
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 struct ASRModelConfiguration: Equatable, Sendable {
@@ -171,35 +158,22 @@ enum ModelPathResolver {
     typealias ArtifactProvider = (ASRModelKind) -> ASRModelArtifact
 
     private static let canonicalBundleIdentifier = "com.speakeasy.app"
-    private static let legacyBundleIdentifier = "com.wisp.app"
     private static let modelKindEnvironmentKey = "SPEAKEASY_ASR_MODEL"
-    private static let legacyModelKindEnvironmentKey = "WISP_ASR_MODEL"
     private static let modelKindPreferenceKey = "ASRModel"
 
     static func configuredASRModelKind() throws -> ASRModelKind {
         try configuredASRModelKind(
             environment: ProcessInfo.processInfo.environment,
-            preferences: stringPreferences(),
-            persistMigratedPreference: { persistSelectedModelKind($0) }
+            preferences: stringPreferences()
         )
     }
 
     static func configuredASRModelKind(
         environment: [String: String],
-        preferences: [String: String] = [:],
-        persistMigratedPreference: ((ASRModelKind) -> Void)? = nil
+        preferences: [String: String] = [:]
     ) throws -> ASRModelKind {
-        let environmentValue = environment[modelKindEnvironmentKey]
-            ?? environment[legacyModelKindEnvironmentKey]
-        let preferenceValue = preferences[modelKindPreferenceKey]
-            ?? preferences[legacyModelKindEnvironmentKey]
-        let kind = try ASRModelKind(environmentValue: environmentValue ?? preferenceValue)
-        if environmentValue == nil,
-           let preferenceValue,
-           ASRModelKind.isRemovedLegacyAlias(preferenceValue) {
-            persistMigratedPreference?(kind)
-        }
-        return kind
+        try ASRModelKind(environmentValue: environment[modelKindEnvironmentKey]
+            ?? preferences[modelKindPreferenceKey])
     }
 
     static func configuredASRModel() throws -> ASRModelConfiguration {
@@ -399,16 +373,6 @@ enum ModelPathResolver {
             return modelURL
         }
 
-        if bundleIdentifier != legacyBundleIdentifier {
-            let legacyURL = makeModelURL(
-                appSupport: appSupport,
-                bundleIdentifier: legacyBundleIdentifier,
-                kind: kind
-            )
-            if isModelInstalled(kind: kind, at: legacyURL, artifactProvider: artifactProvider) {
-                return legacyURL
-            }
-        }
 
         if FileManager.default.fileExists(atPath: modelURL.path) {
             throw ModelPathError.modelInvalid(

@@ -93,60 +93,19 @@ final class DiagnosticsStoreTests: XCTestCase {
         XCTAssertFalse(store.report().contains("DICTATED-PRIVATE-CANARY"))
     }
 
-    func testLegacyBackendBucketsMigrateToUnifiedFallback() async throws {
-        let url = temporaryStatsURL()
-        var legacy = DiagnosticsDocument(schemaVersion: 1)
-        legacy.lifetime.attemptCount = 10
-        let encoded = try JSONEncoder().encode(legacy)
-        var object = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
-        )
-        var lifetime = try XCTUnwrap(object["lifetime"] as? [String: Any])
-        lifetime["backends"] = [
-            "parakeetUnified": 2,
-            "parakeetTDT": 3,
-            "nemotron": 4,
-            "unknown": 1
-        ]
-        object["lifetime"] = lifetime
-        let legacyData = try JSONSerialization.data(withJSONObject: object)
-        try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try legacyData.write(to: url)
-
-        let store = DiagnosticsStore(fileURL: url)
-        let migrated = store.snapshot()
-
-        XCTAssertEqual(migrated.schemaVersion, DiagnosticsDocument.currentSchemaVersion)
-        XCTAssertEqual(migrated.lifetime.backends.parakeet110M, 0)
-        XCTAssertEqual(migrated.lifetime.backends.parakeetUnified, 9)
-        XCTAssertEqual(migrated.lifetime.backends.unknown, 1)
-
-        let writeResult = await store.record(
-            trace: trace(backend: "parakeet-tdt-ctc-110m"),
-            outcome: .eventsPosted,
-            text: nil
-        ).value
-        XCTAssertTrue(writeResult)
-
-        let persisted = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(persisted.contains("\"schemaVersion\":3"))
-        XCTAssertTrue(persisted.contains("\"parakeet110M\":1"))
-        XCTAssertFalse(persisted.contains("parakeetTDT"))
-        XCTAssertFalse(persisted.contains("nemotron"))
+    func testMissingBackendKeysDefaultToZero() throws {
+        let counters = try JSONDecoder().decode(BackendCounters.self, from: Data("{}".utf8))
+        XCTAssertEqual(counters, BackendCounters())
     }
 
-    func testLegacyBackendEventsAccumulateInUnifiedFallbackBucket() {
+    func testBackendCountersOnlyCountCurrentNames() {
         var counters = BackendCounters()
-
-        counters.increment("parakeet-tdt-v3")
-        counters.increment("nemotron-3.5-asr")
-
-        XCTAssertEqual(counters.parakeetUnified, 2)
-        XCTAssertEqual(counters.parakeet110M, 0)
-        XCTAssertEqual(counters.unknown, 0)
+        counters.increment("parakeet-tdt-ctc-110m")
+        counters.increment("parakeet-unified-en")
+        counters.increment("nemotron")
+        XCTAssertEqual(counters.parakeet110M, 1)
+        XCTAssertEqual(counters.parakeetUnified, 1)
+        XCTAssertEqual(counters.unknown, 1)
     }
 
     func testFormatterComputesPercentilesOnlyFromBoundedNumericSamples() {

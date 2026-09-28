@@ -76,23 +76,15 @@ final class ModelPathResolverTests: XCTestCase {
         XCTAssertNil(resolved.language)
     }
 
-    func testRemovedSelectionAliasesMigrateToUnifiedFallback() throws {
-        var migratedKinds: [ASRModelKind] = []
-        XCTAssertEqual(
-            try ModelPathResolver.configuredASRModelKind(
-                environment: [:],
-                preferences: ["ASRModel": "parakeet-tdt"],
-                persistMigratedPreference: { migratedKinds.append($0) }
-            ),
-            .parakeetUnified
-        )
-        XCTAssertEqual(
-            try ModelPathResolver.configuredASRModelKind(
-                environment: ["WISP_ASR_MODEL": "nemotron-3.5-asr"]
-            ),
-            .parakeetUnified
-        )
-        XCTAssertEqual(migratedKinds, [.parakeetUnified])
+    func testRemovedModelAliasIsUnsupported() {
+        XCTAssertThrowsError(try ModelPathResolver.configuredASRModelKind(
+            environment: ["SPEAKEASY_ASR_MODEL": "nemotron"]
+        )) { error in
+            guard case let ModelPathError.unsupportedModel(value) = error else {
+                return XCTFail("Expected unsupportedModel, got \(error)")
+            }
+            XCTAssertEqual(value, "nemotron")
+        }
     }
 
     func testCanonicalPathUsesPinnedArtifactFilename() {
@@ -127,23 +119,6 @@ final class ModelPathResolverTests: XCTestCase {
         XCTAssertEqual(artifact.license, "CC-BY-4.0")
     }
 
-    func testLegacyBundlePathFallbackFindsGGUF() throws {
-        let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let legacyURL = appSupport
-            .appendingPathComponent("com.wisp.app/models")
-            .appendingPathComponent(ASRModelKind.parakeet110M.artifact.filename)
-        try createModelFile(Data("test".utf8), at: legacyURL)
-
-        let resolved = try ModelPathResolver.configuredASRModel(
-            kind: .parakeet110M,
-            appSupport: appSupport,
-            bundleIdentifier: "com.speakeasy.app",
-            environment: [:],
-            artifactProvider: { _ in Self.testArtifact }
-        )
-
-        XCTAssertEqual(resolved.url, legacyURL)
-    }
 
     func testWrongSizedGGUFIsRejected() throws {
         let appSupport = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -199,9 +174,9 @@ final class ModelPathResolverTests: XCTestCase {
     }
 
     func testPersistSelectedModelKindWritesStablePreference() throws {
-        let suiteName = "com.speakeasy.tests.\(UUID().uuidString)"
+        let suiteName = testDefaultsSuiteName("com.speakeasy.tests")
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer { removeTestDefaults(suiteName) }
 
         ModelPathResolver.persistSelectedModelKind(.parakeetUnified, defaults: defaults)
 

@@ -21,9 +21,9 @@ final class OnboardingStoreTests: XCTestCase {
     }
 
     func testCompletionFlagPersists() throws {
-        let suite = "OnboardingStoreTests-\(UUID().uuidString)"
+        let suite = testDefaultsSuiteName("OnboardingStoreTests")
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer { removeTestDefaults(suite) }
 
         XCTAssertFalse(OnboardingStore.isComplete(defaults: defaults))
         OnboardingStore.markComplete(defaults: defaults)

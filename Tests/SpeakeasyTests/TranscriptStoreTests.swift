@@ -29,15 +29,15 @@ final class TranscriptStoreTests: XCTestCase {
         return decoded.records
     }
 
-    func testStageChangesRoundTripAndOldRecordsDecodeWithoutField() throws {
+    func testStageChangesRoundTripAndDecodeWithoutOptionalField() throws {
         let record = TranscriptRecord(rawText: "kudo", finalText: "CUDA", backend: "test",
                                       outcome: .eventsPosted,
                                       stageChanges: [StageChange(stage: "exactCorrections", count: 1)])
         let encoded = try JSONEncoder().encode(record)
         XCTAssertEqual(try JSONDecoder().decode(TranscriptRecord.self, from: encoded), record)
-        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        legacy.removeValue(forKey: "stageChanges")
-        let oldData = try JSONSerialization.data(withJSONObject: legacy)
+        var recordWithoutStageChanges = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        recordWithoutStageChanges.removeValue(forKey: "stageChanges")
+        let oldData = try JSONSerialization.data(withJSONObject: recordWithoutStageChanges)
         let decoded = try JSONDecoder().decode(TranscriptRecord.self, from: oldData)
         XCTAssertNil(decoded.stageChanges)
         XCTAssertEqual(decoded.rawText, "kudo")
@@ -99,27 +99,14 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertTrue(store.allEntries().isEmpty)
     }
 
-    func testMissingCanonicalHistoryLoadsAndMigratesLegacyHistory() throws {
-        let currentURL = temporaryHistoryURL()
-        let legacyURL = temporaryHistoryURL()
-        let legacyEntries = ["one", "two"]
-        let data = try JSONEncoder().encode(legacyEntries)
-        try FileManager.default.createDirectory(
-            at: legacyURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: legacyURL)
-
-        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
-
-        XCTAssertEqual(store.allEntries(), legacyEntries)
-        XCTAssertTrue(waitUntil { decodedHistory(at: currentURL)?.map(\.finalText) == legacyEntries })
-    }
 
     func testLoadedHistoryIsTruncatedToCapacity() throws {
         let url = temporaryHistoryURL()
-        let entries = (0..<60).map { "entry-\($0)" }
-        let data = try JSONEncoder().encode(entries)
+        let entries = (0..<60).map { index in
+            TranscriptRecord(rawText: "entry-\(index)", finalText: "entry-\(index)",
+                             backend: "test", outcome: .eventsPosted)
+        }
+        let data = try JSONEncoder().encode(TranscriptHistoryDocument(records: entries))
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: url)
 
@@ -143,45 +130,15 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertTrue(waitUntil { decodedHistory(at: url)?.isEmpty == true })
     }
 
-    func testLegacyMigrationPreservesRecordFieldsAndWritesEnvelope() throws {
+
+    func testMalformedHistoryIsNotOverwritten() throws {
         let currentURL = temporaryHistoryURL()
-        let legacyURL = temporaryHistoryURL()
-        let legacyEntries = ["oldest", "newest"]
-        try FileManager.default.createDirectory(
-            at: legacyURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try JSONEncoder().encode(legacyEntries).write(to: legacyURL)
-
-        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
-
-        XCTAssertEqual(store.allRecords().map(\.finalText), legacyEntries)
-        XCTAssertEqual(store.allRecords().map(\.rawText), legacyEntries)
-        XCTAssertTrue(store.allRecords().allSatisfy { $0.backend == "unknown" })
-        XCTAssertTrue(store.allRecords().allSatisfy { $0.outcome == .eventsPosted })
-        XCTAssertTrue(waitUntil {
-            guard let data = try? Data(contentsOf: currentURL),
-                  let document = try? JSONDecoder().decode(TranscriptHistoryDocument.self, from: data)
-            else { return false }
-            return document.schemaVersion == 1 && document.records.count == 2
-        })
-    }
-
-    func testMalformedCanonicalDoesNotResurrectLegacyFallback() throws {
-        let currentURL = temporaryHistoryURL()
-        let legacyURL = temporaryHistoryURL()
         try FileManager.default.createDirectory(
             at: currentURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try FileManager.default.createDirectory(
-            at: legacyURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
         try Data("not-json".utf8).write(to: currentURL)
-        try JSONEncoder().encode(["legacy must stay unused"]).write(to: legacyURL)
-
-        let store = TranscriptStore(fileURL: currentURL, legacyFileURL: legacyURL)
+        let store = TranscriptStore(fileURL: currentURL)
 
         XCTAssertTrue(store.allEntries().isEmpty)
         XCTAssertEqual(try Data(contentsOf: currentURL), Data("not-json".utf8))
