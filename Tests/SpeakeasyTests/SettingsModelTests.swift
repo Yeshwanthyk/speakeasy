@@ -192,7 +192,11 @@ final class SettingsModelTests: XCTestCase {
     }
 
     func testMeterPublishesWithoutPublishingSettingsAndStopsWhenPaneHidden() {
-        let model = makeIsolatedModel(level: { MicrophoneLevelSnapshot(normalizedLevel: 0.5, sequence: 1) })
+        var sequence: UInt64 = 0
+        let model = makeIsolatedModel(level: {
+            sequence += 1
+            return MicrophoneLevelSnapshot(normalizedLevel: 0.5, sequence: sequence)
+        })
         var modelUpdates = 0
         var meterUpdates = 0
         let modelToken = model.objectWillChange.sink { _ in modelUpdates += 1 }
