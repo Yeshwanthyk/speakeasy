@@ -34,7 +34,8 @@ struct TranscriptionTrace: Sendable {
     var graceDurationMs: Double?
     /// Gap measured at key-down, before any rewarm can reset the clock.
     var idleGapSinceLastNativeInferenceMs: Double?
-    var rewarmRan = false
+    var rewarmStarted = false
+    var rewarmInFlightAtFinalStart = false
     var nativeTimings: NativeASRTimings?
 
     init(
@@ -132,7 +133,8 @@ struct TranscriptionTrace: Sendable {
         if let graceDurationMs {
             parts.append(String(format: "grace_ms=%.1f", graceDurationMs))
         }
-        parts.append("rewarm_ran=\(rewarmRan)")
+        parts.append("rewarm_started=\(rewarmStarted)")
+        parts.append("rewarm_in_flight_at_final_start=\(rewarmInFlightAtFinalStart)")
         if let idleGapSinceLastNativeInferenceMs {
             parts.append(String(format: "idle_gap_ms=%.1f", idleGapSinceLastNativeInferenceMs))
         }

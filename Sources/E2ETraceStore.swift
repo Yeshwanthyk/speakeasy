@@ -29,7 +29,8 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
     var idleGapSinceLastNativeInferenceMs: Double? = nil
     var nativeTotalMs: Double? = nil
     var nativeWaitMs: Double? = nil
-    var rewarmRan: Bool? = nil
+    var rewarmStarted: Bool? = nil
+    var rewarmInFlightAtFinalStart: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -48,7 +49,8 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
         case idleGapSinceLastNativeInferenceMs = "idle_gap_since_last_native_inference_ms"
         case nativeTotalMs = "native_total_ms"
         case nativeWaitMs = "native_wait_ms"
-        case rewarmRan = "rewarm_ran"
+        case rewarmStarted = "rewarm_started"
+        case rewarmInFlightAtFinalStart = "rewarm_in_flight_at_final_start"
     }
 }
 
@@ -98,7 +100,8 @@ enum E2ETraceRecordFactory {
             idleGapSinceLastNativeInferenceMs: trace.idleGapSinceLastNativeInferenceMs,
             nativeTotalMs: trace.nativeTimings?.totalMs,
             nativeWaitMs: trace.nativeTimings?.waitMs,
-            rewarmRan: trace.rewarmRan
+            rewarmStarted: trace.rewarmStarted,
+            rewarmInFlightAtFinalStart: trace.rewarmInFlightAtFinalStart
         )
     }
 

@@ -19,7 +19,7 @@ final class AppCoordinatorTests: XCTestCase {
 
     private func makeCoordinator(
         audio: AudioCapturing,
-        transcriber: FakeTranscriber,
+        transcriber: Transcriber,
         paster: PasterStub = PasterStub(),
         recordingFeedback: RecordingFeedbackStub? = nil,
         feedback: FeedbackStub = FeedbackStub(),
@@ -90,25 +90,78 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(waitUntil { transcriber.warmUpCount == 3 })
     }
 
-    func testRewarmCannotQueueBehindFinalTranscription() async {
+    func testFinalWaitsForInFlightRewarmAndCanBeCancelledWhileWaiting() async {
         let clock = TestNativeClock()
-        let transcriber = FakeTranscriber(result: .success("Hello"))
-        let enteredStop = DispatchSemaphore(value: 0)
-        let releaseStop = DispatchSemaphore(value: 0)
-        let coordinator = makeCoordinator(
-            audio: AudioCaptureStub(samples: Self.validSamples,
-                                    endRecordingStarted: enteredStop, endRecordingGate: releaseStop),
-            transcriber: transcriber, skipWarmup: false,
-            nativeClock: { clock.now }, rewarmThreshold: 90
-        )
+        let model = RewarmRaceTranscriber()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = E2ETraceStore(fileURL: directory.appendingPathComponent("trace.jsonl"))
+        let ended = DispatchSemaphore(value: 0)
+        let coordinator = makeCoordinator(audio: AudioCaptureStub(samples: Self.validSamples, endRecordingStarted: ended),
+                                          transcriber: model, timeout: 10, skipWarmup: false, e2eTraceStore: store,
+                                          nativeClock: { clock.now })
         await coordinator.warmUpModel()
+        clock.advance(seconds: 60 * 60 * 8) // fake continuous clock advances across sleep
+        coordinator.rewarmIfIdle() // wake starts the rewarm before key-down
+        XCTAssertEqual(model.rewarmEntered.wait(timeout: .now() + 2), .success)
         coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        XCTAssertEqual(ended.wait(timeout: .now() + 1), .success)
+        let entered = await waitAsync { model.finalEntered }
+        XCTAssertTrue(entered)
+        coordinator.cancelTranscription()
+        model.releaseRewarm.signal()
+        let settled = await waitAsync { model.finalSettled }
+        XCTAssertTrue(settled)
+        XCTAssertFalse(model.finalCompleted)
+        let recorded = await waitAsync { store.allRecords().count == 1 }
+        XCTAssertTrue(recorded)
+        XCTAssertEqual(store.allRecords().first?.idleGapSinceLastNativeInferenceMs, 28_800_000)
+        XCTAssertEqual(store.allRecords().first?.rewarmInFlightAtFinalStart, true)
+        XCTAssertEqual(store.allRecords().first?.rewarmStarted, false)
+    }
+
+    func testFinalCompletesAfterInFlightRewarm() async {
+        let clock = TestNativeClock()
+        let model = RewarmRaceTranscriber()
+        let paster = PasterStub()
+        let coordinator = makeCoordinator(audio: AudioCaptureStub(samples: Self.validSamples),
+                                          transcriber: model, paster: paster, timeout: 10, skipWarmup: false,
+                                          nativeClock: { clock.now })
+        await coordinator.warmUpModel()
         clock.advance(seconds: 100)
-        coordinator.toggleRecording()
-        XCTAssertEqual(enteredStop.wait(timeout: .now() + 1), .success)
         coordinator.rewarmIfIdle()
-        XCTAssertEqual(transcriber.warmUpCount, 1)
-        releaseStop.signal()
+        XCTAssertEqual(model.rewarmEntered.wait(timeout: .now() + 2), .success)
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let entered = await waitAsync { model.finalEntered }
+        XCTAssertTrue(entered)
+        model.releaseRewarm.signal()
+        let pasted = await waitAsync { paster.pastedTexts == ["Hello"] }
+        XCTAssertTrue(pasted)
+    }
+
+    func testFailedNativeRunDoesNotResetIdleGap() async {
+        let clock = TestNativeClock()
+        let model = FakeTranscriber(results: [.failure(TestError()), .success("Hello")])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = E2ETraceStore(fileURL: directory.appendingPathComponent("trace.jsonl"))
+        let coordinator = makeCoordinator(audio: AudioCaptureStub(samples: Self.validSamples),
+                                          transcriber: model, skipWarmup: false, e2eTraceStore: store,
+                                          nativeClock: { clock.now }, rewarmThreshold: 1_000)
+        await coordinator.warmUpModel()
+        clock.advance(seconds: 2)
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let firstRecorded = await waitAsync { store.allRecords().count == 1 }
+        XCTAssertTrue(firstRecorded)
+        clock.advance(seconds: 3)
+        coordinator.toggleRecording()
+        coordinator.toggleRecording()
+        let secondRecorded = await waitAsync { store.allRecords().count == 2 }
+        XCTAssertTrue(secondRecorded)
+        XCTAssertEqual(store.allRecords().last?.idleGapSinceLastNativeInferenceMs, 5_000)
     }
 
     func testKeyDownRewarmAndTraceIdleGap() async {
@@ -130,7 +183,7 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(waitUntil { store.allRecords().count == 1 })
         guard let record = store.allRecords().first else { return XCTFail("missing trace") }
         XCTAssertEqual(record.idleGapSinceLastNativeInferenceMs ?? -1, 100_000, accuracy: 1)
-        XCTAssertEqual(record.rewarmRan, true)
+        XCTAssertEqual(record.rewarmStarted, true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("logs/dictation-e2e.jsonl").path))
     }
 
@@ -245,6 +298,14 @@ final class AppCoordinatorTests: XCTestCase {
         XCTAssertTrue(waitUntil { coordinator.canSelectInputDevice() })
         coordinator.toggleRecording()
         XCTAssertEqual(audio.beginCount, 1)
+    }
+
+    private func waitAsync(timeout: TimeInterval = 3, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
     }
 
     private func waitUntil(timeout: TimeInterval = 1.0, _ condition: () -> Bool) -> Bool {
@@ -2152,6 +2213,47 @@ private final class AudioCaptureStub: AudioCapturing {
     func livePreviewSamples() -> ContiguousArray<Float> { [] }
 }
 
+/// Simulates the native session mutex: a final run enters while rewarm owns it.
+private final class RewarmRaceTranscriber: Transcriber, @unchecked Sendable {
+    let rewarmEntered = DispatchSemaphore(value: 0)
+    let releaseRewarm = DispatchSemaphore(value: 0)
+    private let session = UnfairLock()
+    private let state = UnfairLock()
+    private var warmups = 0
+    private var cancelled: Set<UInt64> = []
+    private var _finalEntered = false
+    private var _finalSettled = false
+    private var _finalCompleted = false
+
+    var finalEntered: Bool { state.withLock { _finalEntered } }
+    var finalSettled: Bool { state.withLock { _finalSettled } }
+    var finalCompleted: Bool { state.withLock { _finalCompleted } }
+
+    func warmUp(runID: UInt64) throws {
+        session.withLock {
+            warmups += 1
+            if warmups > 1 {
+                rewarmEntered.signal()
+                releaseRewarm.wait()
+            }
+        }
+    }
+
+    func transcribe(samples: ContiguousArray<Float>) throws -> String { "Hello" }
+
+    func transcribe(samples: ContiguousArray<Float>, runID: UInt64) throws -> String {
+        state.withLock { _finalEntered = true }
+        return try session.withLock {
+            defer { state.withLock { _finalSettled = true } }
+            if state.withLock({ cancelled.remove(runID) != nil }) { throw TestError() }
+            state.withLock { _finalCompleted = true }
+            return "Hello"
+        }
+    }
+
+    func cancel(runID: UInt64) { state.withLock { _ = cancelled.insert(runID) } }
+}
+
 private final class TestNativeClock: @unchecked Sendable {
     private let lock = UnfairLock()
     private var value: UInt64 = 1_000_000_000
@@ -2221,7 +2323,7 @@ private final class FakeTranscriber: Transcriber, @unchecked Sendable {
         counterLock.withLock { _cancelledRunIDs.append(runID) }
     }
 
-    func warmUp() async throws {
+    func warmUp(runID: UInt64) throws {
         counterLock.withLock { _warmUpCount += 1 }
         if let error = warmUpError { throw error }
     }

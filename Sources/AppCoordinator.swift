@@ -148,12 +148,25 @@ final class AppCoordinator: @unchecked Sendable {
     private let inputDeviceSelectionStore: InputDeviceSelectionStore
     private let shortcutSelectionStore: DictationShortcutSelectionStore
     private let transcriptionTimeoutProvider: (ContiguousArray<Float>) -> TimeInterval
+    private static let timebase: mach_timebase_info_data_t = {
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        return timebase
+    }()
+
+    private static func continuousNanoseconds() -> UInt64 {
+        let ticks = mach_continuous_time()
+        let denominator = UInt64(timebase.denom)
+        return ticks / denominator * UInt64(timebase.numer)
+            + ticks % denominator * UInt64(timebase.numer) / denominator
+    }
+
     private let nativeClock: @Sendable () -> UInt64
     private let rewarmThresholdNs: UInt64
     private var lastNativeInferenceAt: UInt64?
-    private var rewarmInProgress = false
-    private var rewarmStartedTraceIDs: Set<UUID> = []
-    private let rewarmQueue = DispatchQueue(label: "com.speakeasy.app.rewarm", qos: .userInitiated)
+    private var rewarmRunID: UInt64?
+    private var rewarmIsRunning = false
+    private let rewarmQueue = DispatchQueue(label: "com.speakeasy.app.rewarm", qos: .userInteractive)
     private let failedCaptureReplayBuffer: FailedCaptureReplayBuffer
     private let stateLock = UnfairLock()
     private let intentLock = UnfairLock()
@@ -230,7 +243,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
         deliveryTargetProvider: DeliveryTargetProviding = SystemDeliveryTargetProvider(),
         failedCaptureReplayBuffer: FailedCaptureReplayBuffer = FailedCaptureReplayBuffer(),
-        nativeClock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+        nativeClock: @escaping @Sendable () -> UInt64 = { AppCoordinator.continuousNanoseconds() },
         rewarmThreshold: TimeInterval = 90
     ) {
         self.audioCapture = audioCapture
@@ -326,39 +339,43 @@ final class AppCoordinator: @unchecked Sendable {
 
     /// Wake and key-down share the same non-periodic idle check.
     func rewarmIfIdle() {
-        let request = stateLock.withLock { () -> (Transcriber, UUID?)? in
+        let request = stateLock.withLock { () -> (Transcriber, UInt64)? in
+            let now = nativeClock()
             guard !isShuttingDown, warmupState.isReady, activeModelSwitchID == nil,
-                  !rewarmInProgress, let last = lastNativeInferenceAt,
-                  nativeClock() >= last, nativeClock() - last > rewarmThresholdNs else { return nil }
+                  rewarmRunID == nil, let last = lastNativeInferenceAt,
+                  now >= last, now - last > rewarmThresholdNs else { return nil }
             if case .transcribing = state { return nil }
-            rewarmInProgress = true
-            return (transcriber, activeTrace?.id)
+            let runID = nextRunID()
+            rewarmRunID = runID
+            return (transcriber, runID)
         }
-        guard let (model, traceID) = request else { return }
+        guard let (model, runID) = request else { return }
         rewarmQueue.async { [weak self] in
-            Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                let shouldRun = self.stateLock.withLock { () -> Bool in
-                    guard !self.isShuttingDown, self.activeModelSwitchID == nil else { return false }
-                    if case .transcribing = self.state { return false }
-                    return true
-                }
-                guard shouldRun else {
-                    self.stateLock.withLock { self.rewarmInProgress = false }
-                    return
-                }
-                if let traceID {
-                    _ = self.stateLock.withLock { self.rewarmStartedTraceIDs.insert(traceID) }
-                }
-                let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy idle model rewarm")
-                defer { ProcessInfo.processInfo.endActivity(activity) }
-                do {
-                    try await model.warmUp()
-                    self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
-                } catch {
-                    self.logger.error("Idle model rewarm failed: \(String(describing: error))")
-                }
-                self.stateLock.withLock { self.rewarmInProgress = false }
+            guard let self else { return }
+            let shouldRun = self.stateLock.withLock { () -> Bool in
+                guard !self.isShuttingDown, self.activeModelSwitchID == nil else { return false }
+                if case .transcribing = self.state { return false }
+                return true
+            }
+            guard shouldRun else {
+                self.stateLock.withLock { self.rewarmRunID = nil }
+                return
+            }
+            self.stateLock.withLock {
+                self.rewarmIsRunning = true
+                self.activeTrace?.rewarmStarted = true
+            }
+            let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy idle model rewarm")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            do {
+                try model.warmUp(runID: runID)
+                self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+            } catch {
+                self.logger.error("Idle model rewarm failed: \(String(describing: error))")
+            }
+            self.stateLock.withLock {
+                self.rewarmIsRunning = false
+                self.rewarmRunID = nil
             }
         }
     }
@@ -795,6 +812,7 @@ final class AppCoordinator: @unchecked Sendable {
                 state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
                 var trace = activeTrace ?? TranscriptionTrace(hotkeyPressedAt: now)
                 trace.markHotkeyReleased(at: now)
+                trace.rewarmInFlightAtFinalStart = rewarmIsRunning
                 let target = activeDeliveryTarget ?? .unavailable
                 activeTrace = nil
                 activeDeliveryTarget = nil
@@ -872,6 +890,7 @@ final class AppCoordinator: @unchecked Sendable {
                         return false
                     }
                     state = .recording
+                    trace.rewarmStarted = activeTrace?.rewarmStarted ?? trace.rewarmStarted
                     activeTrace = trace
                     activeDeliveryTarget = target
                     return true
@@ -896,6 +915,12 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
         case .stop(let token, let runID, let trace, let target):
+            // transcribe.cpp's cancel token is checked by its abort callback.
+            // If the native backend cannot abort immediately, the final run
+            // still waits for the session; queued final cancels are retained.
+            if let rewarm = stateLock.withLock({ rewarmIsRunning ? rewarmRunID : nil }) {
+                stateLock.withLock { transcriber }.cancel(runID: rewarm)
+            }
             stopLivePreviewLoop()
             transitionRecordingFeedback(to: .processing)
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
@@ -1221,7 +1246,9 @@ final class AppCoordinator: @unchecked Sendable {
             } catch {
                 result = .failure(error)
             }
-            self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+            if case .success = result {
+                self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+            }
             trace.markTranscriptionEnded()
             // Immutable snapshot for the async hop below.
             let settledTrace = trace
@@ -1638,7 +1665,9 @@ final class AppCoordinator: @unchecked Sendable {
             let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy live preview inference")
             let text = try? transcriber.transcribe(samples: samples, runID: previewRunID)
             ProcessInfo.processInfo.endActivity(activity)
-            self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+            if text != nil {
+                self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 let adopted = self.livePreviewController?.finishPass(candidate: text)
@@ -1666,8 +1695,6 @@ final class AppCoordinator: @unchecked Sendable {
         outcome: TranscriptionTrace.Outcome,
         text: String? = nil
     ) {
-        var trace = trace
-        trace.rewarmRan = stateLock.withLock { rewarmStartedTraceIDs.remove(trace.id) != nil }
         trace.log(logger: logger, outcome: outcome)
         MainActor.assumeIsolated {
             _ = diagnosticsStore?.record(trace: trace, outcome: outcome, text: text)

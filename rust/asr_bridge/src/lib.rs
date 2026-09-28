@@ -3,6 +3,7 @@
 //! Swift owns the PCM buffer and pins it for each synchronous call. Rust owns
 //! the transcribe.cpp model/session and every string returned across the ABI.
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -70,7 +71,7 @@ pub struct AsrHandle {
 #[derive(Default)]
 struct CancellationState {
     active: Option<ActiveRun>,
-    pending: Option<u64>,
+    pending: VecDeque<u64>,
 }
 
 struct ActiveRun {
@@ -81,7 +82,8 @@ struct ActiveRun {
 impl CancellationState {
     fn begin(&mut self, id: u64) -> CancelToken {
         let token = CancelToken::new();
-        if self.pending.take() == Some(id) {
+        if let Some(position) = self.pending.iter().position(|pending| *pending == id) {
+            self.pending.remove(position);
             token.cancel();
         }
         self.active = Some(ActiveRun {
@@ -92,18 +94,20 @@ impl CancellationState {
     }
 
     fn cancel(&mut self, id: u64) -> bool {
-        if let Some(active) = self.active.as_ref() {
-            if active.id != id {
-                return false;
-            }
+        if let Some(active) = self.active.as_ref().filter(|active| active.id == id) {
             active.token.cancel();
             return true;
         }
 
-        // A timeout may arrive while this run is queued, before the native
-        // entry point publishes its token. Preserve that cancellation until
-        // begin(id) consumes it.
-        self.pending = Some(id);
+        // A queued run has no token yet, even when another run is active.
+        // IDs are unique per handle; discard oldest never-started requests
+        // rather than letting late cancels grow this queue indefinitely.
+        if !self.pending.contains(&id) {
+            if self.pending.len() == 64 {
+                self.pending.pop_front();
+            }
+            self.pending.push_back(id);
+        }
         true
     }
 
@@ -237,9 +241,8 @@ pub unsafe extern "C" fn asr_destroy(handle: *mut AsrHandle) {
 /// Request cooperative cancellation for one native run.
 ///
 /// This only locks the handle's cancellation control plane and flips the
-/// active run's atomic flag. It does not lock or mutate transcribe.cpp's
-/// `Session`. A request for any other run ID is ignored, preventing a late
-/// cancel from affecting a later run on the same handle.
+/// active run's atomic flag or remembers a queued run ID. It does not lock
+/// or mutate transcribe.cpp's `Session`.
 ///
 /// # Safety
 ///
@@ -295,6 +298,7 @@ pub unsafe extern "C" fn asr_transcribe(
         let samples = unsafe { std::slice::from_raw_parts(samples, len) };
         // SAFETY: guaranteed by the caller contract and checked for null above.
         let handle = unsafe { &*handle };
+        let entered_at = std::time::Instant::now();
         let mut session = match handle.session.lock() {
             Ok(session) => session,
             Err(_) => {
@@ -303,8 +307,6 @@ pub unsafe extern "C" fn asr_transcribe(
                 );
             }
         };
-
-        let entered_at = std::time::Instant::now();
 
         // Publish the token before installing it on the session. If a cancel
         // arrives in that window it flips the token first, and the session
@@ -317,6 +319,12 @@ pub unsafe extern "C" fn asr_transcribe(
                 );
             }
         };
+        if token.is_cancelled() {
+            if let Ok(mut cancellation) = handle.cancellation.lock() {
+                cancellation.finish(run_id);
+            }
+            return result_cancelled();
+        }
         session.set_cancel_token(&token);
         let wait_elapsed = entered_at.elapsed();
 
@@ -489,10 +497,11 @@ mod tests {
         state.finish(7);
 
         let second = state.begin(8);
-        assert!(!state.cancel(7));
+        assert!(state.cancel(7));
         assert!(!second.is_cancelled());
         assert!(state.cancel(8));
         assert!(second.is_cancelled());
+        state.finish(8);
     }
 
     #[test]
@@ -503,7 +512,32 @@ mod tests {
         let token = state.begin(42);
 
         assert!(token.is_cancelled());
-        assert_eq!(state.pending, None);
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn queued_final_cancel_survives_active_rewarm() {
+        let mut state = CancellationState::default();
+        let rewarm = state.begin(100);
+        assert!(state.cancel(101));
+        assert!(!rewarm.is_cancelled());
+        assert!(state.cancel(100));
+        assert!(rewarm.is_cancelled());
+        state.finish(100);
+        assert!(state.begin(101).is_cancelled());
+        assert!(state.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_cancellations_are_bounded_without_discarding_recent_run() {
+        let mut state = CancellationState::default();
+        for id in 1..=65 {
+            assert!(state.cancel(id));
+        }
+        assert_eq!(state.pending.len(), 64);
+        assert!(!state.begin(1).is_cancelled());
+        assert!(state.begin(65).is_cancelled());
+        assert_eq!(state.pending.len(), 63);
     }
 
     #[test]

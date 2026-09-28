@@ -39,7 +39,8 @@ final class E2ETraceStoreTests: XCTestCase {
         var trace = completeTrace()
         trace.idleGapSinceLastNativeInferenceMs = 120_000
         trace.nativeTimings = NativeASRTimings(totalMs: 185, waitMs: 2, audioMs: 1_000)
-        trace.rewarmRan = true
+        trace.rewarmStarted = true
+        trace.rewarmInFlightAtFinalStart = true
         let record = try XCTUnwrap(E2ETraceRecordFactory.record(from: trace, outcome: .eventsPosted, deliveredText: "x"))
         let store = E2ETraceStore(fileURL: fileURL)
         store.append(record)
@@ -48,7 +49,8 @@ final class E2ETraceStoreTests: XCTestCase {
         XCTAssertEqual(decoded.idleGapSinceLastNativeInferenceMs, 120_000)
         XCTAssertEqual(decoded.nativeTotalMs, 185)
         XCTAssertEqual(decoded.nativeWaitMs, 2)
-        XCTAssertEqual(decoded.rewarmRan, true)
+        XCTAssertEqual(decoded.rewarmStarted, true)
+        XCTAssertEqual(decoded.rewarmInFlightAtFinalStart, true)
     }
 
     func testIncompleteSuccessfulTraceIsDropped() {
@@ -117,7 +119,7 @@ final class E2ETraceStoreTests: XCTestCase {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(record)) as? [String: Any])
-        for key in ["idle_gap_since_last_native_inference_ms", "native_total_ms", "native_wait_ms", "rewarm_ran"] {
+        for key in ["idle_gap_since_last_native_inference_ms", "native_total_ms", "native_wait_ms", "rewarm_started", "rewarm_in_flight_at_final_start"] {
             object.removeValue(forKey: key)
         }
         let data = try JSONSerialization.data(withJSONObject: object)

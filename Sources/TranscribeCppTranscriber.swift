@@ -26,8 +26,11 @@ enum TranscribeCppError: Error {
 final class TranscribeCppTranscriber {
     private let handle: OpaquePointer
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "transcribe-cpp")
+    private let warmupSampleCount: Int
 
-    init(model: ASRModelConfiguration) throws {
+    init(model: ASRModelConfiguration, warmupSampleCount: Int = 16_000) throws {
+        precondition(warmupSampleCount > 0)
+        self.warmupSampleCount = warmupSampleCount
         let createResult: AsrCreateResult = try model.url.withUnsafeFileSystemRepresentation { pointer in
             guard let pointer else {
                 throw TranscribeCppError.modelLoadFailed(
@@ -90,9 +93,9 @@ final class TranscribeCppTranscriber {
         _ = asr_cancel(handle, runID)
     }
 
-    func warmUp() async throws {
-        let silentSamples = ContiguousArray<Float>(repeating: 0, count: 8_000)
-        _ = try transcribe(samples: silentSamples)
+    func warmUp(runID: UInt64) throws {
+        let silentSamples = ContiguousArray<Float>(repeating: 0, count: warmupSampleCount)
+        _ = try transcribe(samples: silentSamples, runID: runID)
         logger.info("transcribe.cpp warmup inference completed")
     }
 }
