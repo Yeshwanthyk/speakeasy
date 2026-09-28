@@ -3,6 +3,31 @@ import CoreAudio
 import SwiftUI
 
 @MainActor
+final class SettingsMicrophoneMeter: ObservableObject {
+    @Published private(set) var level: Float = 0
+    private let snapshot: () -> MicrophoneLevelSnapshot
+    private var timer: Timer?
+
+    init(snapshot: @escaping () -> MicrophoneLevelSnapshot) { self.snapshot = snapshot }
+
+    func start() {
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let next = self.snapshot().normalizedLevel
+                if self.level != next { self.level = next }
+            }
+        }
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+}
+
+@MainActor
 final class SettingsModel: ObservableObject {
     @Published private(set) var mode: DictationInvocationMode = .toggle
     @Published private(set) var shortcut: DictationShortcut = .defaultShortcut
@@ -14,7 +39,8 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var requestedModel: ASRModelKind?
     @Published private(set) var modelError: String?
     private var failedModel: ASRModelKind?
-    @Published private(set) var microphoneLevel: Float = 0
+    let microphoneMeter: SettingsMicrophoneMeter
+    @Published private(set) var hasPasteTarget = false
     @Published private(set) var historyFeedback: String?
     @Published private(set) var records: [TranscriptRecord] = []
     @Published private(set) var summary: ProductivitySummary = DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
@@ -33,11 +59,11 @@ final class SettingsModel: ObservableObject {
     private let deviceEnabled: () -> Bool
     private let currentModel: () -> ASRModelKind
     private let selectModel: (ASRModelKind) -> Void
-    private let levelSnapshot: () -> MicrophoneLevelSnapshot
+    private var microphonePaneVisible = false
     private let frontmostApp: () -> NSRunningApplication?
     private let activateTarget: (NSRunningApplication) -> Bool
     private var pasteTarget: NSRunningApplication?
-    private var levelTimer: Timer?
+    private var activationObserver: NSObjectProtocol?
     private(set) var isVisible = false
     let openCorrections: () -> Void
     let pasteTranscript: (String) -> Void
@@ -79,10 +105,9 @@ final class SettingsModel: ObservableObject {
         self.selectModel = selectModel
         self.openCorrections = openCorrections
         self.pasteTranscript = pasteTranscript
-        self.levelSnapshot = levelSnapshot
+        self.microphoneMeter = SettingsMicrophoneMeter(snapshot: levelSnapshot)
         self.frontmostApp = frontmostApp
         self.activateTarget = activateTarget
-        devices = availableDevices()
         refresh()
     }
 
@@ -118,29 +143,42 @@ final class SettingsModel: ObservableObject {
     func becameVisible() {
         isVisible = true
         refresh()
-        if levelTimer == nil {
-            levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let level = self.levelSnapshot().normalizedLevel
-                    if self.microphoneLevel != level { self.microphoneLevel = level }
-                }
+        if microphonePaneVisible { microphoneMeter.start() }
+        if activationObserver == nil {
+            activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+                Task { @MainActor [weak self] in self?.updatePasteTarget(app) }
             }
         }
     }
 
     func becameHidden() {
         isVisible = false
-        levelTimer?.invalidate()
-        levelTimer = nil
+        microphoneMeter.stop()
+        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
+        activationObserver = nil
+        pasteTarget = nil
+        hasPasteTarget = false
     }
 
     func rememberPasteTarget() {
         guard let app = frontmostApp(), app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
         pasteTarget = app
+        hasPasteTarget = !app.isTerminated
     }
 
-    var hasPasteTarget: Bool { pasteTarget?.isTerminated == false }
+    func updatePasteTarget(_ app: NSRunningApplication) {
+        guard isVisible, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        pasteTarget = app
+        hasPasteTarget = !app.isTerminated
+    }
+
+    func setMicrophonePaneVisible(_ visible: Bool) {
+        microphonePaneVisible = visible
+        if visible && isVisible { microphoneMeter.start() } else { microphoneMeter.stop() }
+    }
 
     func pasteHistory(_ text: String) {
         guard let target = pasteTarget, !target.isTerminated, activateTarget(target) else {
@@ -166,11 +204,7 @@ final class SettingsModel: ObservableObject {
     }
 
     func handleFeedback(_ event: UserFeedbackEvent) {
-        if requestedModel != nil, case .error(let message) = event,
-           message == "Failed to switch audio model" || message == "Model switching unavailable"
-            || message == "Model warming up, please wait" || message == "Model switching already in progress"
-            || message == "Wait for microphone change to finish" || message == "Wait for microphone reconnection"
-            || message == "Stop recording before switching models" || message == "Wait for transcription to finish" {
+        if requestedModel != nil, case .modelSwitchFailed(let message) = event {
             failedModel = requestedModel
             modelError = message
             requestedModel = nil
@@ -276,6 +310,7 @@ private struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 720, minHeight: 480)
+        .onChange(of: selection) { page in model.setMicrophonePaneVisible(page == .microphone) }
         .alert("Clear transcript history?", isPresented: $confirmClear) {
             Button("Clear History", role: .destructive) {
                 Task { historyError = !(await model.clearHistory()) }
@@ -336,11 +371,7 @@ private struct SettingsView: View {
                         }
                     }
                     .disabled(!model.canChangeDevice)
-                    Text("Live input level")
-                    ProgressView(value: Double(model.microphoneLevel), total: 1)
-                        .accessibilityLabel("Microphone input level")
-                    Text("\(Int(model.microphoneLevel * 100))%")
-                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    SettingsMicrophoneLevelView(meter: model.microphoneMeter)
                     Text("Switch microphones when dictation is idle. Changes take effect after the input is ready.")
                         .foregroundStyle(.secondary)
                 }
@@ -440,6 +471,18 @@ private struct SettingsView: View {
     }
 }
 
+private struct SettingsMicrophoneLevelView: View {
+    @ObservedObject var meter: SettingsMicrophoneMeter
+
+    var body: some View {
+        Text("Live input level")
+        ProgressView(value: Double(meter.level), total: 1)
+            .accessibilityLabel("Microphone input level")
+        Text("\(Int(meter.level * 100))%")
+            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+    }
+}
+
 private struct SettingsRow: View {
     let title: String
     let value: String
@@ -490,6 +533,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
     private let deviceQueue = DispatchQueue(label: "speakeasy.settings.devices", qos: .utility)
     private var listening = false
+    private var deviceListener: AudioObjectPropertyListenerBlock?
 
     init(model: SettingsModel) {
         self.model = model
@@ -538,15 +582,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, deviceQueue
-        ) { [weak self] _, _ in
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.model.isVisible else { return }
                 self.refreshDevicesInBackground()
             }
         }
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, deviceQueue, listener
+        )
         listening = status == noErr
+        if listening { deviceListener = listener }
     }
 
     private func refreshDevicesInBackground() {
@@ -568,12 +614,41 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         model.becameHidden()
+        removeDeviceListener()
+    }
+
+    deinit {
+        if let deviceListener {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, deviceQueue, deviceListener)
+        }
+    }
+
+    private func removeDeviceListener() {
+        guard let deviceListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, deviceQueue, deviceListener)
+        self.deviceListener = nil
+        listening = false
     }
 
     private func installMainMenu() {
         let main = NSApp.mainMenu ?? NSMenu()
         guard main.items.first(where: { $0.title == "Edit" }) == nil else { return }
         let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")

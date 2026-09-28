@@ -224,7 +224,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         switch event {
         case .status:
             duration = 3
-        case .error:
+        case .error, .modelSwitchFailed:
             duration = 6
         }
 
@@ -527,12 +527,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         levelTimer?.invalidate()
-        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        levelTimer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let meter = self.levelItem?.view?.subviews.last as? NSProgressIndicator else { return }
                 meter.doubleValue = Double(self.microphoneLevelSnapshot().normalizedLevel)
             }
         }
+        if let levelTimer { RunLoop.main.add(levelTimer, forMode: .common) }
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -575,6 +576,7 @@ private extension UserFeedbackEvent {
         if case .error = self {
             return true
         }
+        if case .modelSwitchFailed = self { return true }
         return false
     }
 }

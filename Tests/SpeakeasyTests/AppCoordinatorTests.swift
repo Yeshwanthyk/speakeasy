@@ -967,7 +967,7 @@ final class AppCoordinatorTests: XCTestCase {
 
         coordinator.switchASRModel(to: .parakeet110M)
 
-        XCTAssertTrue(waitUntil { feedback.errors == ["Failed to switch audio model"] })
+        XCTAssertTrue(waitUntil { feedback.modelFailures == ["Failed to switch audio model"] })
         XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertEqual(factoryCallCount, 0)
         XCTAssertEqual(candidateTranscriber.warmUpCount, 0)
@@ -1011,7 +1011,7 @@ final class AppCoordinatorTests: XCTestCase {
 
         XCTAssertTrue(waitUntil {
             candidateTranscriber.warmUpCount == 1
-                && feedback.errors == ["Failed to switch audio model"]
+                && feedback.modelFailures == ["Failed to switch audio model"]
         })
         XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertTrue(persistedKinds.isEmpty)
@@ -1058,7 +1058,7 @@ final class AppCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.selectedASRModelKind(), .parakeetUnified)
         XCTAssertEqual(factoryCallCount, 0)
-        XCTAssertEqual(feedback.errors, ["Stop recording before switching models"])
+        XCTAssertEqual(feedback.modelFailures, ["Stop recording before switching models"])
     }
 
     func testHallucinationIsFiltered() {
@@ -2249,6 +2249,12 @@ private final class KeyMonitorStub: DictationKeyMonitoring {
 
 private final class FeedbackStub: UserFeedback {
     private(set) var events: [UserFeedbackEvent] = []
+    var modelFailures: [String] {
+        events.compactMap { event in
+            if case let .modelSwitchFailed(message) = event { return message }
+            return nil
+        }
+    }
     var errors: [String] {
         events.compactMap { event in
             if case let .error(message) = event {

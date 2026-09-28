@@ -481,6 +481,52 @@ final class AudioCaptureTests: XCTestCase {
         XCTAssertFalse(result.wasInterrupted)
     }
 
+    func testSelectingSystemDefaultFromExplicitDeviceRepointsAndFollowsRecovery() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(devices: [
+            MicrophoneDevice(uid: "usb", name: "USB"),
+            MicrophoneDevice(uid: "built-in", name: "Built-in")
+        ], defaultUID: "built-in")
+        let notificationCenter = NotificationCenter()
+        let selected = expectation(description: "default selected")
+        let recovered = expectation(description: "recovered")
+        let capture = try AudioCapture(engine: engine, notificationCenter: notificationCenter,
+            inputDeviceProvider: provider, initialInputDeviceUID: "usb")
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "") { selected.fulfill() }
+            if event == .recoverySucceeded { recovered.fulfill() }
+        }
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+        capture.selectInputDevice(uid: "")
+        wait(for: [selected], timeout: 1)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+        provider.defaultUID = "usb"
+        notificationCenter.post(name: .AVAudioEngineConfigurationChange, object: engine)
+        wait(for: [recovered], timeout: 1)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+        XCTAssertEqual(provider.setUIDs, ["usb", "built-in", "usb"])
+    }
+
+    func testUnavailableSavedMicrophoneCanSelectSystemDefault() throws {
+        let engine = try makeEngine()
+        let provider = FakeInputDeviceProvider(devices: [MicrophoneDevice(uid: "built-in", name: "Built-in")],
+            defaultUID: "built-in", failures: ["missing"])
+        let selected = expectation(description: "default selected")
+        let capture = try AudioCapture(engine: engine, inputDeviceProvider: provider,
+            initialInputDeviceUID: "missing")
+        capture.setEventHandler { event in
+            if event == .inputDeviceSelectionSucceeded(uid: "") { selected.fulfill() }
+        }
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        engine.onStart = { try? engine.input.emit(frameLength: 1_024) }
+        capture.selectInputDevice(uid: "")
+        wait(for: [selected], timeout: 1)
+        XCTAssertNil(capture.selectedInputDeviceUID())
+    }
+
     func testInputDeviceSelectionCommitsOnlyAfterFreshCallback() throws {
         let engine = try makeEngine()
         let provider = FakeInputDeviceProvider(devices: [
@@ -789,7 +835,7 @@ private final class FakeAudioInputNode: AudioInputNodeProtocol {
 private final class FakeInputDeviceProvider: AudioInputDeviceProviding {
     let devices: [MicrophoneDevice]
     let failures: Set<String>
-    let defaultUID: String?
+    var defaultUID: String?
     var onSet: ((String) -> Void)?
     private(set) var setUIDs: [String] = []
 
@@ -806,6 +852,9 @@ private final class FakeInputDeviceProvider: AudioInputDeviceProviding {
     func enumerateInputDevices() -> [MicrophoneDevice] { devices }
 
     func defaultInputDeviceUID() -> String? { defaultUID }
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
+        if let defaultUID { try setInputDevice(uid: defaultUID, on: audioUnit) }
+    }
 
     func setInputDevice(uid: String, on audioUnit: AudioUnit?) throws {
         setUIDs.append(uid)

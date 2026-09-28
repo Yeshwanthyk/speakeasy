@@ -532,7 +532,7 @@ final class AppCoordinator: @unchecked Sendable {
     func switchASRModel(to kind: ASRModelKind) {
         guard let asrModelResolver, let transcriberFactory else {
             logger.error("Model switching requested without a transcriber factory")
-            feedback.notify(event: .error("Model switching unavailable"))
+            feedback.notify(event: .modelSwitchFailed("Model switching unavailable"))
             return
         }
 
@@ -575,7 +575,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         case .reject(let message):
             logger.info("Ignoring ASR model switch to \(kind.displayName): \(message)")
-            feedback.notify(event: .error(message))
+            feedback.notify(event: .modelSwitchFailed(message))
 
         case .start(let switchID, let previousWarmupState):
             Task.detached(priority: .userInitiated) { [asrModelResolver, transcriberFactory, modelArtifactVerifier] in
@@ -1669,9 +1669,6 @@ final class AppCoordinator: @unchecked Sendable {
                 return false
             }
 
-            guard case .idle = state else {
-                return false
-            }
             activeModelSwitchID = nil
             warmupState = previousWarmupState
             return true
@@ -1682,7 +1679,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
 
         logger.error("Failed to switch ASR model to \(kind.displayName, privacy: .public): \(String(describing: error), privacy: .public)")
-        feedback.notify(event: .error("Failed to switch audio model"))
+        feedback.notify(event: .modelSwitchFailed("Failed to switch audio model"))
     }
 
     private static func defaultTranscriptionTimeout(

@@ -20,16 +20,28 @@ protocol CoreAudioHardwareProviding: AnyObject {
     func inputDeviceDescriptors() -> [AudioInputDeviceDescriptor]
     func defaultInputDeviceUID() -> String?
     func setInputDevice(uid: String, on audioUnit: AudioUnit?) throws
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws
+}
+
+extension CoreAudioHardwareProviding {
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
+        guard let uid = defaultInputDeviceUID() else { throw MicrophoneDeviceError.deviceUnavailable }
+        try setInputDevice(uid: uid, on: audioUnit)
+    }
 }
 
 protocol AudioInputDeviceProviding: AnyObject {
     func enumerateInputDevices() -> [MicrophoneDevice]
     func defaultInputDeviceUID() -> String?
     func setInputDevice(uid: String, on audioUnit: AudioUnit?) throws
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws
 }
 
 extension AudioInputDeviceProviding {
     func defaultInputDeviceUID() -> String? { nil }
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
+        if let uid = defaultInputDeviceUID() { try setInputDevice(uid: uid, on: audioUnit) }
+    }
 }
 
 enum MicrophoneDeviceError: Error, Equatable {
@@ -64,6 +76,11 @@ final class CoreAudioInputDeviceProvider: AudioInputDeviceProviding {
             throw MicrophoneDeviceError.deviceUnavailable
         }
         try hardware.setInputDevice(uid: uid, on: audioUnit)
+    }
+
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
+        guard audioUnit != nil else { return } // Test input nodes have no CoreAudio unit.
+        try hardware.setDefaultInputDevice(on: audioUnit)
     }
 }
 
@@ -123,6 +140,16 @@ private final class SystemCoreAudioHardware: CoreAudioHardwareProviding {
     }
 
     func defaultInputDeviceUID() -> String? {
+        let deviceID = defaultInputDeviceID()
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        return stringProperty(
+            for: deviceID,
+            selector: kAudioDevicePropertyDeviceUID,
+            scope: kAudioObjectPropertyScopeGlobal
+        )
+    }
+
+    private func defaultInputDeviceID() -> AudioDeviceID {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -137,15 +164,12 @@ private final class SystemCoreAudioHardware: CoreAudioHardwareProviding {
             nil,
             &dataSize,
             &deviceID
-        ) == noErr,
-        deviceID != kAudioObjectUnknown else {
-            return nil
-        }
-        return stringProperty(
-            for: deviceID,
-            selector: kAudioDevicePropertyDeviceUID,
-            scope: kAudioObjectPropertyScopeGlobal
-        )
+        ) == noErr else { return kAudioObjectUnknown }
+        return deviceID
+    }
+
+    func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
+        try setDevice(defaultInputDeviceID(), on: audioUnit)
     }
 
     func setInputDevice(uid: String, on audioUnit: AudioUnit?) throws {
@@ -156,7 +180,13 @@ private final class SystemCoreAudioHardware: CoreAudioHardwareProviding {
             throw MicrophoneDeviceError.deviceUnavailable
         }
 
-        var deviceID = descriptor.deviceID
+        try setDevice(descriptor.deviceID, on: audioUnit)
+    }
+
+    private func setDevice(_ id: AudioDeviceID, on audioUnit: AudioUnit?) throws {
+        guard let audioUnit else { throw MicrophoneDeviceError.audioUnitUnavailable }
+        guard id != kAudioObjectUnknown else { throw MicrophoneDeviceError.deviceUnavailable }
+        var deviceID = id
         let status = withUnsafeBytes(of: &deviceID) { bytes in
             AudioUnitSetProperty(
                 audioUnit,

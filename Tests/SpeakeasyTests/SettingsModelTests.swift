@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import XCTest
 @testable import Speakeasy
@@ -35,6 +36,8 @@ final class SettingsModelTests: XCTestCase {
 
         XCTAssertEqual(model.records.map(\.finalText), ["Hello"])
         XCTAssertEqual(model.selectedDeviceUID, "built-in")
+        model.becameVisible()
+        model.updateDevices(model.deviceEnumerator())
         model.chooseMode(.pushToTalk)
         model.chooseDevice("missing")
         XCTAssertEqual(device, "built-in")
@@ -84,7 +87,7 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(model.modelKind, .parakeet110M)
         XCTAssertEqual(model.requestedModel, .parakeetUnified)
         model.becameVisible()
-        model.handleFeedback(.error("Model warming up, please wait"))
+        model.handleFeedback(.modelSwitchFailed("Model warming up, please wait"))
         XCTAssertNil(model.requestedModel)
         XCTAssertEqual(model.modelError, "Model warming up, please wait")
         model.becameHidden()
@@ -107,6 +110,8 @@ final class SettingsModelTests: XCTestCase {
             openCorrections: {}, pasteTranscript: { _ in }
         )
         XCTAssertNil(model.selectedDeviceUID)
+        model.becameVisible()
+        model.updateDevices(model.deviceEnumerator())
         model.chooseDevice("usb")
         XCTAssertEqual(model.selectedDeviceUID, "usb")
         model.chooseDevice("")
@@ -184,6 +189,71 @@ final class SettingsModelTests: XCTestCase {
         controller.present()
         XCTAssertTrue(controller.window === window)
         controller.window?.close()
+    }
+
+    func testMeterPublishesWithoutPublishingSettingsAndStopsWhenPaneHidden() {
+        let model = makeIsolatedModel(level: { MicrophoneLevelSnapshot(normalizedLevel: 0.5, sequence: 1) })
+        var modelUpdates = 0
+        var meterUpdates = 0
+        let modelToken = model.objectWillChange.sink { _ in modelUpdates += 1 }
+        let meterToken = model.microphoneMeter.objectWillChange.sink { _ in meterUpdates += 1 }
+        model.becameVisible()
+        model.setMicrophonePaneVisible(true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertGreaterThan(meterUpdates, 0)
+        XCTAssertEqual(modelUpdates, 0)
+        model.setMicrophonePaneVisible(false)
+        let stoppedAt = meterUpdates
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(meterUpdates, stoppedAt)
+        model.becameHidden()
+        withExtendedLifetime((modelToken, meterToken)) {}
+    }
+
+    func testActivationUpdatesPasteTargetAndCloseClearsIt() throws {
+        let apps = NSWorkspace.shared.runningApplications.filter {
+            $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
+        }
+        guard apps.count >= 2 else { throw XCTSkip("Need two running applications") }
+        var activatedPID: pid_t?
+        let model = SettingsModel(store: TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json")), diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in }, currentShortcut: { .defaultShortcut },
+            changeShortcut: {}, resetShortcut: {}, shortcutEnabled: { true }, availableDevices: { [] },
+            selectedDevice: { nil }, selectDevice: { _ in }, deviceEnabled: { true },
+            currentModel: { .parakeet110M }, selectModel: { _ in }, openCorrections: {},
+            pasteTranscript: { _ in }, frontmostApp: { apps[0] },
+            activateTarget: { app in activatedPID = app.processIdentifier; return true })
+        model.rememberPasteTarget()
+        model.becameVisible()
+        XCTAssertTrue(model.hasPasteTarget)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didActivateApplicationNotification,
+            object: nil, userInfo: [NSWorkspace.applicationUserInfoKey: apps[1]])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        model.pasteHistory("Hello")
+        XCTAssertEqual(activatedPID, apps[1].processIdentifier)
+        model.becameHidden()
+        XCTAssertFalse(model.hasPasteTarget)
+    }
+
+    func testTypedModelFailureClearsPendingRequest() {
+        let model = makeIsolatedModel(level: { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) })
+        model.chooseModel(.parakeetUnified)
+        model.handleFeedback(.error("Unrelated error"))
+        XCTAssertEqual(model.requestedModel, .parakeetUnified)
+        model.handleFeedback(.modelSwitchFailed("Stop recording before switching models"))
+        XCTAssertNil(model.requestedModel)
+        XCTAssertEqual(model.modelError, "Stop recording before switching models")
+    }
+
+    private func makeIsolatedModel(level: @escaping () -> MicrophoneLevelSnapshot) -> SettingsModel {
+        SettingsModel(store: TranscriptStore(fileURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json")), diagnosticsStore: nil,
+            currentMode: { .toggle }, setMode: { _ in }, currentShortcut: { .defaultShortcut },
+            changeShortcut: {}, resetShortcut: {}, shortcutEnabled: { true }, availableDevices: { [] },
+            selectedDevice: { nil }, selectDevice: { _ in }, deviceEnabled: { true },
+            currentModel: { .parakeet110M }, selectModel: { _ in }, openCorrections: {},
+            pasteTranscript: { _ in }, levelSnapshot: level)
     }
 
     func testClearHistoryRefreshesVisibleRecords() async {
