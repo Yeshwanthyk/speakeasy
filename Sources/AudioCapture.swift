@@ -174,7 +174,9 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     private static let tapBufferSize: AVAudioFrameCount = 1024
-    private static let defaultMaxRecordingSamples = 16_000 * 60 * 6
+    /// Memory safety ceiling: 60 minutes of Float32 PCM is about 230 MB.
+    static let defaultMaxRecordingSamples = 16_000 * 60 * 60
+    private static let initialRecordingCapacity = 16_000 * 60
     private static let defaultCallbackFreshnessNs: UInt64 = 1_000_000_000
     private static let defaultFirstCallbackTimeout: TimeInterval = 2
     private static let maxAutomaticRecoveryAttempts = 3
@@ -311,7 +313,17 @@ final class AudioCapture: @unchecked Sendable {
 
     /// Most recent converted audio, capped for live-preview re-transcription.
     func livePreviewSamples() -> ContiguousArray<Float> {
-        ringBuffer.readLast(240_000) // last 15 s at 16 kHz
+        backLock.withLock {
+            frontLock.withLock {
+                let count = min(240_000, frontBuffer.count + backBuffer.count)
+                let backCount = min(count, backBuffer.count)
+                var result = ContiguousArray<Float>()
+                result.reserveCapacity(count)
+                result.append(contentsOf: frontBuffer.suffix(count - backCount))
+                result.append(contentsOf: backBuffer.suffix(backCount))
+                return result
+            }
+        }
     }
 
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
@@ -382,11 +394,11 @@ final class AudioCapture: @unchecked Sendable {
     func beginRecording() throws {
         drainGraceSignal()
 
-        let preRoll = ringBuffer.readLast(Self.preRollSampleCount)
+        let preRoll = ringBuffer.readLast(min(Self.preRollSampleCount, max(0, maxRecordingSamples)))
 
         frontLock.withLock {
             frontBuffer.removeAll(keepingCapacity: true)
-            frontBuffer.reserveCapacity(maxRecordingSamples)
+            frontBuffer.reserveCapacity(min(Self.initialRecordingCapacity, maxRecordingSamples))
             if !preRoll.isEmpty {
                 frontBuffer.append(contentsOf: preRoll)
             }
@@ -545,6 +557,10 @@ final class AudioCapture: @unchecked Sendable {
             }
 
             frontLock.withLock {
+                let required = frontBuffer.count + backBuffer.count
+                if required > frontBuffer.capacity {
+                    frontBuffer.reserveCapacity(min(maxRecordingSamples, max(required, frontBuffer.capacity * 2)))
+                }
                 frontBuffer.append(contentsOf: backBuffer)
             }
             backBuffer.removeAll(keepingCapacity: true)
@@ -726,16 +742,18 @@ final class AudioCapture: @unchecked Sendable {
         }
 
         var shouldFlush = false
+        var reachedLimit = false
         backLock.withLock {
-            backBuffer.append(contentsOf: samples)
+            frontLock.withLock {
+                let remaining = max(0, maxRecordingSamples - frontBuffer.count - backBuffer.count)
+                backBuffer.append(contentsOf: samples.prefix(remaining))
+                reachedLimit = samples.count >= remaining
+            }
             shouldFlush = backBuffer.count >= Self.flushThreshold
         }
 
-        var reachedLimit = false
-        if shouldFlush {
+        if shouldFlush || reachedLimit {
             flushBackBuffer()
-            let frontCount = frontLock.withLock { frontBuffer.count }
-            reachedLimit = frontCount >= maxRecordingSamples
         }
 
         if reachedLimit {

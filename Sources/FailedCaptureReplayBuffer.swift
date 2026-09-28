@@ -9,8 +9,8 @@ enum FailedCaptureReplayReason: String, Equatable, Sendable {
 /// A one-shot owner for a failed capture. Acquiring a lease removes the
 /// capture from the buffer, so a retry cannot be started twice.
 final class FailedCaptureReplayBuffer: @unchecked Sendable {
-    /// Matches AudioCapture's six-minute recording bound at 16 kHz.
-    static let maxSampleCount = 16_000 * 60 * 6
+    /// Matches AudioCapture's memory safety ceiling at 16 kHz.
+    static let maxSampleCount = AudioCapture.defaultMaxRecordingSamples
 
     struct Lease: @unchecked Sendable {
         let samples: ContiguousArray<Float>

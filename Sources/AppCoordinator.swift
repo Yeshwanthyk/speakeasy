@@ -120,7 +120,6 @@ final class AppCoordinator: @unchecked Sendable {
 
     private static let transcriptionSampleRate: Double = 16_000
     private static let minTranscriptionTimeout: TimeInterval = 30
-    private static let maxTranscriptionTimeout: TimeInterval = 600
     /// Minimum active (non-preroll) samples required. 4800 = 300ms at 16kHz.
     private static let minActiveSamples = 4_800
 
@@ -694,7 +693,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         let audioCapture = try AudioCapture(
             onLimitReached: { [feedback] in
-                feedback.notify(event: .error("Recording limit reached (6 minutes)"))
+                feedback.notify(event: .error("Recording stopped at the 60-minute memory safety limit"))
             },
             initialInputDeviceUID: MicrophoneSelectionStore.selectedUID()
         )
@@ -1245,7 +1244,14 @@ final class AppCoordinator: @unchecked Sendable {
                 let transcriber = self.stateLock.withLock { self.transcriber }
                 let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy native transcription")
                 defer { ProcessInfo.processInfo.endActivity(activity) }
-                let (text, timings) = try transcriber.transcribeWithTimings(samples: samples, runID: runID)
+                let (text, timings) = try FinalTranscription.run(samples: samples, transcriber: transcriber, runID: runID) {
+                    self.stateLock.withLock {
+                        guard case let .transcribing(current, currentRunID, didTimeOut, didCancel) = self.state else {
+                            return true
+                        }
+                        return current != token || currentRunID != runID || didTimeOut || didCancel || self.isShuttingDown
+                    }
+                }
                 trace.nativeTimings = timings
                 result = .success(text)
             } catch {
@@ -1786,12 +1792,11 @@ final class AppCoordinator: @unchecked Sendable {
         feedback.notify(event: .error("Failed to switch audio model"))
     }
 
-    private static func defaultTranscriptionTimeout(
+    static func defaultTranscriptionTimeout(
         samples: ContiguousArray<Float>
     ) -> TimeInterval {
         let duration = Double(samples.count) / transcriptionSampleRate
-        let scaled = max(duration * 2, minTranscriptionTimeout)
-        return min(scaled, maxTranscriptionTimeout)
+        return max(minTranscriptionTimeout, duration + 30)
     }
 
     private static func rms(of samples: ContiguousArray<Float>, startingAt start: Int = 0) -> Float {

@@ -18,11 +18,11 @@ final class FailedCaptureReplayBufferTests: XCTestCase {
         XCTAssertNil(buffer.acquireLease())
     }
 
-    func testOversizedCaptureIsRejectedWithoutTruncation() {
+    func testCeilingMatchesCaptureAndAcceptsMoreThanSixMinutes() {
+        XCTAssertEqual(FailedCaptureReplayBuffer.maxSampleCount, AudioCapture.defaultMaxRecordingSamples)
         let buffer = FailedCaptureReplayBuffer()
-        let oversized = ContiguousArray<Float>(repeating: 0, count: FailedCaptureReplayBuffer.maxSampleCount + 1)
-
-        XCTAssertFalse(buffer.install(samples: oversized, reason: .transcriptionFailed))
-        XCTAssertFalse(buffer.hasCapture)
+        let samples = ContiguousArray<Float>(repeating: 0, count: 16_000 * 60 * 6 + 1)
+        XCTAssertTrue(buffer.install(samples: samples, reason: .transcriptionFailed))
+        XCTAssertEqual(buffer.acquireLease()?.samples.count, samples.count)
     }
 }

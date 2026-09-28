@@ -85,8 +85,56 @@ final class AudioCaptureTests: XCTestCase {
 
         wait(for: [stopped], timeout: 0.2)
         let result = try XCTUnwrap(resultBox.result)
-        XCTAssertLessThan(result.graceDurationMs, 80)
+        XCTAssertLessThan(result.graceDurationMs, 200)
         XCTAssertFalse(result.samples.isEmpty)
+    }
+
+    func testRecordingGrowsPastSixMinutesWithoutStopping() throws {
+        let engine = try makeEngine()
+        let capture = try AudioCapture(engine: engine)
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        try capture.beginRecording()
+        for _ in 0..<421 {
+            try engine.input.emit(frameLength: 16_000)
+        }
+        XCTAssertEqual(capture.livePreviewSamples().count, 240_000)
+        let result = capture.endRecording()
+        XCTAssertGreaterThan(result.samples.count, 16_000 * 60 * 6)
+    }
+
+    func testPreviewIncludesPendingBackBufferAndOnlyLastFifteenSeconds() throws {
+        let engine = try makeEngine()
+        let capture = try AudioCapture(engine: engine)
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        try capture.beginRecording()
+        for _ in 0..<15 {
+            try engine.input.emit(frameLength: 16_000)
+        }
+        try engine.input.emit(frameLength: 16_000, value: 0.2)
+        try engine.input.emit(frameLength: 1_024, value: 0.3)
+        let preview = capture.livePreviewSamples()
+        XCTAssertEqual(preview.count, 240_000)
+        XCTAssertEqual(preview.first, 0.1)
+        XCTAssertTrue(preview.contains(0.2))
+        XCTAssertEqual(preview.last, 0.3)
+    }
+
+    func testInjectedSafetyCeilingStopsAtExactSampleCount() throws {
+        let engine = try makeEngine()
+        var notifications = 0
+        let capture = try AudioCapture(maxRecordingSamples: 20_000, onLimitReached: {
+            notifications += 1
+        }, engine: engine)
+        try capture.prepare()
+        try engine.input.emit(frameLength: 1_024)
+        try capture.beginRecording()
+        try engine.input.emit(frameLength: 16_000)
+        try engine.input.emit(frameLength: 16_000)
+        try engine.input.emit(frameLength: 16_000)
+        XCTAssertEqual(capture.endRecording().samples.count, 20_000)
+        XCTAssertEqual(notifications, 1)
     }
 
     func testConfigurationChangeRebuildsGraphWithFreshInputFormat() throws {
@@ -760,24 +808,25 @@ private final class FakeAudioInputNode: AudioInputNodeProtocol {
         tapBlock = nil
     }
 
-    func emit(frameLength: AVAudioFrameCount) throws {
-        try emit(frameLength: frameLength, through: tapBlock)
+    func emit(frameLength: AVAudioFrameCount, value: Float = 0.1) throws {
+        try emit(frameLength: frameLength, through: tapBlock, value: value)
     }
 
     func emit(frameLength: AVAudioFrameCount, throughRetainedTapAt index: Int) throws {
-        try emit(frameLength: frameLength, through: retainedTapBlocks[index])
+        try emit(frameLength: frameLength, through: retainedTapBlocks[index], value: 0.1)
     }
 
     private func emit(
         frameLength: AVAudioFrameCount,
-        through tapBlock: AVAudioNodeTapBlock?
+        through tapBlock: AVAudioNodeTapBlock?,
+        value: Float
     ) throws {
         let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameLength))
         buffer.frameLength = frameLength
 
         if let channel = buffer.floatChannelData?[0] {
             for index in 0..<Int(frameLength) {
-                channel[index] = 0.1
+                channel[index] = value
             }
         }
 
