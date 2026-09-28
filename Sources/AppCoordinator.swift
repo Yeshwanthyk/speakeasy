@@ -746,6 +746,7 @@ final class AppCoordinator: @unchecked Sendable {
             diagnosticsStore: DiagnosticsStore(),
             e2eTraceStore: Self.defaultE2ETraceStore(),
             transcriptPostProcessor: postProcessor,
+            livePreviewController: LivePreviewController(),
             transcriptCorrectionStore: correctionStore
         )
         recordingFeedback.configureBottom(
