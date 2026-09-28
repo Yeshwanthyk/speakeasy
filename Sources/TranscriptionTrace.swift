@@ -41,6 +41,7 @@ struct TranscriptionTrace: Sendable {
     var committedAudioSeconds: Double?
     var tailSeconds: Double?
     var segmentWaitMs: Double?
+    var stageChanges: [StageChange] = []
 
     init(
         id: UUID = UUID(),

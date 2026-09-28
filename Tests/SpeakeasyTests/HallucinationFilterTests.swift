@@ -2,18 +2,20 @@ import XCTest
 @testable import Speakeasy
 
 final class HallucinationFilterTests: XCTestCase {
-    func testDefaultPatternsFilterKnownShortResponses() {
+    func testShortResponsesPassWithoutEvidenceOfSilence() {
         let filter = HallucinationFilter()
 
-        XCTAssertTrue(filter.isLikelyHallucination("yeah"))
-        XCTAssertTrue(filter.isLikelyHallucination("okay."))
-        XCTAssertTrue(filter.isLikelyHallucination("uh-huh"))
+        for phrase in ["yeah", "okay.", "uh-huh", "bye", "no", "thank you"] {
+            XCTAssertFalse(filter.isLikelyHallucination(phrase))
+            XCTAssertEqual(filter.verdict(for: phrase, activeDurationSeconds: 0.8, activeRMS: 0.01), .accepted)
+        }
+        XCTAssertEqual(filter.verdict(for: "bye", activeDurationSeconds: 0.8, activeRMS: 0.001), .rejected(.exactPattern))
     }
 
     func testFilterNormalizesWhitespaceAndCase() {
         let filter = HallucinationFilter()
 
-        XCTAssertTrue(filter.isLikelyHallucination("  Yeah. \n"))
+        XCTAssertEqual(filter.verdict(for: "  Yeah. \n", activeDurationSeconds: 0.5, activeRMS: 0.001), .rejected(.exactPattern))
     }
 
     func testRealPhraseIsNotFiltered() {
@@ -25,7 +27,7 @@ final class HallucinationFilterTests: XCTestCase {
     func testCustomPatternsCanBeInjected() {
         let filter = HallucinationFilter(patterns: ["custom"])
 
-        XCTAssertTrue(filter.isLikelyHallucination("custom"))
+        XCTAssertEqual(filter.verdict(for: "custom", activeDurationSeconds: 0.5, activeRMS: 0.001), .rejected(.exactPattern))
         XCTAssertFalse(filter.isLikelyHallucination("yeah"))
     }
 
@@ -33,11 +35,11 @@ final class HallucinationFilterTests: XCTestCase {
         let filter = HallucinationFilter()
 
         XCTAssertEqual(
-            filter.verdict(for: "  YÉAH. "),
+            filter.verdict(for: "  YÉAH. ", activeDurationSeconds: 0.5, activeRMS: 0.001),
             .rejected(.exactPattern)
         )
         XCTAssertEqual(
-            filter.rejectionReason(for: "okay."),
+            filter.rejectionReason(for: "okay.", activeDurationSeconds: 0.5, activeRMS: 0.001),
             .exactPattern
         )
     }

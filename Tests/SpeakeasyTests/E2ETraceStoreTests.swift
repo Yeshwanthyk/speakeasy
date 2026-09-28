@@ -207,6 +207,16 @@ final class E2ETraceStoreTests: XCTestCase {
         XCTAssertFalse(summary.segments.contains { $0.name == "press_to_capture_start" })
     }
 
+    func testTraceHasStageCountsButNeverTranscriptText() throws {
+        var trace = completeTrace()
+        trace.stageChanges = [StageChange(stage: "exactCorrections", count: 1)]
+        let record = try XCTUnwrap(E2ETraceRecordFactory.record(from: trace, outcome: .eventsPosted,
+                                                                 deliveredText: "private spoken words"))
+        XCTAssertEqual(record.stageChangeCounts, ["exactCorrections": 1])
+        let json = String(decoding: try JSONEncoder().encode(record), as: UTF8.self)
+        XCTAssertFalse(json.contains("private spoken words"))
+    }
+
     // MARK: - Helpers
 
     private func completeTrace() -> TranscriptionTrace {

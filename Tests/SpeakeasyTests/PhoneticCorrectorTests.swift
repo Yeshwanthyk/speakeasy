@@ -81,6 +81,14 @@ final class PhoneticCorrectorTests: XCTestCase {
         XCTAssertEqual(corrector.correct("PIE TORCH rocks"), "PyTorch rocks")
     }
 
+    func testCommonNearMissesAndShortWordsAreNeverSubstituted() throws {
+        let corrector = try corrector(("CUDA", ["coda"]), ("Kubernetes", ["kubernets"]))
+        XCTAssertEqual(corrector.correct("I could code today and come home"), "I could code today and come home")
+        XCTAssertEqual(corrector.correct("the sun is hot"), "the sun is hot")
+        XCTAssertEqual(corrector.correct("coda cubernets"), "CUDA cubernets")
+        XCTAssertEqual(corrector.correct("CODA, coda!"), "CUDA, CUDA!")
+    }
+
     func testEmptyTermsReturnTextUnchanged() {
         let corrector = try! PhoneticCorrector(terms: [])
         let text = "nothing to do here"

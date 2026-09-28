@@ -2,6 +2,19 @@ import XCTest
 @testable import Speakeasy
 
 final class TranscriptPostProcessorTests: XCTestCase {
+    func testStageChangesAreOrderedAndIdentityHasNone() throws {
+        let processor = try TranscriptPostProcessor(corrections: [
+            TranscriptCorrection(heard: "kudo", written: "CUDA")
+        ])
+        XCTAssertEqual(processor.process("plain text").stageChanges, [])
+        let result = processor.process("kudo question mark")
+        XCTAssertEqual(result.finalText, "CUDA?")
+        XCTAssertEqual(result.stageChanges, [
+            StageChange(stage: "commands", count: 1),
+            StageChange(stage: "exactCorrections", count: 1)
+        ])
+    }
+
     func testCommandsFormatPunctuationAndLineBreaks() {
         let processor = TranscriptPostProcessor()
 

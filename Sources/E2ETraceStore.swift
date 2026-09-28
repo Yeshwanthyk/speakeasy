@@ -35,6 +35,7 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
     var committedAudioSeconds: Double? = nil
     var tailSeconds: Double? = nil
     var segmentWaitMs: Double? = nil
+    var stageChangeCounts: [String: Int]? = nil
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -59,6 +60,7 @@ struct E2ETraceRecord: Codable, Equatable, Sendable {
         case committedAudioSeconds = "committed_audio_seconds"
         case tailSeconds = "tail_seconds"
         case segmentWaitMs = "segment_wait_ms"
+        case stageChangeCounts = "stage_change_counts"
     }
 }
 
@@ -113,7 +115,8 @@ enum E2ETraceRecordFactory {
             segmentCount: trace.segmentCount,
             committedAudioSeconds: trace.committedAudioSeconds,
             tailSeconds: trace.tailSeconds,
-            segmentWaitMs: trace.segmentWaitMs
+            segmentWaitMs: trace.segmentWaitMs,
+            stageChangeCounts: Dictionary(trace.stageChanges.map { ($0.stage, $0.count) }, uniquingKeysWith: +)
         )
     }
 

@@ -144,8 +144,6 @@ final class AppCoordinator: @unchecked Sendable {
     private let deliveryTargetProvider: DeliveryTargetProviding
     private let hallucinationFilter: HallucinationFilter
     private var transcriptPostProcessor: TranscriptPostProcessor
-    /// Optional post-correction refinement stage; nil means no polish step.
-    private let textPolisher: TextPolishing?
     private let transcriptCorrectionStore: TranscriptCorrectionStore?
     private var currentASRModelKind: ASRModelKind
     private let asrModelResolver: ASRModelResolver?
@@ -250,7 +248,6 @@ final class AppCoordinator: @unchecked Sendable {
         diagnosticsStore: DiagnosticsStore? = nil,
         e2eTraceStore: E2ETraceStore? = nil,
         transcriptPostProcessor: TranscriptPostProcessor = TranscriptPostProcessor(),
-        textPolisher: TextPolishing? = nil,
         livePreviewController: LivePreviewController? = nil,
         transcriptCorrectionStore: TranscriptCorrectionStore? = nil,
         transcriptionQueue: DispatchQueue = DispatchQueue(label: "com.speakeasy.app.transcription", qos: .userInteractive),
@@ -268,7 +265,6 @@ final class AppCoordinator: @unchecked Sendable {
         self.deliveryTargetProvider = deliveryTargetProvider
         self.hallucinationFilter = hallucinationFilter
         self.transcriptPostProcessor = transcriptPostProcessor
-        self.textPolisher = textPolisher
         self.e2eTraceStore = e2eTraceStore
         self.livePreviewController = livePreviewController
         self.transcriptCorrectionStore = transcriptCorrectionStore
@@ -425,7 +421,7 @@ final class AppCoordinator: @unchecked Sendable {
         guard let transcriptCorrectionStore else {
             throw TranscriptCorrectionUpdateError.storeUnavailable
         }
-        let nextProcessor = try TranscriptPostProcessor(corrections: corrections)
+        let nextProcessor = try Self.makePostProcessor(corrections: corrections)
         let persistence = try transcriptCorrectionStore.replace(corrections)
 
         return Task { @MainActor [weak self] in
@@ -717,7 +713,7 @@ final class AppCoordinator: @unchecked Sendable {
             audioCapture.microphoneLevelSnapshot()
         }
         let correctionStore = TranscriptCorrectionStore()
-        let postProcessor = (try? TranscriptPostProcessor(corrections: correctionStore.allCorrections()))
+        let postProcessor = (try? Self.makePostProcessor(corrections: correctionStore.allCorrections()))
             ?? TranscriptPostProcessor()
 
         let dictationShortcut = DictationShortcutStore.selected()
@@ -776,6 +772,15 @@ final class AppCoordinator: @unchecked Sendable {
         return E2ETraceStore(fileURL: url)
     }
     #endif
+
+    private static func makePostProcessor(corrections: [TranscriptCorrection]) throws -> TranscriptPostProcessor {
+        let terms = FuzzyCorrectionPreference.isEnabled
+            ? corrections.filter { $0.isEnabled && $0.heard != $0.written }.map {
+                PhoneticTerm(canonical: $0.written, spokenForms: [$0.heard])
+            }
+            : []
+        return try TranscriptPostProcessor(corrections: corrections, phoneticTerms: terms)
+    }
 
     // MARK: - State Machine
     //
@@ -1363,7 +1368,7 @@ final class AppCoordinator: @unchecked Sendable {
         activeRMS: Float? = nil,
         target: TranscriptDeliveryTarget = .unavailable
     ) async {
-        let trace = trace
+        var trace = trace
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
@@ -1377,7 +1382,8 @@ final class AppCoordinator: @unchecked Sendable {
             activeRMS: activeRMS
         )
         if case .rejected(let reason) = hallucinationVerdict {
-            logger.debug("Filtered transcript degeneration: \(String(describing: reason))")
+            logger.notice("Filtered transcript (\(String(describing: reason), privacy: .public))")
+            trace.stageChanges = [StageChange(stage: "hallucinationFilter", count: 1)]
             recordTerminal(trace: trace, outcome: .noSpeech)
             feedback.notify(event: .error("No speech detected"))
             return
@@ -1385,32 +1391,26 @@ final class AppCoordinator: @unchecked Sendable {
 
         let postProcessor = stateLock.withLock { transcriptPostProcessor }
         let processedTranscript = postProcessor.process(trimmed)
-        var finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let polisher = stateLock.withLock({ textPolisher }) {
-            // Polish refines corrected text; structural guards fall back to
-            // the corrected text when output loses meaning or runs away.
-            let polished = await polisher.polish(finalText)
-            finalText = PolishGuard.sanitized(source: finalText, output: polished) { reason in
-                self.logger.debug("Polish rejected (\(String(describing: reason))); keeping corrected text")
-            }.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
             feedback.notify(event: .error("No speech detected"))
             return
         }
-        let polishedTranscript = ProcessedTranscript(
+        trace.stageChanges = processedTranscript.stageChanges
+        let settledTranscript = ProcessedTranscript(
             rawText: processedTranscript.rawText,
-            finalText: finalText
+            finalText: finalText,
+            stageChanges: processedTranscript.stageChanges
         )
-        let settledTranscript = polishedTranscript
         let record = TranscriptRecord(
             id: trace.id,
             rawText: settledTranscript.rawText,
             finalText: settledTranscript.finalText,
             backend: trace.backend,
             outcome: .transcriptPersisted,
-            timings: trace.timingSnapshot
+            timings: trace.timingSnapshot,
+            stageChanges: settledTranscript.stageChanges
         )
 
         guard let transcriptStore else {

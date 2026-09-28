@@ -72,7 +72,11 @@ struct HallucinationFilter {
         let normalized = Self.normalize(text)
         guard !normalized.isEmpty else { return .accepted }
 
-        if patterns.contains(normalized) {
+        // Brief acknowledgements are legitimate dictation unless the audio
+        // itself is nearly silent. Never reject them on text alone.
+        if patterns.contains(normalized),
+           let activeDurationSeconds, activeDurationSeconds < 1.5,
+           let activeRMS, activeRMS.isFinite, activeRMS <= Self.silenceRMSThreshold {
             return .rejected(.exactPattern)
         }
 
