@@ -1096,7 +1096,7 @@ final class AppCoordinator: @unchecked Sendable {
     ) -> Result<AnnotationTranscript, AnnotationCaptureError> {
         guard !capture.wasInterrupted else { return .failure(.interrupted) }
         let samples = capture.samples
-        let (transcriber, postProcessor) = stateLock.withLock { (transcriber, transcriptPostProcessor) }
+        let (transcriber, postProcessor) = stateLock.withLock { (self.transcriber, self.transcriptPostProcessor) }
         let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy markup transcription")
         defer { ProcessInfo.processInfo.endActivity(activity) }
 
