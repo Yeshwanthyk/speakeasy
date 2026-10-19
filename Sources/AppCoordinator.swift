@@ -1066,11 +1066,27 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Pastes a finished markup into the front app; false leaves it unpasted.
+    /// Saves a finished markup to history, then pastes it into the front app;
+    /// false leaves it unpasted. A posted paste can still land nowhere when no
+    /// text field has focus, so the markup stays on the clipboard afterwards.
     @MainActor
     func pasteMarkup(_ text: String) -> Bool {
+        let record = TranscriptRecord(
+            rawText: text,
+            finalText: text,
+            backend: "markup",
+            outcome: .transcriptPersisted
+        )
+        transcriptStore?.append(record)
         guard accessibilityChecker.hasAccessibilityAccess() else { return false }
-        return paster.paste(text, target: deliveryTargetProvider.currentTarget()) == .eventsPosted
+        let outcome = paster.paste(text, target: deliveryTargetProvider.currentTarget())
+        transcriptStore?.update(id: record.id, outcome: outcome.traceOutcome, timings: nil)
+        guard outcome == .eventsPosted else { return false }
+        // Runs after the paster restores the previous clipboard.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [paster] in
+            _ = paster.copy(text)
+        }
+        return true
     }
 
     private func notifyAnnotationObserver(_ body: @escaping @MainActor (AnnotationRecordingObserving) -> Void) {

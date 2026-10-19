@@ -263,7 +263,10 @@ final class MarkupSessionController: AnnotationRecordingObserving {
         case .success(let text):
             // Text only: apps given text and an image on one item paste just
             // the image. The text names the contact sheet's path.
-            if actions.pasteMarkup(text) { return }
+            if actions.pasteMarkup(text) {
+                actions.notify(.status("Markup pasted — also on the clipboard and in history"))
+                return
+            }
             NSPasteboard.general.clearContents()
             guard NSPasteboard.general.setString(text, forType: .string) else {
                 actions.notify(.error("Markup saved, but the clipboard could not be updated"))
