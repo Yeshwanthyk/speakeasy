@@ -117,7 +117,7 @@ final class MarkupPlanningTests: XCTestCase {
         Contact sheet: /tmp/markup-1/contact-sheet.png (numbered marks match the list below; full frames in frames/)
         "Looking at the landing page."
         - #1 (0:05) Safari: "We don't need this footer."
-        - #2 (0:16) [clicked] (no speech)
+        - #2 (0:16) [pin] (no speech)
         """)
     }
 
@@ -134,5 +134,29 @@ final class MarkupPlanningTests: XCTestCase {
             displayFrame: .zero, strokes: [[CGPoint(x: 100, y: 100)]], target: nil
         )
         XCTAssertEqual(click.bounds.width, MarkupAnnotation.clickRadius * 2)
+    }
+
+    func testHitTestStrokeMatchesInkNotTheAreaItCircles() {
+        let square = [
+            CGPoint(x: 0, y: 0), CGPoint(x: 200, y: 0), CGPoint(x: 200, y: 200), CGPoint(x: 0, y: 200), CGPoint(x: 0, y: 0)
+        ]
+        let stroke = MarkupAnnotation(
+            number: 1, kind: .stroke, sampleOffset: 0, elapsed: 0,
+            displayFrame: .zero, strokes: [square], target: nil
+        )
+        XCTAssertTrue(MarkupHitTest.hits(stroke, at: CGPoint(x: 100, y: 4)))
+        XCTAssertTrue(MarkupHitTest.hits(stroke, at: CGPoint(x: 205, y: 205)), "badge sits on the top-right corner")
+        XCTAssertFalse(MarkupHitTest.hits(stroke, at: CGPoint(x: 100, y: 100)), "inside a circled area pins instead")
+        XCTAssertFalse(MarkupHitTest.hits(stroke, at: CGPoint(x: 400, y: 400)))
+    }
+
+    func testHitTestPinIncludesItsRing() {
+        let pin = MarkupAnnotation(
+            number: 1, kind: .click, sampleOffset: 0, elapsed: 0,
+            displayFrame: .zero, strokes: [[CGPoint(x: 100, y: 100)]], target: nil
+        )
+        XCTAssertTrue(MarkupHitTest.hits(pin, at: CGPoint(x: 100, y: 100)))
+        XCTAssertTrue(MarkupHitTest.hits(pin, at: CGPoint(x: 100 - MarkupAnnotation.clickRadius, y: 100)))
+        XCTAssertFalse(MarkupHitTest.hits(pin, at: CGPoint(x: 100, y: 60)))
     }
 }

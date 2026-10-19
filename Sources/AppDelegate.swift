@@ -63,9 +63,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let markupController = MarkupSessionController(actions: .init(
             currentOffset: { [weak coordinator] in coordinator?.currentAnnotationOffset() },
             commitMark: { [weak coordinator] offset in coordinator?.commitAnnotationMark(at: offset) ?? false },
-            removeLastMark: { [weak coordinator] in coordinator?.removeLastAnnotationMark() },
+            removeMark: { [weak coordinator] offset in coordinator?.removeAnnotationMark(at: offset) },
             finishRecording: { [weak coordinator] in coordinator?.handle(.toggle) },
             cancelRecording: { [weak coordinator] in coordinator?.handle(.cancel) },
+            pasteMarkup: { [weak coordinator] text in coordinator?.pasteMarkup(text) ?? false },
             microphoneLevel: { [weak coordinator] in
                 coordinator?.microphoneLevelSnapshot() ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
             },

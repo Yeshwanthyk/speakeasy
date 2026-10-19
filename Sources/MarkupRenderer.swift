@@ -53,7 +53,13 @@ enum MarkupRenderer {
 
         let bounds = annotation.bounds
         if !bounds.isNull {
-            drawBadge(number: annotation.number, at: pixel(CGPoint(x: bounds.maxX, y: bounds.maxY)), scale: scale, in: context)
+            drawBadge(
+                number: annotation.number,
+                elapsed: annotation.elapsed,
+                at: pixel(CGPoint(x: bounds.maxX, y: bounds.maxY)),
+                scale: scale,
+                in: context
+            )
         }
         return context.makeImage()
     }
@@ -126,28 +132,66 @@ enum MarkupRenderer {
         return path
     }
 
-    private static func drawBadge(number: Int, at anchor: CGPoint, scale: CGFloat, in context: CGContext) {
-        let radius = 13 * scale
-        let center = CGPoint(
-            x: min(max(anchor.x, radius), CGFloat(context.width) - radius),
-            y: min(max(anchor.y, radius), CGFloat(context.height) - radius)
-        )
-        let circle = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
-        context.setFillColor(markColor)
-        context.fillEllipse(in: circle)
-        context.setStrokeColor(CGColor(gray: 1, alpha: 1))
-        context.setLineWidth(2 * scale)
-        context.strokeEllipse(in: circle)
+    /// A dark pill holding a red number cap and the mark's time, so a pasted
+    /// contact sheet reads on its own: `#3  0:13`.
+    private static func drawBadge(
+        number: Int,
+        elapsed: TimeInterval,
+        at anchor: CGPoint,
+        scale: CGFloat,
+        in context: CGContext
+    ) {
+        let height = 28 * scale
+        let inset = 2.5 * scale
+        let capHeight = height - inset * 2
+        let numberLine = textLine("#\(number)", size: 15 * scale, weight: .emphasizedSystem)
+        let timeLine = textLine(MarkupSummary.timestamp(elapsed), size: 12.5 * scale, weight: .system)
+        let capWidth = max(capHeight, lineWidth(numberLine) + 12 * scale)
+        let width = inset + capWidth + 7 * scale + lineWidth(timeLine) + 9 * scale
 
-        let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, 14 * scale, nil)
-            ?? CTFontCreateWithName("Helvetica-Bold" as CFString, 14 * scale, nil)
+        // Keep the cap on the mark's corner and grow leftward, inside the crop.
+        let origin = CGPoint(
+            x: min(max(anchor.x + capHeight / 2 + inset - width, 0), CGFloat(context.width) - width),
+            y: min(max(anchor.y - height / 2, 0), CGFloat(context.height) - height)
+        )
+        let pill = CGRect(origin: origin, size: CGSize(width: width, height: height))
+        context.addPath(CGPath(roundedRect: pill, cornerWidth: height / 2, cornerHeight: height / 2, transform: nil))
+        context.setFillColor(sheetBackground)
+        context.fillPath()
+        context.addPath(CGPath(roundedRect: pill.insetBy(dx: scale / 2, dy: scale / 2), cornerWidth: height / 2, cornerHeight: height / 2, transform: nil))
+        context.setStrokeColor(CGColor(gray: 1, alpha: 0.85))
+        context.setLineWidth(1.5 * scale)
+        context.strokePath()
+
+        let cap = CGRect(x: pill.minX + inset, y: pill.minY + inset, width: capWidth, height: capHeight)
+        context.addPath(CGPath(roundedRect: cap, cornerWidth: capHeight / 2, cornerHeight: capHeight / 2, transform: nil))
+        context.setFillColor(markColor)
+        context.fillPath()
+
+        draw(numberLine, centeredIn: cap, in: context)
+        let timeX = cap.maxX + 7 * scale
+        draw(timeLine, centeredIn: CGRect(x: timeX, y: pill.minY, width: lineWidth(timeLine), height: height), in: context)
+    }
+
+    private static func textLine(_ text: String, size: CGFloat, weight: CTFontUIFontType) -> CTLine {
+        let font = CTFontCreateUIFontForLanguage(weight, size, nil)
+            ?? CTFontCreateWithName("Helvetica-Bold" as CFString, size, nil)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 1, alpha: 1)
         ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "\(number)", attributes: attributes))
+        return CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
+    }
+
+    private static func lineWidth(_ line: CTLine) -> CGFloat {
+        CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+    }
+
+    private static func draw(_ line: CTLine, centeredIn rect: CGRect, in context: CGContext) {
+        // Image bounds are relative to the current text position, which the previous draw advanced.
+        context.textPosition = .zero
         let bounds = CTLineGetImageBounds(line, context)
-        context.textPosition = CGPoint(x: center.x - bounds.midX, y: center.y - bounds.midY)
+        context.textPosition = CGPoint(x: rect.midX - bounds.midX, y: rect.midY - bounds.midY)
         CTLineDraw(line, context)
     }
 

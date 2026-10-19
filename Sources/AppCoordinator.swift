@@ -1058,11 +1058,19 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    func removeLastAnnotationMark() {
+    /// Drops the cut a mark registered; marks can be removed out of order.
+    func removeAnnotationMark(at offset: Int) {
         stateLock.withLock {
-            guard case .recording = state else { return }
-            _ = annotationCuts.popLast()
+            guard case .recording = state, let index = annotationCuts.lastIndex(of: offset) else { return }
+            annotationCuts.remove(at: index)
         }
+    }
+
+    /// Pastes a finished markup into the front app; false leaves it unpasted.
+    @MainActor
+    func pasteMarkup(_ text: String) -> Bool {
+        guard accessibilityChecker.hasAccessibilityAccess() else { return false }
+        return paster.paste(text, target: deliveryTargetProvider.currentTarget()) == .eventsPosted
     }
 
     private func notifyAnnotationObserver(_ body: @escaping @MainActor (AnnotationRecordingObserving) -> Void) {

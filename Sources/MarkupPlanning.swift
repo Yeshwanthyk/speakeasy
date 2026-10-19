@@ -11,7 +11,8 @@ struct MarkupAnnotation: Equatable, Sendable {
 
     static let clickRadius: CGFloat = 16
 
-    let number: Int
+    /// 1-based position; marks are renumbered when one is removed.
+    var number: Int
     let kind: Kind
     /// Recording sample offset, including pre-roll, when the mark began.
     let sampleOffset: Int
@@ -40,6 +41,47 @@ struct MarkupAnnotation: Equatable, Sendable {
         case .click:
             return rect.insetBy(dx: -Self.clickRadius, dy: -Self.clickRadius)
         }
+    }
+}
+
+/// Whether a Shift-click lands on a mark, so clicking a mark removes it.
+enum MarkupHitTest {
+    /// Points of slack around ink, rings, and the number badge.
+    static let tolerance: CGFloat = 10
+    static let badgeRadius: CGFloat = 12
+
+    static func hits(_ annotation: MarkupAnnotation, at point: CGPoint) -> Bool {
+        let bounds = annotation.bounds
+        guard !bounds.isNull else { return false }
+        let badge = CGPoint(x: bounds.maxX, y: bounds.maxY)
+        if distance(point, badge) <= badgeRadius + tolerance { return true }
+        switch annotation.kind {
+        case .click:
+            // The ring and its inside: a pin is small enough to grab anywhere.
+            return annotation.strokes.flatMap { $0 }.contains {
+                distance(point, $0) <= MarkupAnnotation.clickRadius + tolerance
+            }
+        case .stroke:
+            // Only the ink itself; clicking inside a circled area pins instead.
+            return annotation.strokes.contains { stroke in
+                if stroke.count == 1 { return distance(point, stroke[0]) <= tolerance }
+                return zip(stroke, stroke.dropFirst()).contains {
+                    distance(point, toSegment: $0.0, $0.1) <= tolerance
+                }
+            }
+        }
+    }
+
+    private static func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        hypot(a.x - b.x, a.y - b.y)
+    }
+
+    private static func distance(_ point: CGPoint, toSegment a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else { return distance(point, a) }
+        let t = min(1, max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared))
+        return distance(point, CGPoint(x: a.x + t * dx, y: a.y + t * dy))
     }
 }
 
@@ -202,7 +244,7 @@ enum MarkupSummary {
         }
         for item in items {
             var label = "#\(item.number) (\(timestamp(item.elapsed)))"
-            if item.wasClick { label += " [clicked]" }
+            if item.wasClick { label += " [pin]" }
             if let targetName = item.targetName, !targetName.isEmpty { label += " \(targetName):" }
             let speech = item.transcript.isEmpty ? "(no speech)" : "\"\(item.transcript)\""
             lines.append("- \(label) \(speech)")

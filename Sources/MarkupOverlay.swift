@@ -1,104 +1,131 @@
 import AppKit
 import SwiftUI
 
-/// Full-screen transparent canvases plus a floating control bar. Mouse input
-/// passes through to apps until Shift is held, then strokes draw here.
+/// Full-screen transparent canvases plus a floating control bar. The
+/// canvases never take mouse input, so clicks and scrolls always reach the
+/// app underneath; holding Shift and moving the pointer draws.
 @MainActor
 final class MarkupOverlayController: NSObject {
-    var onStrokeBegan: ((CGPoint, NSScreen) -> Void)?
-    var onStrokeMoved: ((CGPoint) -> Void)?
-    var onStrokeEnded: (() -> Void)?
-    var onClick: ((CGPoint) -> Void)?
+    var onInkBegan: ((CGPoint, NSScreen) -> Void)?
+    var onInkMoved: ((CGPoint) -> Void)?
+    var onInkEnded: (() -> Void)?
+    var onShiftClick: ((CGPoint) -> Void)?
+    var onScroll: (() -> Void)?
     var onUndo: (() -> Void)?
     var onCancel: (() -> Void)?
     var onFinish: (() -> Void)?
 
     let hudModel = MarkupHUDModel()
+    private static let fadeDuration: TimeInterval = 0.5
     private var canvases: [MarkupCanvasWindow] = []
     private var hud: NSPanel?
-    private var modifierTimer: Timer?
-    private var clickMonitor: Any?
-    private var isDrawingEnabled = false
-    private var isStroking = false
+    private var pollTimer: Timer?
+    private var eventMonitors: [Any] = []
+    private var isInking = false
+    private var fadeStartedAt: Date?
 
     func show() {
         canvases = NSScreen.screens.map { screen in
             let window = MarkupCanvasWindow(screen: screen)
-            window.canvas.onStrokeBegan = { [weak self] point in
-                self?.isStroking = true
-                self?.onStrokeBegan?(point, screen)
-            }
-            window.canvas.onStrokeMoved = { [weak self] point in self?.onStrokeMoved?(point) }
-            window.canvas.onStrokeEnded = { [weak self] in
-                self?.isStroking = false
-                self?.onStrokeEnded?()
-                self?.refreshDrawingMode()
-            }
             window.orderFrontRegardless()
             return window
         }
 
-        // NSEvent.modifierFlags reads the global modifier state, so polling
-        // needs no extra permission and also sees Shift held before launch.
+        // NSEvent.modifierFlags and mouseLocation read global state, so
+        // polling needs no extra permission and also sees Shift held before launch.
         let timer = Timer(
             timeInterval: 1.0 / 60.0,
             target: self,
-            selector: #selector(pollModifiers),
+            selector: #selector(poll),
             userInfo: nil,
             repeats: true
         )
         RunLoop.main.add(timer, forMode: .common)
-        modifierTimer = timer
+        pollTimer = timer
 
-        // Global monitors only see other apps' clicks, so control-bar clicks never become marks.
-        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+        // Global monitors only see other apps' events, so control-bar clicks never become marks.
+        let clicks = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             MainActor.assumeIsolated {
-                guard let self, !self.isDrawingEnabled else { return }
-                self.onClick?(NSEvent.mouseLocation)
+                guard let self, Self.isPureShift(event.modifierFlags) else { return }
+                self.onShiftClick?(NSEvent.mouseLocation)
             }
         }
+        let scrolls = NSEvent.addGlobalMonitorForEvents(matching: .scrollWheel) { [weak self] _ in
+            MainActor.assumeIsolated { self?.onScroll?() }
+        }
+        eventMonitors = [clicks, scrolls].compactMap { $0 }
     }
 
-    func render(annotations: [MarkupAnnotation], live: [CGPoint]?) {
+    func render(annotations: [MarkupAnnotation], markCount: Int, live: [CGPoint]?) {
         for window in canvases {
             window.canvas.annotations = annotations
             window.canvas.liveStroke = live
+            window.canvas.isDrawingEnabled = (live?.count ?? 0) > 1
             window.canvas.needsDisplay = true
         }
-        hudModel.markCount = annotations.count
+        hudModel.markCount = markCount
+    }
+
+    /// Scrolling moves content out from under marks; their screenshots are
+    /// already taken, so the on-screen ink only needs to get out of the way.
+    func fadeOut(_ annotations: [MarkupAnnotation]) {
+        for window in canvases {
+            window.canvas.fading = annotations
+            window.canvas.fadeAlpha = 1
+        }
+        fadeStartedAt = Date()
     }
 
     func close() {
-        modifierTimer?.invalidate()
-        modifierTimer = nil
-        if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-        clickMonitor = nil
+        pollTimer?.invalidate()
+        pollTimer = nil
+        eventMonitors.forEach(NSEvent.removeMonitor)
+        eventMonitors = []
         canvases.forEach { $0.orderOut(nil) }
         canvases = []
         hud?.orderOut(nil)
         hud = nil
     }
 
-    @objc private func pollModifiers() {
-        refreshDrawingMode()
+    @objc private func poll() {
+        trackInk()
+        advanceFade()
     }
 
-    private func refreshDrawingMode() {
-        let shiftHeld = NSEvent.modifierFlags.contains(.shift)
-        // Finish an in-progress stroke even if Shift is released mid-drag.
-        let enabled = shiftHeld || isStroking
-        guard enabled != isDrawingEnabled else { return }
-        isDrawingEnabled = enabled
-        hudModel.isDrawing = enabled
-        for window in canvases {
-            window.ignoresMouseEvents = !enabled
-            window.canvas.isDrawingEnabled = enabled
-            window.canvas.needsDisplay = true
+    private func trackInk() {
+        let shiftHeld = Self.isPureShift(NSEvent.modifierFlags)
+        hudModel.isDrawing = shiftHeld
+        let point = NSEvent.mouseLocation
+        if shiftHeld, isInking {
+            onInkMoved?(point)
+        } else if shiftHeld, let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
+            isInking = true
+            onInkBegan?(point, screen)
+        } else if !shiftHeld, isInking {
+            isInking = false
+            onInkEnded?()
         }
     }
 
+    private func advanceFade() {
+        guard let fadeStartedAt else { return }
+        let progress = min(1, Date().timeIntervalSince(fadeStartedAt) / Self.fadeDuration)
+        let done = progress >= 1
+        for window in canvases {
+            window.canvas.fadeAlpha = CGFloat((1 - progress) * (1 - progress))
+            if done { window.canvas.fading = [] }
+            window.canvas.needsDisplay = true
+        }
+        if done { self.fadeStartedAt = nil }
+    }
+
+    /// Shift with Command, Control, or Option is a shortcut, not drawing.
+    private static func isPureShift(_ flags: NSEvent.ModifierFlags) -> Bool {
+        flags.contains(.shift) && flags.isDisjoint(with: [.command, .control, .option])
+    }
+
     /// Shown once the recording becomes a markup; plain dictation never sees it.
-    func showHUD() {
+    func showHUD(on screen: NSScreen) {
         guard hud == nil else { return }
         let view = MarkupHUDView(
             model: hudModel,
@@ -108,8 +135,7 @@ final class MarkupOverlayController: NSObject {
         )
         let hosting = FirstMouseHostingView(rootView: view)
         let size = hosting.fittingSize
-        let screen = NSScreen.main ?? NSScreen.screens.first
-        let visible = screen?.visibleFrame ?? .zero
+        let visible = screen.visibleFrame
         let panel = NSPanel(
             contentRect: CGRect(
                 x: visible.midX - size.width / 2,
@@ -214,7 +240,7 @@ private struct MarkupHUDView: View {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(model.isDrawing ? MarkupHUDStyle.accent : Color.white.opacity(0.12))
                 )
-            Text(model.isDrawing ? "Drawing" : "hold to draw · click to mark")
+            Text(model.isDrawing ? "Move to draw · click to pin or remove" : "hold to draw · scroll clears")
                 .font(.system(size: 12))
                 .foregroundColor(MarkupHUDStyle.secondary)
         }
@@ -319,12 +345,12 @@ private final class MarkupCanvasWindow: NSPanel {
 }
 
 private final class MarkupCanvasView: NSView {
-    var onStrokeBegan: ((CGPoint) -> Void)?
-    var onStrokeMoved: ((CGPoint) -> Void)?
-    var onStrokeEnded: (() -> Void)?
     var annotations: [MarkupAnnotation] = []
     var liveStroke: [CGPoint]?
     var isDrawingEnabled = false
+    /// Marks scrolled away, drawn at `fadeAlpha` until the fade finishes.
+    var fading: [MarkupAnnotation] = []
+    var fadeAlpha: CGFloat = 1
     private let screenOrigin: CGPoint
     private static let markColor = NSColor(red: 1, green: 0.23, blue: 0.19, alpha: 1)
     private static let badgeAttributes: [NSAttributedString.Key: Any] = [
@@ -342,38 +368,34 @@ private final class MarkupCanvasView: NSView {
         fatalError("init(coder:) is not supported")
     }
 
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-    override func mouseDown(with event: NSEvent) {
-        onStrokeBegan?(globalPoint(event))
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        onStrokeMoved?(globalPoint(event))
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        onStrokeEnded?()
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         if isDrawingEnabled {
             drawDrawingModeFrame()
         }
-        for annotation in annotations {
-            switch annotation.kind {
-            case .stroke:
-                annotation.strokes.forEach(strokeSmoothed)
-            case .click:
-                annotation.strokes.flatMap { $0 }.forEach(drawClickRing)
-            }
-            let bounds = annotation.bounds
-            if !bounds.isNull {
-                drawBadge(annotation.number, at: localPoint(CGPoint(x: bounds.maxX, y: bounds.maxY)))
-            }
+        annotations.forEach(drawAnnotation)
+        if !fading.isEmpty, fadeAlpha > 0, let context = NSGraphicsContext.current?.cgContext {
+            context.saveGState()
+            context.setAlpha(fadeAlpha)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+            fading.forEach(drawAnnotation)
+            context.endTransparencyLayer()
+            context.restoreGState()
         }
         if let liveStroke {
             strokeSmoothed(liveStroke)
+        }
+    }
+
+    private func drawAnnotation(_ annotation: MarkupAnnotation) {
+        switch annotation.kind {
+        case .stroke:
+            annotation.strokes.forEach(strokeSmoothed)
+        case .click:
+            annotation.strokes.flatMap { $0 }.forEach(drawClickRing)
+        }
+        let bounds = annotation.bounds
+        if !bounds.isNull {
+            drawBadge(annotation.number, at: localPoint(CGPoint(x: bounds.maxX, y: bounds.maxY)))
         }
     }
 
@@ -444,11 +466,6 @@ private final class MarkupCanvasView: NSView {
         let label = NSAttributedString(string: "\(number)", attributes: Self.badgeAttributes)
         let size = label.size()
         label.draw(at: CGPoint(x: center.x - size.width / 2, y: center.y - size.height / 2))
-    }
-
-    private func globalPoint(_ event: NSEvent) -> CGPoint {
-        let local = convert(event.locationInWindow, from: nil)
-        return CGPoint(x: local.x + screenOrigin.x, y: local.y + screenOrigin.y)
     }
 
     private func localPoint(_ point: CGPoint) -> CGPoint {

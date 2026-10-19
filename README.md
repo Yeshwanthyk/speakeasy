@@ -12,7 +12,7 @@
 - **Fast.** On an M4 Pro, the default model transcribes a short clip in about 20 ms once loaded.
 - **Recoverable.** Each transcript is saved before it is pasted. If a paste fails, copy or paste it again from the menu bar.
 - **Corrections.** Add replacements like "cube control → kubectl". They apply to every dictation after you save them.
-- **Show, don't describe.** While dictating, hold **Shift** and draw on the screen to mark what you are talking about; once you have drawn, clicks count as marks too. When you stop, Speakeasy copies a contact sheet of cropped, numbered screenshots plus your transcript split per mark (`#1 (0:05) "…"`), ready to paste into a coding agent. Turn it on from the menu with **Enable Draw While Dictating…** (macOS 14+, needs Screen Recording access). Without a mark, dictation works as before.
+- **Show, don't describe.** While dictating, hold **Shift** and move the pointer to draw on the screen, or Shift-click to pin a point; Shift-click a mark to remove it. Clicks and scrolls still reach your apps, and scrolling fades the marks so they never sit on the wrong content. When you stop, Speakeasy pastes your transcript split per mark (`#1 (0:05) "…"`) into the front app, with the path to a contact sheet of cropped screenshots that carry the same number and time, so a coding agent can open it. Turn it on from the menu with **Enable Draw While Dictating…** (macOS 14+, needs Screen Recording access). Without a mark, dictation works as before.
 
 ## Models
 

@@ -333,7 +333,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         if let isMarkupEnabled {
             if isMarkupEnabled() {
-                let hint = NSMenuItem(title: "Hold ⇧ and draw while dictating to mark up the screen", action: nil, keyEquivalent: "")
+                let hint = NSMenuItem(title: "While dictating, hold ⇧ and move the pointer to mark up the screen", action: nil, keyEquivalent: "")
                 hint.isEnabled = false
                 hint.image = Self.symbol("scribble", accessibilityDescription: "Markup")
                 menu.addItem(hint)
