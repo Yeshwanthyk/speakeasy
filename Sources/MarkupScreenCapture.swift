@@ -3,18 +3,18 @@ import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
-enum ScrawlScreenCaptureError: Error, Equatable {
+enum MarkupScreenCaptureError: Error, Equatable {
     case displayUnavailable
 }
 
 /// Still captures of one display, excluding Speakeasy's own overlay windows
-/// so marks are drawn by `ScrawlRenderer` instead of screenshotted.
+/// so marks are drawn by `MarkupRenderer` instead of screenshotted.
 @available(macOS 14.0, *)
-final class ScrawlScreenCapturer: @unchecked Sendable {
+final class MarkupScreenCapturer: @unchecked Sendable {
     func capture(displayID: CGDirectDisplayID) async throws -> CGImage {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-            throw ScrawlScreenCaptureError.displayUnavailable
+            throw MarkupScreenCaptureError.displayUnavailable
         }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let ownApplications = content.applications.filter { $0.processID == ownPID }
@@ -30,7 +30,7 @@ final class ScrawlScreenCapturer: @unchecked Sendable {
     }
 }
 
-enum ScrawlScreenAccess {
+enum MarkupScreenAccess {
     static func hasPermission() -> Bool {
         CGPreflightScreenCaptureAccess()
     }
@@ -44,10 +44,10 @@ enum ScrawlScreenAccess {
 
 /// Finds the frontmost normal window under a point without needing a
 /// screen capture, so the crop can follow the app that was marked.
-enum ScrawlWindowLocator {
+enum MarkupWindowLocator {
     private static let minimumSide: CGFloat = 80
 
-    static func target(at point: CGPoint) -> ScrawlTarget? {
+    static func target(at point: CGPoint) -> MarkupTarget? {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
@@ -73,14 +73,14 @@ enum ScrawlWindowLocator {
             )
             guard frame.contains(point) else { continue }
             let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-            return ScrawlTarget(frame: frame, ownerName: owner)
+            return MarkupTarget(frame: frame, ownerName: owner)
         }
         return nil
     }
 }
 
 extension NSScreen {
-    var scrawlDisplayID: CGDirectDisplayID? {
+    var markupDisplayID: CGDirectDisplayID? {
         (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 }

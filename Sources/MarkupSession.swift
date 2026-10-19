@@ -2,12 +2,12 @@ import AppKit
 import Foundation
 import os
 
-/// Turns a dictation into a scrawl: while fn is recording, holding Shift and
+/// Turns a dictation into a markup: while fn is recording, holding Shift and
 /// drawing (or clicking after the first drawing) adds numbered marks. On
 /// stop, each mark becomes a cropped keyframe on a contact sheet and the
 /// transcript is split per mark, then both go to the clipboard.
 @MainActor
-final class ScrawlSessionController: AnnotationRecordingObserving {
+final class MarkupSessionController: AnnotationRecordingObserving {
     struct Actions {
         let currentOffset: () -> Int?
         let commitMark: (Int) -> Bool
@@ -33,14 +33,14 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
     private static let strokeMergeInterval: TimeInterval = 1.2
     private static let doubleClickInterval: TimeInterval = 0.35
 
-    private let logger = Logger(subsystem: "com.speakeasy.app", category: "scrawl")
+    private let logger = Logger(subsystem: "com.speakeasy.app", category: "markup")
     private let actions: Actions
     private var phase: Phase = .idle
-    private var overlay: ScrawlOverlayController?
+    private var overlay: MarkupOverlayController?
     private var hudTimer: Timer?
     private var levelSampler = LiveLevelSampler()
     private var recordingStartedAt = Date()
-    private var annotations: [ScrawlAnnotation] = []
+    private var annotations: [MarkupAnnotation] = []
     private var captures: [Int: Task<CGImage?, Never>] = [:]
     private var liveStroke: [CGPoint] = []
     private var liveStrokeOffset: Int?
@@ -53,10 +53,10 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
         self.actions = actions
     }
 
-    /// Scrawls need ScreenCaptureKit stills (macOS 14) and Screen Recording access.
+    /// Markups need ScreenCaptureKit stills (macOS 14) and Screen Recording access.
     static var isAvailable: Bool {
         guard #available(macOS 14.0, *) else { return false }
-        return ScrawlScreenAccess.hasPermission()
+        return MarkupScreenAccess.hasPermission()
     }
 
     // MARK: - AnnotationRecordingObserving
@@ -66,7 +66,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
         phase = .armed
         reset()
         recordingStartedAt = Date()
-        let overlay = ScrawlOverlayController()
+        let overlay = MarkupOverlayController()
         overlay.onStrokeBegan = { [weak self] point, screen in self?.strokeBegan(at: point, on: screen) }
         overlay.onStrokeMoved = { [weak self] point in self?.strokeMoved(to: point) }
         overlay.onStrokeEnded = { [weak self] in self?.strokeEnded() }
@@ -91,7 +91,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
         let pending = captures
         let duration = Date().timeIntervalSince(recordingStartedAt)
         closeOverlay()
-        actions.notify(.status("Building scrawl…"))
+        actions.notify(.status("Building markup…"))
 
         Task { [weak self] in
             var images: [Int: CGImage] = [:]
@@ -100,7 +100,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
             }
             let captured = images
             let output = await Task.detached(priority: .userInitiated) {
-                ScrawlBundleWriter.write(marks: marks, images: captured, result: result, duration: duration)
+                MarkupBundleWriter.write(marks: marks, images: captured, result: result, duration: duration)
             }.value
             self?.deliver(output)
         }
@@ -143,7 +143,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
            previous.kind == .stroke,
            previous.displayFrame == screen.frame {
             previous.strokes.append(stroke)
-            previous.target = ScrawlWindowLocator.target(at: center(of: previous.bounds)) ?? previous.target
+            previous.target = MarkupWindowLocator.target(at: center(of: previous.bounds)) ?? previous.target
             annotations[annotations.count - 1] = previous
             lastStrokeEndedAt = now
             capture(previous, on: screen)
@@ -151,7 +151,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
         }
 
         guard let offset, actions.commitMark(offset) else { return }
-        var annotation = ScrawlAnnotation(
+        var annotation = MarkupAnnotation(
             number: annotations.count + 1,
             kind: .stroke,
             sampleOffset: offset,
@@ -160,7 +160,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
             strokes: [stroke],
             target: nil
         )
-        annotation.target = ScrawlWindowLocator.target(at: center(of: annotation.bounds))
+        annotation.target = MarkupWindowLocator.target(at: center(of: annotation.bounds))
         add(annotation, on: screen)
         lastStrokeEndedAt = now
     }
@@ -177,20 +177,20 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
               actions.commitMark(offset) else {
             return
         }
-        let annotation = ScrawlAnnotation(
+        let annotation = MarkupAnnotation(
             number: annotations.count + 1,
             kind: .click,
             sampleOffset: offset,
             elapsed: now.timeIntervalSince(recordingStartedAt),
             displayFrame: screen.frame,
             strokes: [[point]],
-            target: ScrawlWindowLocator.target(at: point)
+            target: MarkupWindowLocator.target(at: point)
         )
         add(annotation, on: screen)
         render()
     }
 
-    private func add(_ annotation: ScrawlAnnotation, on screen: NSScreen) {
+    private func add(_ annotation: MarkupAnnotation, on screen: NSScreen) {
         annotations.append(annotation)
         capture(annotation, on: screen)
         if phase == .armed {
@@ -208,15 +208,15 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
         render()
     }
 
-    private func capture(_ annotation: ScrawlAnnotation, on screen: NSScreen) {
-        guard #available(macOS 14.0, *), let displayID = screen.scrawlDisplayID else { return }
+    private func capture(_ annotation: MarkupAnnotation, on screen: NSScreen) {
+        guard #available(macOS 14.0, *), let displayID = screen.markupDisplayID else { return }
         captures[annotation.number]?.cancel()
         let logger = logger
         captures[annotation.number] = Task {
             do {
-                return try await ScrawlScreenCapturer().capture(displayID: displayID)
+                return try await MarkupScreenCapturer().capture(displayID: displayID)
             } catch {
-                logger.error("Scrawl screenshot failed: \(String(describing: error))")
+                logger.error("Markup screenshot failed: \(String(describing: error))")
                 return nil
             }
         }
@@ -224,7 +224,7 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
 
     // MARK: - Delivery
 
-    private func deliver(_ output: ScrawlBundleWriter.Output) {
+    private func deliver(_ output: MarkupBundleWriter.Output) {
         phase = .idle
         reset()
         switch output {
@@ -236,10 +236,10 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
             }
             NSPasteboard.general.clearContents()
             guard NSPasteboard.general.writeObjects([item]) else {
-                actions.notify(.error("Scrawl saved, but the clipboard could not be updated"))
+                actions.notify(.error("Markup saved, but the clipboard could not be updated"))
                 return
             }
-            actions.notify(.status("Scrawl copied — paste it into your agent"))
+            actions.notify(.status("Markup copied — paste it into your agent"))
         case .failure(let message):
             actions.notify(.error(message))
         }
@@ -301,9 +301,9 @@ final class ScrawlSessionController: AnnotationRecordingObserving {
     }
 }
 
-/// Writes a scrawl bundle under Application Support and returns the text and
+/// Writes a markup bundle under Application Support and returns the text and
 /// contact sheet to copy. Audio is never written to disk.
-enum ScrawlBundleWriter {
+enum MarkupBundleWriter {
     enum Output {
         case success(text: String, contactSheet: Data?)
         case failure(String)
@@ -319,7 +319,7 @@ enum ScrawlBundleWriter {
     }()
 
     static func write(
-        marks: [ScrawlAnnotation],
+        marks: [MarkupAnnotation],
         images: [Int: CGImage],
         result: Result<AnnotationTranscript, AnnotationCaptureError>,
         duration: TimeInterval
@@ -339,17 +339,17 @@ enum ScrawlBundleWriter {
         do {
             directory = try makeDirectory()
         } catch {
-            return .failure("Scrawl could not be saved")
+            return .failure("Markup could not be saved")
         }
         let framesDirectory = directory.appendingPathComponent("frames", isDirectory: true)
 
         var tiles: [CGImage] = []
-        var items: [ScrawlSummary.Item] = []
+        var items: [MarkupSummary.Item] = []
         do {
             try FileManager.default.createDirectory(at: framesDirectory, withIntermediateDirectories: true)
             for (index, mark) in marks.enumerated() {
                 let segment = index + 1 < transcript.segments.count ? transcript.segments[index + 1] : ""
-                items.append(ScrawlSummary.Item(
+                items.append(MarkupSummary.Item(
                     number: mark.number,
                     elapsed: mark.elapsed,
                     wasClick: mark.kind == .click,
@@ -357,29 +357,29 @@ enum ScrawlBundleWriter {
                     transcript: segment
                 ))
                 guard let image = images[mark.number],
-                      let annotated = ScrawlRenderer.annotate(image, annotation: mark) else {
+                      let annotated = MarkupRenderer.annotate(image, annotation: mark) else {
                     continue
                 }
-                if let png = ScrawlRenderer.pngData(annotated) {
+                if let png = MarkupRenderer.pngData(annotated) {
                     let name = String(format: "frame-%02d.png", mark.number)
                     try png.write(to: framesDirectory.appendingPathComponent(name), options: .atomic)
                 }
                 let container = mark.target.map { $0.frame.intersection(mark.displayFrame) } ?? mark.displayFrame
-                let crop = ScrawlCropPlanner.crop(
+                let crop = MarkupCropPlanner.crop(
                     mark: mark.bounds,
                     container: container.isNull || container.isEmpty ? mark.displayFrame : container
                 )
-                if let tile = ScrawlRenderer.crop(annotated, displayFrame: mark.displayFrame, to: crop) {
+                if let tile = MarkupRenderer.crop(annotated, displayFrame: mark.displayFrame, to: crop) {
                     tiles.append(tile)
                 }
             }
         } catch {
-            return .failure("Scrawl frames could not be saved")
+            return .failure("Markup frames could not be saved")
         }
 
         var contactSheet: Data?
         var contactSheetPath: String?
-        if let sheet = ScrawlRenderer.contactSheet(tiles), let png = ScrawlRenderer.pngData(sheet) {
+        if let sheet = MarkupRenderer.contactSheet(tiles), let png = MarkupRenderer.pngData(sheet) {
             let url = directory.appendingPathComponent("contact-sheet.png")
             if (try? png.write(to: url, options: .atomic)) != nil {
                 contactSheet = png
@@ -387,7 +387,7 @@ enum ScrawlBundleWriter {
             }
         }
 
-        let text = ScrawlSummary.text(
+        let text = MarkupSummary.text(
             bundlePath: directory.path,
             contactSheetPath: contactSheetPath,
             duration: duration,
@@ -406,8 +406,8 @@ enum ScrawlBundleWriter {
         let identifier = Bundle.main.bundleIdentifier ?? "Speakeasy"
         let url = base
             .appendingPathComponent(identifier, isDirectory: true)
-            .appendingPathComponent("scrawls", isDirectory: true)
-            .appendingPathComponent("scrawl-\(directoryFormatter.string(from: Date()))", isDirectory: true)
+            .appendingPathComponent("markups", isDirectory: true)
+            .appendingPathComponent("markup-\(directoryFormatter.string(from: Date()))", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
@@ -422,7 +422,7 @@ enum ScrawlBundleWriter {
             return
         }
         let bundles = entries
-            .filter { $0.lastPathComponent.hasPrefix("scrawl-") }
+            .filter { $0.lastPathComponent.hasPrefix("markup-") }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
         for stale in bundles.dropFirst(retainedBundleCount) {
             try? FileManager.default.removeItem(at: stale)

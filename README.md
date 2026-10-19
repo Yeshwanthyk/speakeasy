@@ -8,7 +8,7 @@
 ## What it does
 
 - **Dictate anywhere.** Tap **fn** to start and stop, or hold it to talk. The text is pasted into the app you were using.
-- **Local.** Speech is transcribed on your Mac. Audio is not saved to disk or sent anywhere. The only network use is downloading the model. Scrawl screenshots stay in Application Support; only the 20 most recent are kept.
+- **Local.** Speech is transcribed on your Mac. Audio is not saved to disk or sent anywhere. The only network use is downloading the model. Markup screenshots stay in Application Support; only the 20 most recent are kept.
 - **Fast.** On an M4 Pro, the default model transcribes a short clip in about 20 ms once loaded.
 - **Recoverable.** Each transcript is saved before it is pasted. If a paste fails, copy or paste it again from the menu bar.
 - **Corrections.** Add replacements like "cube control → kubectl". They apply to every dictation after you save them.

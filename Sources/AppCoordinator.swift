@@ -77,7 +77,7 @@ final class AppCoordinator: @unchecked Sendable {
         case startingCapture(UUID)
         case recording
         case transcribing(UUID, runID: UInt64, didTimeOut: Bool, didCancel: Bool)
-        /// A scrawl session owns the microphone until it finishes or cancels.
+        /// A markup session owns the microphone until it finishes or cancels.
         case annotating(UUID)
     }
 
@@ -217,10 +217,10 @@ final class AppCoordinator: @unchecked Sendable {
     private let recordingFeedback: RecordingFeedbackPresenting
     private var recordingFeedbackGeneration: UInt64 = 0
     private var keyMonitor: DictationKeyMonitoring?
-    /// Recording offsets of scrawl marks made during the active recording.
-    /// Any mark turns the stop into a scrawl instead of a paste.
+    /// Recording offsets of marks made during the active recording.
+    /// Any mark turns the stop into a markup instead of a paste.
     private var annotationCuts: [Int] = []
-    /// Main-actor observer that draws marks and builds the scrawl bundle.
+    /// Main-actor observer that draws marks and builds the markup bundle.
     weak var annotationObserver: AnnotationRecordingObserving?
 
     var isRecording: Bool {
@@ -666,7 +666,7 @@ final class AppCoordinator: @unchecked Sendable {
             case .transcribing:
                 return .reject("Wait for transcription to finish")
             case .annotating:
-                return .reject("Finish the scrawl before switching models")
+                return .reject("Finish the markup before switching models")
             }
         }
 
@@ -889,7 +889,7 @@ final class AppCoordinator: @unchecked Sendable {
                 case .transcribing:
                     return .ignore(nil)
                 case .annotating:
-                    return .ignore("Finish the scrawl first")
+                    return .ignore("Finish the markup first")
                 }
 
             case .pushToTalkBegan:
@@ -915,7 +915,7 @@ final class AppCoordinator: @unchecked Sendable {
                 activeReplayLease = nil
                 switch state {
                 case .idle, .annotating:
-                    // The scrawl control bar owns cancelling its own session.
+                    // The markup control bar owns cancelling its own session.
                     return .ignore(nil)
                 case .startingCapture:
                     let trace = activeTrace
@@ -1040,7 +1040,7 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
-    // MARK: - Scrawl marks
+    // MARK: - Markup
 
     /// Current recording position (including pre-roll) for a mark that may
     /// still be discarded; nil when no recording is active.
@@ -1049,7 +1049,7 @@ final class AppCoordinator: @unchecked Sendable {
         return audioCapture.recordingSampleCount()
     }
 
-    /// Registers a mark; once any mark exists the stop builds a scrawl.
+    /// Registers a mark; once any mark exists the stop builds a markup.
     func commitAnnotationMark(at offset: Int) -> Bool {
         stateLock.withLock {
             guard case .recording = state else { return false }
@@ -1097,12 +1097,12 @@ final class AppCoordinator: @unchecked Sendable {
         guard !capture.wasInterrupted else { return .failure(.interrupted) }
         let samples = capture.samples
         let (transcriber, postProcessor) = stateLock.withLock { (transcriber, transcriptPostProcessor) }
-        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy scrawl transcription")
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy markup transcription")
         defer { ProcessInfo.processInfo.endActivity(activity) }
 
         var segments: [String] = []
         var failedSegmentCount = 0
-        for range in ScrawlTranscriptCutter.ranges(cuts: cuts, samples: samples) {
+        for range in MarkupTranscriptCutter.ranges(cuts: cuts, samples: samples) {
             let segment = ContiguousArray(samples[range])
             guard segment.count >= Self.minActiveSamples, SpeechGate.analyze(segment).hasSpeech else {
                 segments.append("")
@@ -1129,7 +1129,7 @@ final class AppCoordinator: @unchecked Sendable {
                     segments.append(postProcessor.process(trimmed).finalText.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
             } catch {
-                logger.error("Scrawl segment transcription failed: \(String(describing: error))")
+                logger.error("Markup segment transcription failed: \(String(describing: error))")
                 failedSegmentCount += 1
                 segments.append("")
             }
@@ -1180,7 +1180,7 @@ final class AppCoordinator: @unchecked Sendable {
                     // token until its interrupted result releases that ownership.
                     return (false, false)
                 case .annotating:
-                    // Like transcribing: the scrawl's capture result reports
+                    // Like transcribing: the markup's capture result reports
                     // the interruption and still delivers its keyframes.
                     return (false, false)
                 }

@@ -4,7 +4,7 @@ import SwiftUI
 /// Full-screen transparent canvases plus a floating control bar. Mouse input
 /// passes through to apps until Shift is held, then strokes draw here.
 @MainActor
-final class ScrawlOverlayController: NSObject {
+final class MarkupOverlayController: NSObject {
     var onStrokeBegan: ((CGPoint, NSScreen) -> Void)?
     var onStrokeMoved: ((CGPoint) -> Void)?
     var onStrokeEnded: (() -> Void)?
@@ -13,8 +13,8 @@ final class ScrawlOverlayController: NSObject {
     var onCancel: (() -> Void)?
     var onFinish: (() -> Void)?
 
-    let hudModel = ScrawlHUDModel()
-    private var canvases: [ScrawlCanvasWindow] = []
+    let hudModel = MarkupHUDModel()
+    private var canvases: [MarkupCanvasWindow] = []
     private var hud: NSPanel?
     private var modifierTimer: Timer?
     private var clickMonitor: Any?
@@ -23,7 +23,7 @@ final class ScrawlOverlayController: NSObject {
 
     func show() {
         canvases = NSScreen.screens.map { screen in
-            let window = ScrawlCanvasWindow(screen: screen)
+            let window = MarkupCanvasWindow(screen: screen)
             window.canvas.onStrokeBegan = { [weak self] point in
                 self?.isStroking = true
                 self?.onStrokeBegan?(point, screen)
@@ -59,7 +59,7 @@ final class ScrawlOverlayController: NSObject {
         }
     }
 
-    func render(annotations: [ScrawlAnnotation], live: [CGPoint]?) {
+    func render(annotations: [MarkupAnnotation], live: [CGPoint]?) {
         for window in canvases {
             window.canvas.annotations = annotations
             window.canvas.liveStroke = live
@@ -97,10 +97,10 @@ final class ScrawlOverlayController: NSObject {
         }
     }
 
-    /// Shown once the recording becomes a scrawl; plain dictation never sees it.
+    /// Shown once the recording becomes a markup; plain dictation never sees it.
     func showHUD() {
         guard hud == nil else { return }
-        let view = ScrawlHUDView(
+        let view = MarkupHUDView(
             model: hudModel,
             undo: { [weak self] in self?.onUndo?() },
             cancel: { [weak self] in self?.onCancel?() },
@@ -134,7 +134,7 @@ final class ScrawlOverlayController: NSObject {
     }
 }
 
-final class ScrawlHUDModel: ObservableObject {
+final class MarkupHUDModel: ObservableObject {
     @Published var elapsed: TimeInterval = 0
     @Published var markCount = 0
     @Published var isDrawing = false
@@ -142,15 +142,15 @@ final class ScrawlHUDModel: ObservableObject {
 }
 
 /// Matches the recording pill: near-black capsule, hairline border, white type.
-private enum ScrawlHUDStyle {
+private enum MarkupHUDStyle {
     static let background = Color(red: 0.10, green: 0.11, blue: 0.13)
     static let border = Color.white.opacity(0.16)
     static let secondary = Color.white.opacity(0.55)
     static let accent = Color(red: 1, green: 0.23, blue: 0.19)
 }
 
-private struct ScrawlHUDView: View {
-    @ObservedObject var model: ScrawlHUDModel
+private struct MarkupHUDView: View {
+    @ObservedObject var model: MarkupHUDModel
     let undo: () -> Void
     let cancel: () -> Void
     let finish: () -> Void
@@ -159,7 +159,7 @@ private struct ScrawlHUDView: View {
         HStack(spacing: 12) {
             HStack(spacing: 8) {
                 RecordingDot()
-                Text(ScrawlSummary.timestamp(model.elapsed))
+                Text(MarkupSummary.timestamp(model.elapsed))
                     .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundColor(.white)
                 LevelBars(level: model.level)
@@ -172,7 +172,7 @@ private struct ScrawlHUDView: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(ScrawlHUDStyle.accent.opacity(0.85)))
+                    .background(Capsule().fill(MarkupHUDStyle.accent.opacity(0.85)))
                     .transition(.scale.combined(with: .opacity))
             }
             HUDDivider()
@@ -183,7 +183,7 @@ private struct ScrawlHUDView: View {
                     .help("Undo last mark")
                 Button(action: cancel) { Image(systemName: "xmark") }
                     .buttonStyle(HUDIconButtonStyle())
-                    .help("Discard this scrawl")
+                    .help("Discard this markup")
             }
             Button(action: finish) {
                 Text("Finish")
@@ -194,8 +194,8 @@ private struct ScrawlHUDView: View {
         .padding(.leading, 14)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .background(Capsule().fill(ScrawlHUDStyle.background))
-        .overlay(Capsule().strokeBorder(ScrawlHUDStyle.border, lineWidth: 1))
+        .background(Capsule().fill(MarkupHUDStyle.background))
+        .overlay(Capsule().strokeBorder(MarkupHUDStyle.border, lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
         .animation(.easeOut(duration: 0.15), value: model.markCount)
         .animation(.easeOut(duration: 0.15), value: model.isDrawing)
@@ -208,15 +208,15 @@ private struct ScrawlHUDView: View {
         HStack(spacing: 5) {
             Text("⇧")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(model.isDrawing ? .white : ScrawlHUDStyle.secondary)
+                .foregroundColor(model.isDrawing ? .white : MarkupHUDStyle.secondary)
                 .frame(minWidth: 18, minHeight: 18)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(model.isDrawing ? ScrawlHUDStyle.accent : Color.white.opacity(0.12))
+                        .fill(model.isDrawing ? MarkupHUDStyle.accent : Color.white.opacity(0.12))
                 )
             Text(model.isDrawing ? "Drawing" : "hold to draw · click to mark")
                 .font(.system(size: 12))
-                .foregroundColor(ScrawlHUDStyle.secondary)
+                .foregroundColor(MarkupHUDStyle.secondary)
         }
     }
 }
@@ -226,7 +226,7 @@ private struct RecordingDot: View {
 
     var body: some View {
         Circle()
-            .fill(ScrawlHUDStyle.accent)
+            .fill(MarkupHUDStyle.accent)
             .frame(width: 8, height: 8)
             .opacity(isDimmed ? 0.35 : 1)
             .onAppear {
@@ -257,7 +257,7 @@ private struct LevelBars: View {
 private struct HUDDivider: View {
     var body: some View {
         Rectangle()
-            .fill(ScrawlHUDStyle.border)
+            .fill(MarkupHUDStyle.border)
             .frame(width: 1, height: 16)
     }
 }
@@ -279,7 +279,7 @@ private struct HUDPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
-            .foregroundColor(ScrawlHUDStyle.background)
+            .foregroundColor(MarkupHUDStyle.background)
             .padding(.horizontal, 14)
             .frame(height: 28)
             .background(Capsule().fill(Color.white.opacity(configuration.isPressed ? 0.75 : 1)))
@@ -292,11 +292,11 @@ private final class FirstMouseHostingView<Content: View>: NSHostingView<Content>
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-private final class ScrawlCanvasWindow: NSPanel {
-    let canvas: ScrawlCanvasView
+private final class MarkupCanvasWindow: NSPanel {
+    let canvas: MarkupCanvasView
 
     init(screen: NSScreen) {
-        canvas = ScrawlCanvasView(screenOrigin: screen.frame.origin)
+        canvas = MarkupCanvasView(screenOrigin: screen.frame.origin)
         super.init(
             contentRect: screen.frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -318,11 +318,11 @@ private final class ScrawlCanvasWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-private final class ScrawlCanvasView: NSView {
+private final class MarkupCanvasView: NSView {
     var onStrokeBegan: ((CGPoint) -> Void)?
     var onStrokeMoved: ((CGPoint) -> Void)?
     var onStrokeEnded: (() -> Void)?
-    var annotations: [ScrawlAnnotation] = []
+    var annotations: [MarkupAnnotation] = []
     var liveStroke: [CGPoint]?
     var isDrawingEnabled = false
     private let screenOrigin: CGPoint
@@ -416,7 +416,7 @@ private final class ScrawlCanvasView: NSView {
 
     private func drawClickRing(_ point: CGPoint) {
         let center = localPoint(point)
-        let radius = ScrawlAnnotation.clickRadius
+        let radius = MarkupAnnotation.clickRadius
         let ring = NSBezierPath(ovalIn: CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
         NSColor.white.withAlphaComponent(0.55).setStroke()
         ring.lineWidth = 6

@@ -5,13 +5,13 @@ import ImageIO
 
 /// Draws marks onto screenshots and composes the contact sheet. Pure
 /// CoreGraphics, so it runs off the main thread.
-enum ScrawlRenderer {
+enum MarkupRenderer {
     private static let markColor = CGColor(red: 1, green: 0.23, blue: 0.19, alpha: 1)
     private static let haloColor = CGColor(gray: 1, alpha: 0.55)
     private static let sheetBackground = CGColor(gray: 0.11, alpha: 1)
 
     /// Returns `image` with `annotation` drawn in the display's pixel space.
-    static func annotate(_ image: CGImage, annotation: ScrawlAnnotation) -> CGImage? {
+    static func annotate(_ image: CGImage, annotation: MarkupAnnotation) -> CGImage? {
         let frame = annotation.displayFrame
         guard frame.width > 0, let context = makeContext(width: image.width, height: image.height) else {
             return nil
@@ -38,7 +38,7 @@ enum ScrawlRenderer {
                 }
             }
         case .click:
-            let radius = ScrawlAnnotation.clickRadius * scale
+            let radius = MarkupAnnotation.clickRadius * scale
             for point in annotation.strokes.flatMap({ $0 }) {
                 let center = pixel(point)
                 let ring = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)

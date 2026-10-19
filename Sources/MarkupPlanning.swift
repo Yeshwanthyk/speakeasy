@@ -1,9 +1,9 @@
 import CoreGraphics
 import Foundation
 
-/// One numbered mark made during a scrawl session. Points use global AppKit
+/// One numbered mark made during a markup session. Points use global AppKit
 /// screen coordinates (origin at the bottom-left of the primary display).
-struct ScrawlAnnotation: Equatable, Sendable {
+struct MarkupAnnotation: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
         case stroke
         case click
@@ -21,7 +21,7 @@ struct ScrawlAnnotation: Equatable, Sendable {
     let displayFrame: CGRect
     var strokes: [[CGPoint]]
     /// Frontmost window under the mark when it ended.
-    var target: ScrawlTarget?
+    var target: MarkupTarget?
 
     var bounds: CGRect {
         let points = strokes.flatMap { $0 }
@@ -44,14 +44,14 @@ struct ScrawlAnnotation: Equatable, Sendable {
 }
 
 /// The window a mark landed on, in global AppKit coordinates.
-struct ScrawlTarget: Equatable, Sendable {
+struct MarkupTarget: Equatable, Sendable {
     let frame: CGRect
     let ownerName: String
 }
 
 /// Splits one recording into speech before the first mark plus one span per
 /// mark. Cuts snap to the quietest nearby 20 ms frame so words stay whole.
-enum ScrawlTranscriptCutter {
+enum MarkupTranscriptCutter {
     static let frameSamples = 320
     static let snapRadiusSamples = 9_600
 
@@ -95,7 +95,7 @@ enum ScrawlTranscriptCutter {
 
 /// Chooses the region of a screenshot worth showing for one mark: the mark
 /// with generous context, kept inside the window it was drawn on.
-enum ScrawlCropPlanner {
+enum MarkupCropPlanner {
     static let padding: CGFloat = 160
     static let minimumSize = CGSize(width: 720, height: 450)
     /// Above this share of the container, show the whole container instead.
@@ -170,7 +170,7 @@ struct ContactSheetLayout: Equatable {
 }
 
 /// The text handed to an agent alongside the contact sheet.
-enum ScrawlSummary {
+enum MarkupSummary {
     struct Item: Equatable {
         let number: Int
         let elapsed: TimeInterval
@@ -193,7 +193,7 @@ enum ScrawlSummary {
         failedSegmentCount: Int
     ) -> String {
         let markWord = items.count == 1 ? "mark" : "marks"
-        var lines = ["[Speakeasy scrawl · \(timestamp(duration)) · \(items.count) \(markWord) · \(bundlePath)]"]
+        var lines = ["[Speakeasy markup · \(timestamp(duration)) · \(items.count) \(markWord) · \(bundlePath)]"]
         if let contactSheetPath {
             lines.append("Contact sheet: \(contactSheetPath) (numbered marks match the list below; full frames in frames/)")
         }
@@ -219,18 +219,18 @@ enum AnnotationCaptureError: Error, Equatable {
     case interrupted
 }
 
-/// Speech split at each scrawl mark.
+/// Speech split at each markup mark.
 struct AnnotationTranscript: Equatable, Sendable {
     /// `marks + 1` entries: speech before the first mark, then one per mark.
     let segments: [String]
     let failedSegmentCount: Int
 }
 
-/// Receives the dictation lifecycle so marks can turn a recording into a scrawl.
+/// Receives the dictation lifecycle so marks can turn a recording into a markup.
 @MainActor
 protocol AnnotationRecordingObserving: AnyObject {
     func annotationRecordingDidStart()
-    /// The recording ended without becoming a scrawl (normal stop, cancel, or interruption).
+    /// The recording ended without becoming a markup (normal stop, cancel, or interruption).
     func annotationRecordingDidEnd()
     func annotationRecordingDidFinish(_ result: Result<AnnotationTranscript, AnnotationCaptureError>)
 }
