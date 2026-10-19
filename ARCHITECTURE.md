@@ -19,6 +19,7 @@ Speakeasy is a menu-bar macOS app that captures microphone audio, transcribes it
 
 ```text
 idle -> startingCapture -> recording -> transcribing(token) -> idle
+                                    \-> annotating(id) -> idle   (when marks exist)
 ```
 
 Capture must confirm a running engine and a fresh converted input callback before `startingCapture` becomes `recording`. The token prevents stale timeout or transcription callbacks from completing a newer session. Warmup is tracked separately as `pending`, `warming`, `ready`, or `failed`; hotkeys are ignored until warmup reaches `ready` or `failed`.
@@ -35,6 +36,14 @@ The accepted transcript records per-stage change counts alongside the raw and de
 
 Every terminal outcome flows through `recordTerminal` into `E2ETraceStore`, an append-only JSONL log of per-pass records gated on mandatory milestones (successful deliveries require capture start, key-up, stop return, transcription start/end, and paste request). `E2ESummarizer` reports segment medians over successful insertions only, excluding user think-time by construction.
 Production creates `logs/dictation-e2e.jsonl` under its bundle-ID Application Support directory at coordinator startup and logs write errors. Each record includes the sleep-inclusive key-down idle gap since the last successful native inference, whether rewarm started during the pass, whether any rewarm was still in flight when finalization began, and native total/session-wait milliseconds when the bridge returned success. A cancelled or timed-out pass may not have native timings yet. The same fields appear in the terminal OSLog line.
+
+## Markups (draw while dictating)
+
+`MarkupSessionController` observes the dictation lifecycle through `AnnotationRecordingObserving`. When a recording starts and Screen Recording access exists (macOS 14+), it shows transparent, click-through `MarkupOverlayController` canvases on every display. Polling the global modifier state switches the canvases to accept mouse input while Shift is held. A stroke longer than 8 pt, or any click after the first stroke, commits a mark: the coordinator appends the current recording sample offset (including pre-roll) to `annotationCuts`, and `MarkupScreenCapturer` takes a ScreenCaptureKit still of that display excluding Speakeasy's own windows. A stroke starting within 1.2 s of the previous one extends that mark.
+
+If any cut exists when dictation stops, the coordinator enters `annotating(UUID)` instead of `transcribing`, cancels live preview and segment commit, ends the capture off-main, and splits the samples with `MarkupTranscriptCutter`: speech before the first mark, then one span per mark, each cut snapped to the quietest 20 ms frame within 600 ms. Each span goes through the speech gate, windowed final transcription, hallucination filter, and corrections. Dictation intents are ignored until the state returns to idle.
+
+`MarkupBundleWriter` then draws each mark onto its still (`MarkupRenderer`), crops it with `MarkupCropPlanner` to the mark plus context inside the window it landed on, packs the crops shortest-column-first (`ContactSheetLayout`), and writes `contact-sheet.png`, `frames/`, and `summary.md` under `Application Support/<bundle id>/markups/`. Only the 20 newest bundles are kept, and audio is never written. One pasteboard item carries both the summary text and the PNG. The text names the bundle path so terminal agents can open the files.
 
 ## Audio Capture
 

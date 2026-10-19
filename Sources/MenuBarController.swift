@@ -139,6 +139,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var settingsController: SettingsWindowController?
     /// Reopens first-run setup; the menu item is hidden when nil.
     var openSetupGuide: (() -> Void)?
+    /// Draw-while-dictating state; the markup menu row is hidden when nil.
+    var isMarkupEnabled: (() -> Bool)?
+    var enableMarkup: (() -> Void)?
 
     init(
         store: TranscriptStore,
@@ -328,6 +331,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+        if let isMarkupEnabled {
+            if isMarkupEnabled() {
+                let hint = NSMenuItem(title: "Hold ⇧ and draw while dictating to mark up the screen", action: nil, keyEquivalent: "")
+                hint.isEnabled = false
+                hint.image = Self.symbol("scribble", accessibilityDescription: "Markup")
+                menu.addItem(hint)
+            } else {
+                menu.addItem(actionItem(title: "Enable Draw While Dictating…", action: #selector(enableMarkupAction), symbol: "scribble"))
+            }
+        }
         let settings = actionItem(title: "Settings…", action: #selector(showSettings), symbol: "gearshape")
         settings.keyEquivalent = ","
         settings.keyEquivalentModifierMask = [.command]
@@ -485,6 +498,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func showSetupGuide() {
         openSetupGuide?()
+    }
+
+    @objc private func enableMarkupAction() {
+        enableMarkup?()
     }
 
     /// Opens the shortcut recorder, e.g. from first-run setup.

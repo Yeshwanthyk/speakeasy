@@ -77,6 +77,8 @@ final class AppCoordinator: @unchecked Sendable {
         case startingCapture(UUID)
         case recording
         case transcribing(UUID, runID: UInt64, didTimeOut: Bool, didCancel: Bool)
+        /// A markup session owns the microphone until it finishes or cancels.
+        case annotating(UUID)
     }
 
     /// Readiness of the transcription model.
@@ -103,6 +105,7 @@ final class AppCoordinator: @unchecked Sendable {
         case stop(UUID, UInt64, TranscriptionTrace, TranscriptDeliveryTarget)
         case discardCapture(TranscriptionTrace?, notify: Bool)
         case cancelTranscription(UInt64, TranscriptionTrace)
+        case finishAnnotation(UUID, cuts: [Int])
         case blocked(TranscriptionTrace, String)
         case ignore(String?)
     }
@@ -214,6 +217,11 @@ final class AppCoordinator: @unchecked Sendable {
     private let recordingFeedback: RecordingFeedbackPresenting
     private var recordingFeedbackGeneration: UInt64 = 0
     private var keyMonitor: DictationKeyMonitoring?
+    /// Recording offsets of marks made during the active recording.
+    /// Any mark turns the stop into a markup instead of a paste.
+    private var annotationCuts: [Int] = []
+    /// Main-actor observer that draws marks and builds the markup bundle.
+    weak var annotationObserver: AnnotationRecordingObserving?
 
     var isRecording: Bool {
         stateLock.withLock {
@@ -540,7 +548,7 @@ final class AppCoordinator: @unchecked Sendable {
         stateLock.withLock {
             guard !isShuttingDown else { return false }
             switch state {
-            case .idle:
+            case .idle, .annotating:
                 return false
             case .startingCapture, .recording, .transcribing:
                 return true
@@ -657,6 +665,8 @@ final class AppCoordinator: @unchecked Sendable {
                 return .reject("Stop recording before switching models")
             case .transcribing:
                 return .reject("Wait for transcription to finish")
+            case .annotating:
+                return .reject("Finish the markup before switching models")
             }
         }
 
@@ -828,6 +838,7 @@ final class AppCoordinator: @unchecked Sendable {
                     trace.idleGapSinceLastNativeInferenceMs = Double(nativeClock() - last) / 1_000_000
                 }
                 state = .startingCapture(captureID)
+                annotationCuts = []
                 activeTrace = trace
                 activeDeliveryTarget = deliveryTargetProvider.currentTarget()
                 return .start(captureID, trace, activeDeliveryTarget ?? .unavailable)
@@ -844,6 +855,15 @@ final class AppCoordinator: @unchecked Sendable {
             }
 
             func stop() -> Transition {
+                if !annotationCuts.isEmpty {
+                    let id = UUID()
+                    let cuts = annotationCuts.sorted()
+                    annotationCuts = []
+                    state = .annotating(id)
+                    activeTrace = nil
+                    activeDeliveryTarget = nil
+                    return .finishAnnotation(id, cuts: cuts)
+                }
                 let token = UUID()
                 let runID = nextRunID()
                 state = .transcribing(token, runID: runID, didTimeOut: false, didCancel: false)
@@ -868,6 +888,8 @@ final class AppCoordinator: @unchecked Sendable {
                     return stop()
                 case .transcribing:
                     return .ignore(nil)
+                case .annotating:
+                    return .ignore("Finish the markup first")
                 }
 
             case .pushToTalkBegan:
@@ -875,7 +897,7 @@ final class AppCoordinator: @unchecked Sendable {
                 switch state {
                 case .idle:
                     return start()
-                case .startingCapture, .recording, .transcribing:
+                case .startingCapture, .recording, .transcribing, .annotating:
                     return .ignore(nil)
                 }
 
@@ -884,7 +906,7 @@ final class AppCoordinator: @unchecked Sendable {
                 switch state {
                 case .recording:
                     return stop()
-                case .idle, .startingCapture, .transcribing:
+                case .idle, .startingCapture, .transcribing, .annotating:
                     return .ignore(nil)
                 }
 
@@ -892,7 +914,8 @@ final class AppCoordinator: @unchecked Sendable {
                 failedCaptureReplayBuffer.clear()
                 activeReplayLease = nil
                 switch state {
-                case .idle:
+                case .idle, .annotating:
+                    // The markup control bar owns cancelling its own session.
                     return .ignore(nil)
                 case .startingCapture:
                     let trace = activeTrace
@@ -944,6 +967,7 @@ final class AppCoordinator: @unchecked Sendable {
                 }
                 startLivePreviewLoop()
                 transitionRecordingFeedback(to: .recording)
+                notifyAnnotationObserver { $0.annotationRecordingDidStart() }
             } catch {
                 stateLock.withLock {
                     if case .startingCapture = state {
@@ -967,14 +991,26 @@ final class AppCoordinator: @unchecked Sendable {
             transitionRecordingFeedback(to: .processing)
             stateLock.withLock { segmentCommit?.beginStopping() }
             segmentQueue.sync {}
+            notifyAnnotationObserver { $0.annotationRecordingDidEnd() }
             // The commit worker keeps its capture until finalization joins it.
             stopAndTranscribe(token: token, runID: runID, trace: trace, target: target)
+
+        case .finishAnnotation(let id, let cuts):
+            if let rewarm = stateLock.withLock({ rewarmIsRunning ? rewarmRunID : nil }) {
+                stateLock.withLock { transcriber }.cancel(runID: rewarm)
+            }
+            stopLivePreviewLoop()
+            stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
+            segmentQueue.sync {}
+            transitionRecordingFeedback(to: .processing)
+            finishAnnotation(id: id, cuts: cuts)
 
         case .discardCapture(let trace, let notify):
             stopLivePreviewLoop()
             audioCapture.discardRecording()
             stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
             transitionRecordingFeedback(to: .hidden)
+            notifyAnnotationObserver { $0.annotationRecordingDidEnd() }
             if let trace {
                 recordTerminal(trace: trace, outcome: .cancelled)
             }
@@ -1002,6 +1038,103 @@ final class AppCoordinator: @unchecked Sendable {
             logger.info("Ignoring hotkey: \(message, privacy: .public)")
             feedback.notify(event: .error(message))
         }
+    }
+
+    // MARK: - Markup
+
+    /// Current recording position (including pre-roll) for a mark that may
+    /// still be discarded; nil when no recording is active.
+    func currentAnnotationOffset() -> Int? {
+        guard isRecording else { return nil }
+        return audioCapture.recordingSampleCount()
+    }
+
+    /// Registers a mark; once any mark exists the stop builds a markup.
+    func commitAnnotationMark(at offset: Int) -> Bool {
+        stateLock.withLock {
+            guard case .recording = state else { return false }
+            annotationCuts.append(offset)
+            return true
+        }
+    }
+
+    func removeLastAnnotationMark() {
+        stateLock.withLock {
+            guard case .recording = state else { return }
+            _ = annotationCuts.popLast()
+        }
+    }
+
+    private func notifyAnnotationObserver(_ body: @escaping @MainActor (AnnotationRecordingObserving) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let observer = self?.annotationObserver else { return }
+                body(observer)
+            }
+        }
+    }
+
+    private func finishAnnotation(id: UUID, cuts: [Int]) {
+        // `endRecording` waits on the grace window; keep it off-main.
+        transcriptionQueue.async { [weak self] in
+            guard let self else { return }
+            let capture = self.audioCapture.endRecording()
+            let result = self.transcribeAnnotationSegments(capture: capture, cuts: cuts)
+            self.stateLock.withLock {
+                if case .annotating(let current) = self.state, current == id {
+                    self.state = .idle
+                }
+            }
+            self.transitionRecordingFeedback(to: .hidden)
+            self.notifyAnnotationObserver { $0.annotationRecordingDidFinish(result) }
+        }
+    }
+
+    private func transcribeAnnotationSegments(
+        capture: AudioCaptureResult,
+        cuts: [Int]
+    ) -> Result<AnnotationTranscript, AnnotationCaptureError> {
+        guard !capture.wasInterrupted else { return .failure(.interrupted) }
+        let samples = capture.samples
+        let (transcriber, postProcessor) = stateLock.withLock { (transcriber, transcriptPostProcessor) }
+        let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy markup transcription")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+
+        var segments: [String] = []
+        var failedSegmentCount = 0
+        for range in MarkupTranscriptCutter.ranges(cuts: cuts, samples: samples) {
+            let segment = ContiguousArray(samples[range])
+            guard segment.count >= Self.minActiveSamples, SpeechGate.analyze(segment).hasSpeech else {
+                segments.append("")
+                continue
+            }
+            do {
+                let runID = stateLock.withLock { nextRunID() }
+                let (raw, _) = try FinalTranscription.run(
+                    samples: segment,
+                    transcriber: transcriber,
+                    runID: runID,
+                    isCancelled: { [weak self] in self?.stateLock.withLock { self?.isShuttingDown ?? true } ?? true }
+                )
+                stateLock.withLock { lastNativeInferenceAt = nativeClock() }
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                let verdict = hallucinationFilter.verdict(
+                    for: trimmed,
+                    activeDurationSeconds: Double(segment.count) / Self.transcriptionSampleRate,
+                    activeRMS: Self.rms(of: segment)
+                )
+                if trimmed.isEmpty || verdict != .accepted {
+                    segments.append("")
+                } else {
+                    segments.append(postProcessor.process(trimmed).finalText.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            } catch {
+                logger.error("Markup segment transcription failed: \(String(describing: error))")
+                failedSegmentCount += 1
+                segments.append("")
+            }
+        }
+        return .success(AnnotationTranscript(segments: segments, failedSegmentCount: failedSegmentCount))
     }
 
     /// Request cancellation of the active native transcription. The
@@ -1046,6 +1179,10 @@ final class AppCoordinator: @unchecked Sendable {
                     // `endRecording()` still owns the capture buffers. Keep the
                     // token until its interrupted result releases that ownership.
                     return (false, false)
+                case .annotating:
+                    // Like transcribing: the markup's capture result reports
+                    // the interruption and still delivers its keyframes.
+                    return (false, false)
                 }
             }
             guard interruption.shouldNotify else {
@@ -1055,6 +1192,7 @@ final class AppCoordinator: @unchecked Sendable {
                 stopLivePreviewLoop()
                 stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
                 transitionRecordingFeedback(to: .hidden)
+                notifyAnnotationObserver { $0.annotationRecordingDidEnd() }
             }
             logger.error("Recording interrupted by microphone configuration change")
             feedback.notify(event: .error("Recording interrupted by microphone change"))
@@ -1084,7 +1222,7 @@ final class AppCoordinator: @unchecked Sendable {
                     activeTrace = nil
                     activeDeliveryTarget = nil
                     return true
-                case .idle, .transcribing:
+                case .idle, .transcribing, .annotating:
                     return false
                 }
             }
@@ -1092,6 +1230,7 @@ final class AppCoordinator: @unchecked Sendable {
                 stopLivePreviewLoop()
                 stateLock.withLock { segmentCommit?.cancel(); segmentCommit = nil }
                 transitionRecordingFeedback(to: .hidden)
+                notifyAnnotationObserver { $0.annotationRecordingDidEnd() }
             }
             logger.error("Microphone reconnection failed")
             feedback.notify(event: .error("Microphone reconnection failed"))
