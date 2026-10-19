@@ -72,6 +72,7 @@ swiftc -O \
   -framework CoreAudio \
   -framework Carbon \
   -framework ApplicationServices \
+  -Xlinker -weak_framework -Xlinker ScreenCaptureKit \
   -L "$RUST_DIR/target/release" \
   -lasr_bridge \
   -Xlinker -rpath \

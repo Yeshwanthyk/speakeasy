@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeObserver: NSObjectProtocol?
     private var unlockObserver: NSObjectProtocol?
     private var onboardingController: OnboardingWindowController?
+    private var scrawlController: ScrawlSessionController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
@@ -58,6 +59,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         unlockObserver = DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
         ) { [weak coordinator] _ in coordinator?.rewarmIfIdle() }
+
+        let scrawlController = ScrawlSessionController(actions: .init(
+            currentOffset: { [weak coordinator] in coordinator?.currentAnnotationOffset() },
+            commitMark: { [weak coordinator] offset in coordinator?.commitAnnotationMark(at: offset) ?? false },
+            removeLastMark: { [weak coordinator] in coordinator?.removeLastAnnotationMark() },
+            finishRecording: { [weak coordinator] in coordinator?.handle(.toggle) },
+            cancelRecording: { [weak coordinator] in coordinator?.handle(.cancel) },
+            microphoneLevel: { [weak coordinator] in
+                coordinator?.microphoneLevelSnapshot() ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+            },
+            notify: { [feedback] event in feedback.notify(event: event) }
+        ))
+        coordinator.annotationObserver = scrawlController
+        self.scrawlController = scrawlController
 
             if let store = coordinator.transcriptStore {
                 let menuBarController = MenuBarController(
@@ -145,6 +160,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menuBarController?.showFeedback(event)
                 }
                 menuBarController.openSetupGuide = { [weak self] in self?.showOnboarding() }
+                menuBarController.isScrawlEnabled = { ScrawlSessionController.isAvailable }
+                menuBarController.enableScrawl = { [feedback] in
+                    guard #available(macOS 14.0, *) else {
+                        feedback.notify(event: .error("Drawing while dictating needs macOS 14 or later"))
+                        return
+                    }
+                    if !ScrawlScreenAccess.requestPermission() {
+                        feedback.notify(event: .status("Allow Screen Recording for Speakeasy, then relaunch it"))
+                    }
+                }
                 self.menuBarController = menuBarController
             }
         return coordinator
