@@ -671,7 +671,6 @@ mod tests {
     }
 }
 
-
 /// Per-utterance-length aggregation: joins sample records with their
 /// fixture buckets and aggregates each bucket separately, so latency
 /// growth as utterances grow is visible instead of blended into one
@@ -682,10 +681,7 @@ pub fn aggregate_by_bucket(
 ) -> BTreeMap<FixtureBucket, AggregateMetrics> {
     let mut bucket_by_fixture: HashMap<&str, FixtureBucket> = HashMap::new();
     for fixture in &corpus.fixtures {
-        bucket_by_fixture.insert(
-            fixture.definition.id.as_str(),
-            fixture.definition.bucket,
-        );
+        bucket_by_fixture.insert(fixture.definition.id.as_str(), fixture.definition.bucket);
     }
 
     let mut grouped: BTreeMap<FixtureBucket, Vec<Record>> = BTreeMap::new();

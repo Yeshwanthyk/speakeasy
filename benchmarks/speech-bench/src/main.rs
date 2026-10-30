@@ -177,7 +177,10 @@ fn run() -> Result<(), String> {
 }
 
 fn markdown_length_sweep(
-    sweep: &std::collections::BTreeMap<speech_bench::fixtures::FixtureBucket, speech_bench::metrics::AggregateMetrics>,
+    sweep: &std::collections::BTreeMap<
+        speech_bench::fixtures::FixtureBucket,
+        speech_bench::metrics::AggregateMetrics,
+    >,
 ) -> String {
     length_sweep(sweep)
 }

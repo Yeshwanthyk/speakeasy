@@ -16,7 +16,9 @@ fn sweep_cli_smoke() {
         };
         let mut writer = hound::WavWriter::create(wav_dir.join(name), spec).expect("create");
         for i in 0..frames {
-            writer.write_sample(((i % 16) * 500) as i16).expect("sample");
+            writer
+                .write_sample(((i % 16) * 500) as i16)
+                .expect("sample");
         }
         writer.finalize().expect("finalize");
     }
@@ -63,11 +65,9 @@ fn sweep_cli_smoke() {
     )
     .expect("write results");
 
-    let records =
-        speech_bench::runner::read_results(&results_path).expect("read results");
+    let records = speech_bench::runner::read_results(&results_path).expect("read results");
     let corpus = speech_bench::fixtures::Corpus::load(&manifest_path).expect("load corpus");
-    let sweep =
-        speech_bench::metrics::aggregate_by_bucket(&records, &corpus);
+    let sweep = speech_bench::metrics::aggregate_by_bucket(&records, &corpus);
     assert_eq!(sweep.len(), 2, "short and long buckets both present");
     assert_eq!(
         sweep[&speech_bench::fixtures::FixtureBucket::Short].samples_ok,

@@ -1083,7 +1083,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriptStore?.update(id: record.id, outcome: outcome.traceOutcome, timings: nil)
         guard outcome == .eventsPosted else { return false }
         // Runs after the paster restores the previous clipboard.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [paster] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PasteboardPaster.maximumSettleDelay + 0.25) { [paster] in
             _ = paster.copy(text)
         }
         return true

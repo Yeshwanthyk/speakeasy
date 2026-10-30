@@ -134,7 +134,6 @@ mod tests {
     }
 }
 
-
 /// Markdown table for the per-bucket length sweep.
 pub fn length_sweep(sweep: &BTreeMap<FixtureBucket, AggregateMetrics>) -> String {
     if sweep.is_empty() {
