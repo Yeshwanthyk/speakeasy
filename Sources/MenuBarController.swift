@@ -152,6 +152,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var correctionSuggestions: (() -> [LearnedSubstitution])?
     var acceptCorrectionSuggestion: ((LearnedSubstitution) async -> Bool)?
     var dismissCorrectionSuggestion: ((LearnedSubstitution) -> Void)?
+    /// Meeting recording; the menu section shows only when meetings are on.
+    var meetingController: MeetingController?
+    private var meetingWindowController: MeetingLiveWindowController?
 
     init(
         store: TranscriptStore,
@@ -340,6 +343,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
         }
 
+        if let meetingController, MeetingPreferences.isEnabled() {
+            menu.addItem(.separator())
+            addSectionTitle("Meetings", to: menu)
+            if let recording = meetingController.recording {
+                let elapsed = MeetingFormat.clock(Date().timeIntervalSince(recording.startedAt))
+                menu.addItem(actionItem(title: "Stop Recording Meeting · \(elapsed)", action: #selector(stopMeetingAction), symbol: "stop.circle"))
+            } else {
+                let start = actionItem(title: "Record Meeting", action: #selector(startMeetingAction), symbol: "record.circle")
+                start.isEnabled = !meetingController.isFinishing
+                menu.addItem(start)
+            }
+            menu.addItem(actionItem(title: "Show Meeting Transcript…", action: #selector(showMeetingTranscriptAction), symbol: "text.bubble"))
+            menu.addItem(actionItem(title: "All Meetings…", action: #selector(showMeetingsAction), symbol: "person.2"))
+        }
+
         menu.addItem(.separator())
         if let isMarkupEnabled {
             if isMarkupEnabled() {
@@ -481,6 +499,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         pasteTranscript(text)
     }
 
+    @objc private func startMeetingAction() {
+        meetingController?.start()
+        showMeetingTranscriptAction()
+    }
+
+    @objc private func stopMeetingAction() {
+        meetingController?.stop()
+    }
+
+    @objc private func showMeetingTranscriptAction() {
+        guard let meetingController else { return }
+        if meetingWindowController == nil {
+            meetingWindowController = MeetingLiveWindowController(controller: meetingController)
+        }
+        meetingWindowController?.present()
+    }
+
+    @objc private func showMeetingsAction() {
+        showSettings(page: .meetings)
+    }
+
     @objc private func undoLastPasteAction() {
         undoLastPaste?()
     }
@@ -537,6 +576,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSettings() {
+        showSettings(page: nil)
+    }
+
+    private func showSettings(page: SettingsPage?) {
+        if let page, settingsController != nil {
+            settingsController?.close()
+            settingsController = nil
+        }
         if settingsController == nil {
             let model = SettingsModel(
                 store: store,
@@ -564,7 +611,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                     dismiss: { [weak self] suggestion in self?.dismissCorrectionSuggestion?(suggestion) }
                 )
             )
-            settingsController = SettingsWindowController(model: model)
+            model.meetings = meetingController
+            settingsController = SettingsWindowController(model: model, initialPage: page ?? .general)
         }
         settingsController?.present()
     }

@@ -216,9 +216,15 @@ final class MeetingCoreTests: XCTestCase {
         XCTAssertEqual(library.manifests().map(\.id), [manifest.id])
         XCTAssertEqual(library.segments(meeting: manifest.id), [segment])
 
+        try Data().write(to: folder.appendingPathComponent("you-0002.wav"))
+        try Data().write(to: folder.appendingPathComponent("you-0001.wav"))
         library.recoverInterrupted(except: nil)
-        XCTAssertEqual(library.manifest(id: manifest.id)?.state, .interrupted)
-        XCTAssertEqual(library.manifest(id: manifest.id)?.endedAt, Date(timeIntervalSince1970: 1_002))
+        let recovered = library.manifest(id: manifest.id)
+        XCTAssertEqual(recovered?.state, .interrupted)
+        XCTAssertEqual(recovered?.endedAt, Date(timeIntervalSince1970: 1_002))
+        XCTAssertEqual(recovered?.chunks(for: .you), ["you-0001.wav", "you-0002.wav"])
+        let transcript = try String(contentsOf: library.transcriptURL(meeting: manifest.id), encoding: .utf8)
+        XCTAssertTrue(transcript.contains("**You** (0:01): hello"))
     }
 
     func testLibraryDeletesAudioButKeepsTheTranscript() throws {
@@ -259,5 +265,26 @@ final class MeetingCoreTests: XCTestCase {
             let value = data[offset..<offset + 2].withUnsafeBytes { $0.loadUnaligned(as: Int16.self).littleEndian }
             return Float(value) / Float(Int16.max)
         }
+    }
+}
+
+final class MeetingSummarizerTests: XCTestCase {
+    func testPromptLabelsSpeakersAndKeepsBothEndsOfLongMeetings() {
+        let segments = (0..<2_000).map {
+            MeetingSegment(track: $0.isMultiple(of: 2) ? .you : .them, start: Double($0) * 10, end: Double($0) * 10 + 5, text: "line \($0)")
+        }
+        let prompt = MeetingSummarizer.prompt(for: segments)
+
+        XCTAssertTrue(prompt.hasPrefix("You: line 0"))
+        XCTAssertTrue(prompt.contains("[…]"))
+        XCTAssertTrue(prompt.hasSuffix("line 1999"))
+        XCTAssertLessThanOrEqual(prompt.count, MeetingSummarizer.maximumTranscriptCharacters + 10)
+    }
+
+    func testTitleIsTheFirstLineWithoutMarkup() {
+        XCTAssertEqual(MeetingSummarizer.title(from: "**Title: Q3 planning**\n- Ship it"), "Q3 planning")
+        XCTAssertEqual(MeetingSummarizer.title(from: "# Hiring sync\n- one"), "Hiring sync")
+        XCTAssertNil(MeetingSummarizer.title(from: String(repeating: "long ", count: 40)))
+        XCTAssertNil(MeetingSummarizer.title(from: ""))
     }
 }

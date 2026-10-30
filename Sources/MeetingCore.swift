@@ -548,15 +548,26 @@ final class MeetingLibrary: @unchecked Sendable {
         try FileManager.default.removeItem(at: folder(for: id))
     }
 
-    /// Marks meetings left in `recording` by a crash as interrupted.
+    /// Marks meetings left in `recording` by a quit or crash as interrupted,
+    /// adopts the audio chunks already on disk, and writes their transcript.
     func recoverInterrupted(except activeID: UUID?) {
         for var manifest in manifests() where manifest.state == .recording && manifest.id != activeID {
+            let segments = segments(meeting: manifest.id)
             manifest.state = .interrupted
             if manifest.endedAt == nil {
-                let segments = segments(meeting: manifest.id)
                 manifest.endedAt = manifest.startedAt.addingTimeInterval(segments.map(\.end).max() ?? 0)
             }
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: folder(for: manifest.id).path)) ?? []
+            for track in MeetingTrack.allCases where manifest.chunks(for: track).isEmpty {
+                let chunks = files.filter { $0.hasPrefix(track.rawValue + "-") && $0.hasSuffix(".wav") }.sorted()
+                if !chunks.isEmpty { manifest.audioChunks[track.rawValue] = chunks }
+            }
             try? save(manifest)
+            let cleaned = MeetingEchoFilter.removingEchoes(segments)
+            try? writeTranscript(
+                MeetingFormat.markdown(manifest: manifest, segments: cleaned, notes: .extract(from: cleaned)),
+                meeting: manifest.id
+            )
         }
     }
 }

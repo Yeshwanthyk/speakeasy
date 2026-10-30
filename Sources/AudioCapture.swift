@@ -210,6 +210,10 @@ final class AudioCapture: @unchecked Sendable {
     private let stateLock = UnfairLock()
     private let stopTimingLock = UnfairLock()
 
+    /// Receives every converted 16 kHz callback (meeting recording).
+    private let sampleObserverLock = UnfairLock()
+    private var sampleObserver: ((UnsafeBufferPointer<Float>) -> Void)?
+
     private var frontBuffer = ContiguousArray<Float>()
     private var backBuffer = ContiguousArray<Float>()
     private var isRecording = false
@@ -374,6 +378,12 @@ final class AudioCapture: @unchecked Sendable {
 
     func microphoneLevelSnapshot() -> MicrophoneLevelSnapshot {
         levelPreview.latest()
+    }
+
+    /// Streams converted microphone audio to `observer` on the tap thread
+    /// until replaced; the observer must copy what it keeps.
+    func setSampleObserver(_ observer: ((UnsafeBufferPointer<Float>) -> Void)?) {
+        sampleObserverLock.withLock { sampleObserver = observer }
     }
 
     /// Rebuilds the graph on the system route so a changed Bluetooth
@@ -741,6 +751,9 @@ final class AudioCapture: @unchecked Sendable {
 
         if capturesSamples {
             levelPreview.publish(samples: samples)
+            if let observer = sampleObserverLock.withLock({ sampleObserver }) {
+                observer(samples)
+            }
         }
 
         var routeEvent: AudioCaptureEvent?

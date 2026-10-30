@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var unlockObserver: NSObjectProtocol?
     private var onboardingController: OnboardingWindowController?
     private var markupController: MarkupSessionController?
+    private var meetingController: MeetingController?
+    private var meetingOfferPresenter: MeetingOfferPresenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
@@ -74,6 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ))
         coordinator.annotationObserver = markupController
         self.markupController = markupController
+
+        let meetingController = MeetingController(dependencies: .init(
+            setMicrophoneObserver: { [weak coordinator] observer in coordinator?.setMeetingSampleObserver(observer) },
+            transcribe: { [weak coordinator] samples in coordinator?.transcribeMeetingSegment(samples) },
+            notify: { [feedback] event in feedback.notify(event: event) }
+        ))
+        self.meetingController = meetingController
+        meetingOfferPresenter = MeetingOfferPresenter(controller: meetingController)
 
             if let store = coordinator.transcriptStore {
                 let menuBarController = MenuBarController(
@@ -161,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menuBarController?.showFeedback(event)
                 }
                 menuBarController.openSetupGuide = { [weak self] in self?.showOnboarding() }
+                menuBarController.meetingController = meetingController
                 menuBarController.refreshMicrophoneRoute = { [weak coordinator] in
                     coordinator?.refreshSystemMicrophoneRoute()
                 }
@@ -267,6 +278,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
+        // A recording in progress keeps its chunks and segments on disk; the
+        // next launch marks it interrupted and writes its transcript.
+        coordinator?.setMeetingSampleObserver(nil)
         coordinator?.shutdown()
     }
 

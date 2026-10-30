@@ -121,6 +121,8 @@ final class SettingsModel: ObservableObject {
     let pasteTranscript: (String) -> Void
     private let refreshMicrophoneRoute: () -> Void
     private let correctionActions: SettingsCorrectionActions
+    /// Meeting recording and the meeting library; nil hides the page content.
+    var meetings: MeetingController?
 
     init(
         store: TranscriptStore,

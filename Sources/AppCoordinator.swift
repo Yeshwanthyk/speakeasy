@@ -30,6 +30,7 @@ protocol AudioCapturing {
 extension AudioCapturing {
     /// Re-resolves "System Default" after a routing preference changes.
     func refreshSystemRoute() {}
+    func setSampleObserver(_ observer: ((UnsafeBufferPointer<Float>) -> Void)?) {}
     func recordingSampleCount() -> Int { 0 }
     func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float> { [] }
 }
@@ -495,6 +496,38 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
         audioCapture.selectInputDevice(uid: uid)
+    }
+
+    // MARK: - Meetings
+
+    /// Meeting segments take run IDs from their own high-bit space so a
+    /// dictation cancel can never hit them.
+    private static let meetingRunIDFlag: UInt64 = 1 << 62
+    private var meetingRunSequence: UInt64 = 0
+
+    func setMeetingSampleObserver(_ observer: ((UnsafeBufferPointer<Float>) -> Void)?) {
+        audioCapture.setSampleObserver(observer)
+    }
+
+    /// Transcribes one meeting segment through the speech gate, the shared
+    /// model, the hallucination filter, and the user's corrections. Runs on
+    /// the caller's thread; the native session serializes it with dictation.
+    func transcribeMeetingSegment(_ samples: ContiguousArray<Float>) -> String? {
+        guard samples.count >= Self.minActiveSamples, SpeechGate.analyze(samples).hasSpeech else { return nil }
+        let (transcriber, postProcessor, runID) = stateLock.withLock { () -> (Transcriber, TranscriptPostProcessor, UInt64) in
+            meetingRunSequence &+= 1
+            return (transcriber, transcriptPostProcessor, Self.meetingRunIDFlag | meetingRunSequence)
+        }
+        guard let raw = try? transcriber.transcribe(samples: samples, runID: runID) else { return nil }
+        stateLock.withLock { lastNativeInferenceAt = nativeClock() }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let verdict = hallucinationFilter.verdict(
+            for: trimmed,
+            activeDurationSeconds: Double(samples.count) / Self.transcriptionSampleRate,
+            activeRMS: Self.rms(of: samples)
+        )
+        guard !trimmed.isEmpty, verdict == .accepted else { return nil }
+        return postProcessor.process(trimmed).finalText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Applies a changed Bluetooth preference when no microphone is pinned.

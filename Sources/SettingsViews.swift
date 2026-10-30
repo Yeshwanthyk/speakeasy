@@ -10,6 +10,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case model = "Model"
     case corrections = "Corrections"
     case history = "History"
+    case meetings = "Meetings"
     case advanced = "Advanced"
 
     var id: String { rawValue }
@@ -22,6 +23,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .model: return "cpu.fill"
         case .corrections: return "text.badge.checkmark"
         case .history: return "clock.fill"
+        case .meetings: return "person.2.fill"
         case .advanced: return "chart.bar.fill"
         }
     }
@@ -34,6 +36,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .model: return .purple
         case .corrections: return .green
         case .history: return .blue
+        case .meetings: return .teal
         case .advanced: return .orange
         }
     }
@@ -46,6 +49,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .model: return "Speech recognition runs entirely on this Mac."
         case .corrections: return "Fix words the model gets wrong, automatically."
         case .history: return "Everything you've dictated, kept on this Mac."
+        case .meetings: return "Record calls and keep transcripts of you and the other side."
         case .advanced: return "Your dictation stats, measured locally."
         }
     }
@@ -109,6 +113,12 @@ struct SettingsView: View {
         case .model: ModelPage(model: model)
         case .corrections: CorrectionsPage(model: model)
         case .history: HistoryPage(model: model, confirmClear: $confirmClear)
+        case .meetings:
+            if let meetings = model.meetings {
+                MeetingsPage(controller: meetings)
+            } else {
+                Text("Meetings are unavailable until Speakeasy finishes starting.").foregroundStyle(.secondary)
+            }
         case .advanced: AdvancedPage(summary: model.summary, insights: model.insights)
         }
     }
