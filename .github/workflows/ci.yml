@@ -20,7 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Swift tests
-        run: swift test 2>&1 | tee swift-test.log
+        # A crashed XCTest process can still exit 0 and skip every later
+        # suite, so require the top-level suite to report success.
+        run: |
+          swift test 2>&1 | tee swift-test.log
+          grep -q "Test Suite 'All tests' passed" swift-test.log
+          grep -E "Executed [0-9]+ tests" swift-test.log | tail -1
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@v4
