@@ -31,7 +31,7 @@ Requires an Apple Silicon Mac running macOS 12 or later.
 
 1. Download the latest `Speakeasy-*.zip` from [Releases](https://github.com/Yeshwanthyk/speakeasy/releases), unzip it, and move **Speakeasy** to Applications.
 2. Open it. macOS blocks the first launch because the app is not notarized. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
-3. Allow **Microphone** access. Allow **Accessibility** access so Speakeasy can paste.
+3. Allow **Microphone** access, **Accessibility** access so Speakeasy can paste, and **Input Monitoring** so it can see the fn key in every app. Setup walks through all three.
 
 > **After updating:** macOS may forget the Accessibility permission. If paste stops working, remove Speakeasy from **Privacy & Security → Accessibility** and add it again.
 

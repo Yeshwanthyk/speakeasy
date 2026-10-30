@@ -226,6 +226,9 @@ final class AppCoordinator: @unchecked Sendable {
     weak var annotationObserver: AnnotationRecordingObserving?
     /// The most recent automatic paste, undoable with the target's Command-Z.
     private var pasteUndoWindow = PasteUndoWindow()
+    /// How the latest dictation ended, for setup's practice step.
+    private var lastAttempt: DictationAttempt?
+    private var attemptSequence: UInt64 = 0
     /// Hand fixes made in History, counted to suggest correction rules.
     /// Loaded on first use and only touched on the main actor.
     private var loadedCorrectionTally: CorrectionTally?
@@ -412,6 +415,17 @@ final class AppCoordinator: @unchecked Sendable {
                 self.rewarmIsRunning = false
                 self.rewarmRunID = nil
             }
+        }
+    }
+
+    func latestAttempt() -> DictationAttempt? {
+        stateLock.withLock { lastAttempt }
+    }
+
+    private func noteAttempt(_ result: DictationAttemptResult) {
+        stateLock.withLock {
+            attemptSequence &+= 1
+            lastAttempt = DictationAttempt(sequence: attemptSequence, result: result)
         }
     }
 
@@ -1027,6 +1041,7 @@ final class AppCoordinator: @unchecked Sendable {
             if let trace {
                 recordTerminal(trace: trace, outcome: .cancelled)
             }
+            noteAttempt(.cancelled)
             if notify {
                 feedback.notify(event: .error("Recording cancelled"))
             }
@@ -1371,6 +1386,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard !captureResult.wasInterrupted else {
             commit?.cancel()
+            noteAttempt(.interrupted)
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .captureInterrupted)
                 feedback.notify(event: .error("Recording interrupted by microphone change"))
@@ -1392,6 +1408,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard activeSampleCount >= Self.minActiveSamples else {
             // Accidental taps are discarded silently; the outcome is still traced.
+            noteAttempt(.tooShort)
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
@@ -1404,6 +1421,7 @@ final class AppCoordinator: @unchecked Sendable {
                 "Speech gate rejected audio: rms=\(rms, format: .fixed(precision: 4)) floor=\(speech.noiseFloorRMS, format: .fixed(precision: 4)) voiced=\(speech.voicedFrameCount)/\(speech.analyzedFrameCount) longestRun=\(speech.longestVoicedRun)"
             )
             feedback.notify(event: .status("No speech detected"))
+            noteAttempt(.rejectedSpeech(rms: rms))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
@@ -1529,6 +1547,7 @@ final class AppCoordinator: @unchecked Sendable {
                     case .failure(let error):
                         self.retainFailedCapture(samples: samples, reason: .transcriptionFailed)
                         self.recordTerminal(trace: settledTrace, outcome: .transcriptionFailed)
+                        self.noteAttempt(.failed)
                         self.logger.error("Transcription failed: \(String(describing: error))")
                         self.feedback.notify(event: .error("Transcription failed"))
                         self.recordingFeedback.showError("Transcription failed")
@@ -1554,6 +1573,7 @@ final class AppCoordinator: @unchecked Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
+            noteAttempt(.noSpeech)
             feedback.notify(event: .status("No speech detected"))
             return
         }
@@ -1567,6 +1587,7 @@ final class AppCoordinator: @unchecked Sendable {
             logger.notice("Filtered transcript (\(String(describing: reason), privacy: .public))")
             trace.stageChanges = [StageChange(stage: "hallucinationFilter", count: 1)]
             recordTerminal(trace: trace, outcome: .noSpeech)
+            noteAttempt(.noSpeech)
             feedback.notify(event: .status("No speech detected"))
             return
         }
@@ -1576,6 +1597,7 @@ final class AppCoordinator: @unchecked Sendable {
         let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
+            noteAttempt(.noSpeech)
             feedback.notify(event: .status("No speech detected"))
             return
         }
@@ -1638,6 +1660,7 @@ final class AppCoordinator: @unchecked Sendable {
         let text = transcript.finalText
         guard accessibilityChecker.hasAccessibilityAccess() else {
             recordTerminal(trace: trace, outcome: .accessibilityDenied, text: text)
+            noteAttempt(.accessibilityDenied)
             if let recordID {
                 MainActor.assumeIsolated {
                     _ = transcriptStore?.update(
@@ -1663,6 +1686,7 @@ final class AppCoordinator: @unchecked Sendable {
             }
         }
         recordTerminal(trace: trace, outcome: outcome.traceOutcome, text: text)
+        noteAttempt(.delivered)
         if let recordID {
             MainActor.assumeIsolated {
                 _ = transcriptStore?.update(
@@ -1960,6 +1984,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriber.cancel(runID: cancellation.runID)
         stateLock.withLock { segmentCommit?.cancel(excluding: cancellation.runID) }
         recordTerminal(trace: trace, outcome: .timedOut)
+        noteAttempt(.failed)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
     }

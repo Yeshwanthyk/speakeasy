@@ -460,7 +460,7 @@ private struct MicrophonePage: View {
     }
 }
 
-private struct SettingsMicrophoneLevelView: View {
+struct SettingsMicrophoneLevelView: View {
     @ObservedObject var meter: SettingsMicrophoneMeter
     let shortcut: String
 

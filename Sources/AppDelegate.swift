@@ -221,6 +221,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             relaunch: { [weak self] in
                 self?.relaunch()
+            },
+            latestAttempt: { [weak self] in
+                self?.coordinator?.latestAttempt()
+            },
+            microphoneLevel: { [weak self] in
+                self?.coordinator?.microphoneLevelSnapshot() ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+            },
+            microphoneName: { [weak self] in
+                guard let coordinator = self?.coordinator else { return nil }
+                let uid = coordinator.selectedInputDeviceUID()
+                return coordinator.availableInputDevices().first { $0.uid == uid }?.name
             }
         ))
         let controller = OnboardingWindowController(model: model)
