@@ -152,6 +152,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var correctionSuggestions: (() -> [LearnedSubstitution])?
     var acceptCorrectionSuggestion: ((LearnedSubstitution) async -> Bool)?
     var dismissCorrectionSuggestion: ((LearnedSubstitution) -> Void)?
+    /// "Check for Updates…" appears only in Sparkle builds.
+    var softwareUpdater: SoftwareUpdater?
     /// Meeting recording; the menu section shows only when meetings are on.
     var meetingController: MeetingController?
     private var meetingWindowController: MeetingLiveWindowController?
@@ -376,6 +378,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if openSetupGuide != nil {
             menu.addItem(actionItem(title: "Setup Guide…", action: #selector(showSetupGuide), symbol: "sparkles"))
         }
+        if softwareUpdater?.isAvailable == true {
+            menu.addItem(actionItem(title: "Check for Updates…", action: #selector(checkForUpdatesAction), symbol: "arrow.down.circle"))
+        }
         let quit = NSMenuItem(
             title: "Quit Speakeasy",
             action: #selector(NSApplication.terminate(_:)),
@@ -497,6 +502,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func pasteHistoryItem(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
         pasteTranscript(text)
+    }
+
+    @objc private func checkForUpdatesAction() {
+        softwareUpdater?.checkForUpdates()
     }
 
     @objc private func startMeetingAction() {

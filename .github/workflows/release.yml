@@ -1,16 +1,32 @@
 name: Release
 
 # Push a tag that matches Info.plist, e.g. `git tag v0.4.1 && git push origin v0.4.1`.
+#
+# Optional repository secrets turn on signed, notarized, auto-updating builds:
+#   MACOS_CERTIFICATE_P12, MACOS_CERTIFICATE_PASSWORD  Developer ID Application certificate
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD        notarytool credentials
+#   SPARKLE_PUBLIC_KEY, SPARKLE_PRIVATE_KEY            Sparkle EdDSA keys (generate_keys)
+# Without them the release is ad-hoc signed, as before.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: checks
     runs-on: macos-15
+    permissions:
+      contents: write
+    env:
+      HAS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+      HAS_SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,22 +40,83 @@ jobs:
             exit 1
           fi
 
+      - name: Import Developer ID certificate
+        if: env.HAS_CERTIFICATE == 'true'
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          password="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/certificate.p12"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)"
+          echo "SPEAKEASY_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
       - name: Build
-        # No signing identity on the runner, so build.sh signs ad hoc.
+        # Without a certificate build.sh signs ad hoc.
+        env:
+          SPEAKEASY_SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
         run: ./build.sh
+
+      - name: Notarize
+        if: env.HAS_CERTIFICATE == 'true' && env.HAS_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ./script/notarize.sh build/Speakeasy.app
 
       - name: Package
         run: |
           ditto -c -k --keepParent build/Speakeasy.app "Speakeasy-$GITHUB_REF_NAME.zip"
           shasum -a 256 "Speakeasy-$GITHUB_REF_NAME.zip" > "Speakeasy-$GITHUB_REF_NAME.zip.sha256"
 
+      - name: Sign appcast
+        if: env.HAS_SPARKLE == 'true'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          zip="Speakeasy-$GITHUB_REF_NAME.zip"
+          signature="$(echo "$SPARKLE_PRIVATE_KEY" | build/vendor/sparkle/bin/sign_update --ed-key-file - "$zip")"
+          version="$(plutil -extract CFBundleVersion raw -o - build/Speakeasy.app/Contents/Info.plist)"
+          short="$(plutil -extract CFBundleShortVersionString raw -o - build/Speakeasy.app/Contents/Info.plist)"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$zip"
+          cat > appcast.xml <<XML
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>Speakeasy</title>
+              <item>
+                <title>Speakeasy $short</title>
+                <pubDate>$(date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+                <sparkle:version>$version</sparkle:version>
+                <sparkle:shortVersionString>$short</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
+                <enclosure url="$url" type="application/octet-stream" $signature/>
+              </item>
+            </channel>
+          </rss>
+          XML
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            "Speakeasy-$GITHUB_REF_NAME.zip" \
-            "Speakeasy-$GITHUB_REF_NAME.zip.sha256" \
+          assets=("Speakeasy-$GITHUB_REF_NAME.zip" "Speakeasy-$GITHUB_REF_NAME.zip.sha256")
+          if [[ -f appcast.xml ]]; then assets+=(appcast.xml); fi
+          if [[ "$HAS_CERTIFICATE" == "true" && "$HAS_NOTARY" == "true" ]]; then
+            notes="Apple Silicon only. Signed with Developer ID and notarized."
+          else
+            notes="Apple Silicon only. This build is not notarized: see the README's Install section for the one-time Open Anyway step."
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
             --title "Speakeasy $GITHUB_REF_NAME" \
             --generate-notes \
-            --notes "Apple Silicon only. This build is not notarized: see the README's Install section for the one-time Open Anyway step."
+            --notes "$notes"

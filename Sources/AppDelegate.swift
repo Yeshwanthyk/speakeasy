@@ -172,6 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 menuBarController.openSetupGuide = { [weak self] in self?.showOnboarding() }
                 menuBarController.meetingController = meetingController
+                menuBarController.softwareUpdater = SoftwareUpdater()
                 menuBarController.refreshMicrophoneRoute = { [weak coordinator] in
                     coordinator?.refreshSystemMicrophoneRoute()
                 }
