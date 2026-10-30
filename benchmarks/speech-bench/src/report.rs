@@ -114,26 +114,6 @@ fn format_number(value: Option<f64>) -> String {
         .unwrap_or_else(|| "n/a".into())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_calls_out_incomparable_results() {
-        let comparison = Comparison {
-            comparable: false,
-            candidate_key: Some("a".into()),
-            baseline_key: Some("b".into()),
-            passed: false,
-            failures: vec!["fingerprints differ".into()],
-        };
-        let output = markdown("Test", &AggregateMetrics::default(), Some(&comparison));
-
-        assert!(output.contains("**Incomparable.**"));
-        assert!(output.contains("fingerprints differ"));
-    }
-}
-
 /// Markdown table for the per-bucket length sweep.
 pub fn length_sweep(sweep: &BTreeMap<FixtureBucket, AggregateMetrics>) -> String {
     if sweep.is_empty() {
@@ -169,5 +149,25 @@ fn bucket_label(bucket: FixtureBucket) -> &'static str {
         FixtureBucket::Medium => "medium",
         FixtureBucket::Long => "long",
         FixtureBucket::Control => "control",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_calls_out_incomparable_results() {
+        let comparison = Comparison {
+            comparable: false,
+            candidate_key: Some("a".into()),
+            baseline_key: Some("b".into()),
+            passed: false,
+            failures: vec!["fingerprints differ".into()],
+        };
+        let output = markdown("Test", &AggregateMetrics::default(), Some(&comparison));
+
+        assert!(output.contains("**Incomparable.**"));
+        assert!(output.contains("fingerprints differ"));
     }
 }

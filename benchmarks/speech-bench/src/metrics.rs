@@ -561,6 +561,34 @@ fn check_upper_regression(
     }
 }
 
+/// Per-utterance-length aggregation: joins sample records with their
+/// fixture buckets and aggregates each bucket separately, so latency
+/// growth as utterances grow is visible instead of blended into one
+/// corpus-wide number.
+pub fn aggregate_by_bucket(
+    records: &[Record],
+    corpus: &Corpus,
+) -> BTreeMap<FixtureBucket, AggregateMetrics> {
+    let mut bucket_by_fixture: HashMap<&str, FixtureBucket> = HashMap::new();
+    for fixture in &corpus.fixtures {
+        bucket_by_fixture.insert(fixture.definition.id.as_str(), fixture.definition.bucket);
+    }
+
+    let mut grouped: BTreeMap<FixtureBucket, Vec<Record>> = BTreeMap::new();
+    for record in records {
+        if let Record::Sample(sample) = record {
+            if let Some(bucket) = bucket_by_fixture.get(sample.fixture_id.as_str()) {
+                grouped.entry(*bucket).or_default().push(record.clone());
+            }
+        }
+    }
+
+    grouped
+        .into_iter()
+        .map(|(bucket, records)| (bucket, aggregate(&records)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,32 +697,4 @@ mod tests {
         assert_eq!(long.wall_p50_ms, Some(1_000.0));
         assert_eq!(long.samples_ok, 3);
     }
-}
-
-/// Per-utterance-length aggregation: joins sample records with their
-/// fixture buckets and aggregates each bucket separately, so latency
-/// growth as utterances grow is visible instead of blended into one
-/// corpus-wide number.
-pub fn aggregate_by_bucket(
-    records: &[Record],
-    corpus: &Corpus,
-) -> BTreeMap<FixtureBucket, AggregateMetrics> {
-    let mut bucket_by_fixture: HashMap<&str, FixtureBucket> = HashMap::new();
-    for fixture in &corpus.fixtures {
-        bucket_by_fixture.insert(fixture.definition.id.as_str(), fixture.definition.bucket);
-    }
-
-    let mut grouped: BTreeMap<FixtureBucket, Vec<Record>> = BTreeMap::new();
-    for record in records {
-        if let Record::Sample(sample) = record {
-            if let Some(bucket) = bucket_by_fixture.get(sample.fixture_id.as_str()) {
-                grouped.entry(*bucket).or_default().push(record.clone());
-            }
-        }
-    }
-
-    grouped
-        .into_iter()
-        .map(|(bucket, records)| (bucket, aggregate(&records)))
-        .collect()
 }
