@@ -526,7 +526,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showMeetingsAction() {
-        showSettings(page: .meetings)
+        presentSettings(page: .meetings)
     }
 
     @objc private func undoLastPasteAction() {
@@ -585,11 +585,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSettings() {
-        showSettings(page: nil)
+        presentSettings(page: nil)
     }
 
-    private func showSettings(page: SettingsPage?) {
-        if let page, settingsController != nil {
+    private func presentSettings(page: SettingsPage?) {
+        if page != nil, settingsController != nil {
             settingsController?.close()
             settingsController = nil
         }
