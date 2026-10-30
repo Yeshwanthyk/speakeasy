@@ -830,12 +830,8 @@ final class AppCoordinator: @unchecked Sendable {
             livePreviewController: LivePreviewController(),
             transcriptCorrectionStore: correctionStore
         )
-        recordingFeedback.configureBottom(
-            mode: { [weak self] in self?.selectedInvocationMode() ?? .toggle },
-            selectMode: { [weak self] in self?.setInvocationMode($0) },
-            copyLast: { [weak self] in _ = self?.copyLastTranscript() },
-            pasteLast: { [weak self] in _ = self?.pasteLastTranscript() },
-            undoLast: { [weak self] in self?.undoLastCorrections() }
+        recordingFeedback.configure(
+            invocationMode: { [weak self] in self?.selectedInvocationMode() ?? .toggle }
         )
         onLivePreviewTextChange = { [weak recordingFeedback] in recordingFeedback?.updatePreview($0) }
     }

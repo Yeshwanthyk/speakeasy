@@ -250,22 +250,18 @@ private struct GeneralPage: View {
 
         SettingsCard(title: "Recording overlay") {
             HStack(spacing: 12) {
-                OverlayChoice(style: .bottomPill, isSelected: model.overlayStyle == .bottomPill) {
-                    model.chooseOverlayStyle(.bottomPill)
-                }
-                OverlayChoice(style: .topIndicator, isSelected: model.overlayStyle == .topIndicator) {
-                    model.chooseOverlayStyle(.topIndicator)
+                ForEach(OverlayStyle.allCases) { style in
+                    OverlayChoice(style: style, isSelected: model.overlayStyle == style) {
+                        model.chooseOverlayStyle(style)
+                    }
                 }
             }
             Divider()
             ToggleRow(
                 title: "Show live transcript",
-                detail: model.overlayStyle == .topIndicator
-                    ? "Available with the bottom pill overlay."
-                    : "Words appear in the pill as you speak.",
+                detail: "Your latest words in one line beside the indicator. Off by default.",
                 isOn: Binding(get: { model.showsLiveTranscript }, set: { model.chooseLiveTranscript($0) })
             )
-            .disabled(model.overlayStyle == .topIndicator)
         }
     }
 }
@@ -278,37 +274,14 @@ private struct OverlayChoice: View {
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 10) {
-                ZStack(alignment: style == .bottomPill ? .bottom : .top) {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(LinearGradient(
-                            colors: [Color.blue.opacity(0.35), Color.purple.opacity(0.3)],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        ))
-                    if style == .bottomPill {
-                        HStack(spacing: 6) {
-                            MiniWave(color: .white)
-                            Capsule().fill(Color.white.opacity(0.7)).frame(width: 46, height: 3)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(Color.black.opacity(0.75)))
-                        .padding(.bottom, 10)
-                    } else {
-                        MiniWave(color: .white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.black.opacity(0.85))
-                            )
-                    }
-                }
-                .frame(height: 84)
+                preview
+                    .frame(height: 84)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(style == .bottomPill ? "Bottom pill" : "Top indicator").font(.system(size: 13, weight: .semibold))
-                        Text(style == .bottomPill ? "Waveform with live text" : "Minimal, near the notch")
-                            .font(.caption).foregroundStyle(.secondary)
+                        Text(style.title).font(.system(size: 13, weight: .semibold))
+                        Text(style.detail).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                     SelectionMark(isSelected: isSelected)
@@ -319,19 +292,47 @@ private struct OverlayChoice: View {
         }
         .buttonStyle(.plain)
     }
-}
 
-private struct MiniWave: View {
-    let color: Color
-    private static let heights: [CGFloat] = [4, 8, 12, 7, 10, 5, 9, 4]
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(Self.heights.indices, id: \.self) { index in
-                Capsule().fill(color).frame(width: 2, height: Self.heights[index])
+    private var preview: some View {
+        ZStack(alignment: style == .top ? .top : .bottom) {
+            LinearGradient(
+                colors: [Color.blue.opacity(0.35), Color.purple.opacity(0.3)],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 9)
+                .frame(maxHeight: .infinity, alignment: .top)
+            switch style {
+            case .top:
+                MiniWave()
+                    .padding(.horizontal, 7)
+                    .frame(height: 11)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.black)
+                    )
+            case .bottom:
+                MiniWave()
+                    .padding(.horizontal, 7)
+                    .frame(height: 13)
+                    .background(Capsule().fill(Color.black.opacity(0.85)))
+                    .padding(.bottom, 10)
             }
         }
-        .frame(height: 12)
+    }
+}
+
+/// The indicator in miniature: a recording dot and four level bars.
+private struct MiniWave: View {
+    private static let heights: [CGFloat] = [3, 6, 7, 4]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle().fill(Color.red).frame(width: 4, height: 4)
+            HStack(spacing: 1.5) {
+                ForEach(Array(Self.heights.enumerated()), id: \.offset) { item in
+                    Capsule().fill(Color.white).frame(width: 1.5, height: item.element)
+                }
+            }
+        }
     }
 }
 

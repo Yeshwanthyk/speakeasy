@@ -182,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     coordinator?.canUndoLastPaste() ?? false
                 }
                 menuBarController.undoLastPaste = { [weak coordinator] in coordinator?.undoLastPaste() }
+                menuBarController.undoLastCorrections = { [weak coordinator] in coordinator?.undoLastCorrections() }
                 menuBarController.fixTranscript = { [weak coordinator] id, text in
                     coordinator?.fixTranscript(id: id, fixedText: text) ?? []
                 }
