@@ -38,6 +38,21 @@ final class SettingsMicrophoneMeter: ObservableObject {
     }
 }
 
+/// History fixes and the correction rules they suggest.
+struct SettingsCorrectionActions {
+    var fix: (UUID, String) -> [LearnedSubstitution]
+    var suggestions: () -> [LearnedSubstitution]
+    var accept: (LearnedSubstitution) async -> Bool
+    var dismiss: (LearnedSubstitution) -> Void
+
+    static let none = SettingsCorrectionActions(
+        fix: { _, _ in [] },
+        suggestions: { [] },
+        accept: { _ in false },
+        dismiss: { _ in }
+    )
+}
+
 @MainActor
 final class SettingsModel: ObservableObject {
     @Published private(set) var mode: DictationInvocationMode = .toggle
@@ -69,6 +84,16 @@ final class SettingsModel: ObservableObject {
     @Published var fuzzyCorrectionsEnabled = FuzzyCorrectionPreference.isEnabled {
         didSet { UserDefaults.standard.set(fuzzyCorrectionsEnabled, forKey: FuzzyCorrectionPreference.key) }
     }
+    @Published private(set) var correctionSuggestions: [LearnedSubstitution] = []
+    @Published var doubleTapLockEnabled = DoubleTapLockPreference.isEnabled() {
+        didSet { UserDefaults.standard.set(doubleTapLockEnabled, forKey: DoubleTapLockPreference.key) }
+    }
+    @Published var avoidsBluetoothMicrophone = BluetoothMicrophonePreference.isAvoidingBluetooth() {
+        didSet {
+            UserDefaults.standard.set(avoidsBluetoothMicrophone, forKey: BluetoothMicrophonePreference.key)
+            refreshMicrophoneRoute()
+        }
+    }
     @Published private(set) var summary: ProductivitySummary = DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
     @Published private(set) var insights: SettingsInsights = .empty
 
@@ -94,6 +119,10 @@ final class SettingsModel: ObservableObject {
     private(set) var isVisible = false
     let openCorrections: () -> Void
     let pasteTranscript: (String) -> Void
+    private let refreshMicrophoneRoute: () -> Void
+    private let correctionActions: SettingsCorrectionActions
+    /// Meeting recording and the meeting library; nil hides the page content.
+    var meetings: MeetingController?
 
     init(
         store: TranscriptStore,
@@ -114,8 +143,12 @@ final class SettingsModel: ObservableObject {
         pasteTranscript: @escaping (String) -> Void,
         levelSnapshot: @escaping () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) },
         frontmostApp: @escaping () -> NSRunningApplication? = { NSWorkspace.shared.frontmostApplication },
-        activateTarget: @escaping (NSRunningApplication) -> Bool = { $0.activate(options: [.activateIgnoringOtherApps]) }
+        activateTarget: @escaping (NSRunningApplication) -> Bool = { $0.activate(options: [.activateIgnoringOtherApps]) },
+        refreshMicrophoneRoute: @escaping () -> Void = {},
+        corrections: SettingsCorrectionActions = .none
     ) {
+        self.refreshMicrophoneRoute = refreshMicrophoneRoute
+        self.correctionActions = corrections
         self.store = store
         self.diagnosticsStore = diagnosticsStore
         self.currentMode = currentMode
@@ -157,6 +190,8 @@ final class SettingsModel: ObservableObject {
         let metrics = diagnosticsStore?.productivitySummary()
             ?? DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
         if summary != metrics { summary = metrics }
+        let suggestions = correctionActions.suggestions()
+        if correctionSuggestions != suggestions { correctionSuggestions = suggestions }
         let latestInsights = diagnosticsStore.map { SettingsInsights.make(document: $0.snapshot(), now: Date()) } ?? .empty
         if insights != latestInsights { insights = latestInsights }
     }
@@ -276,6 +311,25 @@ final class SettingsModel: ObservableObject {
 
     func retryModel() {
         if let failedModel { chooseModel(failedModel) }
+    }
+
+    /// Saves a hand-fixed transcript; repeated fixes surface as suggestions.
+    func fixTranscript(_ record: TranscriptRecord, text: String) {
+        correctionSuggestions = correctionActions.fix(record.id, text)
+        refresh()
+    }
+
+    func acceptSuggestion(_ suggestion: LearnedSubstitution) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.correctionActions.accept(suggestion)
+            self.refresh()
+        }
+    }
+
+    func dismissSuggestion(_ suggestion: LearnedSubstitution) {
+        correctionActions.dismiss(suggestion)
+        refresh()
     }
 
     func clearHistory() async -> Bool {

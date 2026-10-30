@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-tests:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift tests
+        # A crashed XCTest process can still exit 0 and skip every later
+        # suite, so require the top-level suite to report success.
+        run: |
+          swift test 2>&1 | tee swift-test.log
+          grep -q "Test Suite 'All tests' passed" swift-test.log
+          grep -E "Executed [0-9]+ tests" swift-test.log | tail -1
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-test-log
+          path: swift-test.log
+
+  app-build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # build.sh derives the build number from the commit count
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/asr_bridge/target
+          key: asr-bridge-${{ hashFiles('rust/asr_bridge/Cargo.lock') }}
+      - name: Build app bundle
+        # Compiles every Swift source, including the files `swift test` excludes.
+        run: ./build.sh
+      - name: Swift/Rust ABI smoke
+        run: ./script/test_asr_bridge_abi.sh
+      - name: Rust bridge tests
+        run: cargo test --locked --manifest-path rust/asr_bridge/Cargo.toml
+
+  app-build-sparkle:
+    # Proves the updater variant compiles, links, embeds, and signs. The key
+    # is a placeholder: releases inject the real one from a secret.
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/asr_bridge/target
+          key: asr-bridge-${{ hashFiles('rust/asr_bridge/Cargo.lock') }}
+      - name: Build app bundle with Sparkle
+        env:
+          SPEAKEASY_SPARKLE_PUBLIC_KEY: ci-placeholder-not-a-real-key
+        run: |
+          ./build.sh
+          test -d build/Speakeasy.app/Contents/Frameworks/Sparkle.framework
+          plutil -extract SUPublicEDKey raw -o - build/Speakeasy.app/Contents/Info.plist
+
+  bench-harness:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            benchmarks/speech-bench/target
+          key: speech-bench-${{ hashFiles('benchmarks/speech-bench/Cargo.lock') }}
+      - name: Benchmark harness tests (no model)
+        run: ./script/test_benchmark.sh

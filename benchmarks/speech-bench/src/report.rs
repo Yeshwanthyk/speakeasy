@@ -80,6 +80,33 @@ pub fn markdown(
             .map(|value| format!("{:.2}%", value * 100.0))
             .unwrap_or_else(|| "n/a".into()),
     );
+    row(
+        &mut output,
+        "Term recall",
+        metrics
+            .corpus_term_recall
+            .map(|value| {
+                format!(
+                    "{:.1}% ({}/{})",
+                    value * 100.0,
+                    metrics.corpus_terms_recalled,
+                    metrics.corpus_terms_expected
+                )
+            })
+            .unwrap_or_else(|| "n/a".into()),
+    );
+    row(
+        &mut output,
+        "False replacements",
+        if metrics.corpus_distractors > 0 {
+            format!(
+                "{} of {} distractors",
+                metrics.corpus_false_replacements, metrics.corpus_distractors
+            )
+        } else {
+            "n/a".into()
+        },
+    );
 
     if let Some(comparison) = comparison {
         writeln!(output, "\n## Baseline comparison\n").expect("write string");
@@ -113,27 +140,6 @@ fn format_number(value: Option<f64>) -> String {
         .map(|value| format!("{value:.3}"))
         .unwrap_or_else(|| "n/a".into())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_calls_out_incomparable_results() {
-        let comparison = Comparison {
-            comparable: false,
-            candidate_key: Some("a".into()),
-            baseline_key: Some("b".into()),
-            passed: false,
-            failures: vec!["fingerprints differ".into()],
-        };
-        let output = markdown("Test", &AggregateMetrics::default(), Some(&comparison));
-
-        assert!(output.contains("**Incomparable.**"));
-        assert!(output.contains("fingerprints differ"));
-    }
-}
-
 
 /// Markdown table for the per-bucket length sweep.
 pub fn length_sweep(sweep: &BTreeMap<FixtureBucket, AggregateMetrics>) -> String {
@@ -170,5 +176,25 @@ fn bucket_label(bucket: FixtureBucket) -> &'static str {
         FixtureBucket::Medium => "medium",
         FixtureBucket::Long => "long",
         FixtureBucket::Control => "control",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_calls_out_incomparable_results() {
+        let comparison = Comparison {
+            comparable: false,
+            candidate_key: Some("a".into()),
+            baseline_key: Some("b".into()),
+            passed: false,
+            failures: vec!["fingerprints differ".into()],
+        };
+        let output = markdown("Test", &AggregateMetrics::default(), Some(&comparison));
+
+        assert!(output.contains("**Incomparable.**"));
+        assert!(output.contains("fingerprints differ"));
     }
 }

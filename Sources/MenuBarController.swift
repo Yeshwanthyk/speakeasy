@@ -142,6 +142,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Draw-while-dictating state; the markup menu row is hidden when nil.
     var isMarkupEnabled: (() -> Bool)?
     var enableMarkup: (() -> Void)?
+    /// Re-applies the Bluetooth microphone preference to the system route.
+    var refreshMicrophoneRoute: (() -> Void)?
+    /// Undo of the last automatic paste; the menu row shows only while possible.
+    var canUndoLastPaste: (() -> Bool)?
+    var undoLastPaste: (() -> Void)?
+    /// History fixes and the correction rules they suggest.
+    var fixTranscript: ((UUID, String) -> [LearnedSubstitution])?
+    var correctionSuggestions: (() -> [LearnedSubstitution])?
+    var acceptCorrectionSuggestion: ((LearnedSubstitution) async -> Bool)?
+    var dismissCorrectionSuggestion: ((LearnedSubstitution) -> Void)?
+    /// "Check for Updates…" appears only in Sparkle builds.
+    var softwareUpdater: SoftwareUpdater?
+    /// Meeting recording; the menu section shows only when meetings are on.
+    var meetingController: MeetingController?
+    private var meetingWindowController: MeetingLiveWindowController?
 
     init(
         store: TranscriptStore,
@@ -330,6 +345,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             }
         }
 
+        if let meetingController, MeetingPreferences.isEnabled() {
+            menu.addItem(.separator())
+            addSectionTitle("Meetings", to: menu)
+            if let recording = meetingController.recording {
+                let elapsed = MeetingFormat.clock(Date().timeIntervalSince(recording.startedAt))
+                menu.addItem(actionItem(title: "Stop Recording Meeting · \(elapsed)", action: #selector(stopMeetingAction), symbol: "stop.circle"))
+            } else {
+                let start = actionItem(title: "Record Meeting", action: #selector(startMeetingAction), symbol: "record.circle")
+                start.isEnabled = !meetingController.isFinishing
+                menu.addItem(start)
+            }
+            menu.addItem(actionItem(title: "Show Meeting Transcript…", action: #selector(showMeetingTranscriptAction), symbol: "text.bubble"))
+            menu.addItem(actionItem(title: "All Meetings…", action: #selector(showMeetingsAction), symbol: "person.2"))
+        }
+
         menu.addItem(.separator())
         if let isMarkupEnabled {
             if isMarkupEnabled() {
@@ -347,6 +377,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(settings)
         if openSetupGuide != nil {
             menu.addItem(actionItem(title: "Setup Guide…", action: #selector(showSetupGuide), symbol: "sparkles"))
+        }
+        if softwareUpdater?.isAvailable == true {
+            menu.addItem(actionItem(title: "Check for Updates…", action: #selector(checkForUpdatesAction), symbol: "arrow.down.circle"))
         }
         let quit = NSMenuItem(
             title: "Quit Speakeasy",
@@ -423,6 +456,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func addHistoryActions(to menu: NSMenu) {
+        if canUndoLastPaste?() == true {
+            menu.addItem(actionItem(
+                title: "Undo Last Dictation",
+                action: #selector(undoLastPasteAction),
+                symbol: "arrow.uturn.backward"
+            ))
+        }
+
         let pasteLast = actionItem(
             title: "Paste Last Transcript",
             action: #selector(pasteLastTranscriptAction),
@@ -461,6 +502,35 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func pasteHistoryItem(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
         pasteTranscript(text)
+    }
+
+    @objc private func checkForUpdatesAction() {
+        softwareUpdater?.checkForUpdates()
+    }
+
+    @objc private func startMeetingAction() {
+        meetingController?.start()
+        showMeetingTranscriptAction()
+    }
+
+    @objc private func stopMeetingAction() {
+        meetingController?.stop()
+    }
+
+    @objc private func showMeetingTranscriptAction() {
+        guard let meetingController else { return }
+        if meetingWindowController == nil {
+            meetingWindowController = MeetingLiveWindowController(controller: meetingController)
+        }
+        meetingWindowController?.present()
+    }
+
+    @objc private func showMeetingsAction() {
+        presentSettings(page: .meetings)
+    }
+
+    @objc private func undoLastPasteAction() {
+        undoLastPaste?()
     }
 
     @objc private func copyLastTranscriptAction() {
@@ -515,6 +585,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func showSettings() {
+        presentSettings(page: nil)
+    }
+
+    private func presentSettings(page: SettingsPage?) {
+        if page != nil, settingsController != nil {
+            settingsController?.close()
+            settingsController = nil
+        }
         if settingsController == nil {
             let model = SettingsModel(
                 store: store,
@@ -533,9 +611,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 selectModel: selectASRModel,
                 openCorrections: { [weak self] in self?.showCorrections() },
                 pasteTranscript: pasteTranscript,
-                levelSnapshot: microphoneLevelSnapshot
+                levelSnapshot: microphoneLevelSnapshot,
+                refreshMicrophoneRoute: { [weak self] in self?.refreshMicrophoneRoute?() },
+                corrections: SettingsCorrectionActions(
+                    fix: { [weak self] id, text in self?.fixTranscript?(id, text) ?? [] },
+                    suggestions: { [weak self] in self?.correctionSuggestions?() ?? [] },
+                    accept: { [weak self] suggestion in await self?.acceptCorrectionSuggestion?(suggestion) ?? false },
+                    dismiss: { [weak self] suggestion in self?.dismissCorrectionSuggestion?(suggestion) }
+                )
             )
-            settingsController = SettingsWindowController(model: model)
+            model.meetings = meetingController
+            settingsController = SettingsWindowController(model: model, initialPage: page ?? .general)
         }
         settingsController?.present()
     }

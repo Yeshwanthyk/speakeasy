@@ -9,6 +9,9 @@ DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
 BUILD_ARCH="$(uname -m)"
 CLANG_RUNTIME_DIR="$(xcrun clang -print-runtime-dir)"
 SIGN_IDENTITY="${SPEAKEASY_SIGN_IDENTITY:-}"
+# Set to the EdDSA public key from Sparkle's generate_keys to build with the updater.
+SPARKLE_PUBLIC_KEY="${SPEAKEASY_SPARKLE_PUBLIC_KEY:-}"
+SPARKLE_FEED_URL="${SPEAKEASY_SPARKLE_FEED_URL:-https://github.com/Yeshwanthyk/speakeasy/releases/latest/download/appcast.xml}"
 
 if BUILD_VERSION_FROM_GIT=$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null); then
   :
@@ -63,6 +66,13 @@ install_name_tool -id @rpath/libasr_bridge.dylib "$RUST_DIR/target/release/libas
 
 mkdir -p "$BIN_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 
+SPARKLE_FLAGS=()
+if [[ -n "$SPARKLE_PUBLIC_KEY" ]]; then
+  SPARKLE_DIR="$BUILD_DIR/vendor/sparkle"
+  "$ROOT_DIR/script/fetch_sparkle.sh" "$SPARKLE_DIR"
+  SPARKLE_FLAGS=(-D SPEAKEASY_SPARKLE -F "$SPARKLE_DIR" -framework Sparkle)
+fi
+
 swiftc -O \
   -target "$BUILD_ARCH-apple-macosx$DEPLOYMENT_TARGET" \
   -import-objc-header "$RUST_DIR/include/asr_bridge.h" \
@@ -77,6 +87,7 @@ swiftc -O \
   -lasr_bridge \
   -Xlinker -rpath \
   -Xlinker @executable_path/../Frameworks \
+  ${SPARKLE_FLAGS[@]+"${SPARKLE_FLAGS[@]}"} \
   "$ROOT_DIR/Sources/"*.swift \
   -o "$BIN_DIR/$APP_NAME"
 
@@ -89,9 +100,36 @@ cp "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 plutil -replace CFBundleShortVersionString -string "$MARKETING_VERSION" "$STAGED_PLIST"
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$STAGED_PLIST"
 cp "$RUST_DIR/target/release/libasr_bridge.dylib" "$FRAMEWORKS_DIR/"
+if [[ -n "$SPARKLE_PUBLIC_KEY" ]]; then
+  ditto "$SPARKLE_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
+  plutil -replace SUFeedURL -string "$SPARKLE_FEED_URL" "$STAGED_PLIST"
+  plutil -replace SUPublicEDKey -string "$SPARKLE_PUBLIC_KEY" "$STAGED_PLIST"
+  plutil -replace SUEnableAutomaticChecks -bool YES "$STAGED_PLIST"
+fi
 
-codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$FRAMEWORKS_DIR/libasr_bridge.dylib"
-codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$STAGING_APP"
+# Developer ID builds use the hardened runtime and a secure timestamp so they
+# can be notarized; local and CI builds keep the fast unstamped signature.
+if [[ "$SIGN_IDENTITY" == "Developer ID Application:"* ]]; then
+  SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY" --timestamp --options runtime)
+else
+  SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY" --timestamp=none)
+fi
+# Sign inside-out: Sparkle's helpers, then the framework, dylib, and app.
+if [[ -d "$FRAMEWORKS_DIR/Sparkle.framework" ]]; then
+  SPARKLE_VERSION_DIR="$FRAMEWORKS_DIR/Sparkle.framework/Versions/B"
+  for helper in \
+    "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc" \
+    "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc" \
+    "$SPARKLE_VERSION_DIR/Autoupdate" \
+    "$SPARKLE_VERSION_DIR/Updater.app"; do
+    if [[ -e "$helper" ]]; then
+      codesign "${SIGN_FLAGS[@]}" "$helper"
+    fi
+  done
+  codesign "${SIGN_FLAGS[@]}" "$FRAMEWORKS_DIR/Sparkle.framework"
+fi
+codesign "${SIGN_FLAGS[@]}" "$FRAMEWORKS_DIR/libasr_bridge.dylib"
+codesign "${SIGN_FLAGS[@]}" --entitlements "$ROOT_DIR/Speakeasy.entitlements" "$STAGING_APP"
 "$ROOT_DIR/script/verify_bundle.sh" "$STAGING_APP"
 
 # Exchange same-filesystem bundles in one filesystem operation. When an old

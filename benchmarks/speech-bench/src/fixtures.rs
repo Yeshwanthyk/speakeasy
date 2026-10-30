@@ -39,6 +39,12 @@ pub struct Fixture {
     pub tags: Vec<String>,
     #[serde(default = "default_include_in_wer")]
     pub include_in_wer: bool,
+    /// Vocabulary that must appear in the transcript (term recall).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terms: Vec<String>,
+    /// Look-alike vocabulary that must not appear (false replacements).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distractors: Vec<String>,
 }
 
 fn default_include_in_wer() -> bool {
@@ -203,6 +209,17 @@ impl Fixture {
         if self.frames == 0 || self.duration_ms == 0 {
             return Err(format!(
                 "fixture {:?} frames and duration_ms must be greater than zero",
+                self.id
+            ));
+        }
+        if let Some(empty) = self
+            .terms
+            .iter()
+            .chain(&self.distractors)
+            .find(|term| term.trim().is_empty())
+        {
+            return Err(format!(
+                "fixture {:?} has an empty term or distractor {empty:?}",
                 self.id
             ));
         }
@@ -380,6 +397,8 @@ mod tests {
                 conditions: vec![],
                 tags: vec![],
                 include_in_wer: true,
+                terms: Vec::new(),
+                distractors: Vec::new(),
             }],
         };
         let manifest_path = directory.path().join("manifest.json");

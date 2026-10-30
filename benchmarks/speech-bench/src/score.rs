@@ -34,10 +34,57 @@ pub struct WordErrorScore {
 pub struct TranscriptScore {
     pub lexical: WordErrorScore,
     pub punctuation_sensitive: WordErrorScore,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<TermScore>,
+}
+
+/// Vocabulary accuracy for one sample. `terms` must appear in the
+/// transcript; `distractors` are look-alike terms that must not, so a
+/// correction or vocabulary change that fires on ordinary words is caught
+/// as a false replacement rather than hidden inside WER.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TermScore {
+    pub expected: u64,
+    pub recalled: u64,
+    pub distractors: u64,
+    pub false_replacements: u64,
+}
+
+/// Counts each term once when its lexical tokens appear contiguously.
+pub fn score_terms(hypothesis: &str, terms: &[String], distractors: &[String]) -> TermScore {
+    let tokens = normalize_lexical(hypothesis);
+    let contains = |phrase: &String| {
+        let needle = normalize_lexical(phrase);
+        !needle.is_empty()
+            && tokens
+                .windows(needle.len())
+                .any(|window| window == needle.as_slice())
+    };
+    TermScore {
+        expected: terms.len() as u64,
+        recalled: terms.iter().filter(|term| contains(term)).count() as u64,
+        distractors: distractors.len() as u64,
+        false_replacements: distractors.iter().filter(|term| contains(term)).count() as u64,
+    }
+}
+
+pub fn score_transcript_with_terms(
+    reference: &str,
+    hypothesis: &str,
+    terms: &[String],
+    distractors: &[String],
+) -> TranscriptScore {
+    let mut score = score_transcript(reference, hypothesis);
+    if !terms.is_empty() || !distractors.is_empty() {
+        score.terms = Some(score_terms(hypothesis, terms, distractors));
+    }
+    score
 }
 
 pub fn score_transcript(reference: &str, hypothesis: &str) -> TranscriptScore {
     TranscriptScore {
+        terms: None,
         lexical: score_tokens(
             &normalize_lexical(reference),
             &normalize_lexical(hypothesis),
@@ -170,6 +217,35 @@ fn edit_counts(reference: &[String], hypothesis: &[String]) -> EditCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn term_recall_counts_contiguous_case_insensitive_matches() {
+        let terms = vec!["kubectl".to_owned(), "GitHub Actions".to_owned()];
+        let score = score_terms("Run KUBECTL, then check github actions.", &terms, &[]);
+        assert_eq!(score.expected, 2);
+        assert_eq!(score.recalled, 2);
+
+        let partial = score_terms("run cube control then github", &terms, &[]);
+        assert_eq!(partial.recalled, 0);
+    }
+
+    #[test]
+    fn distractors_that_appear_are_false_replacements() {
+        let distractors = vec!["Postgres".to_owned()];
+        let wrong = score_terms("the post grass was cut", &[], &distractors);
+        assert_eq!(wrong.false_replacements, 0);
+        let fired = score_terms("the Postgres was cut", &[], &distractors);
+        assert_eq!(fired.false_replacements, 1);
+        assert_eq!(fired.distractors, 1);
+    }
+
+    #[test]
+    fn transcript_score_omits_terms_when_fixture_has_none() {
+        let score = score_transcript_with_terms("hello", "hello", &[], &[]);
+        assert!(score.terms.is_none());
+        let json = serde_json::to_string(&score).expect("encode");
+        assert!(!json.contains("terms"));
+    }
 
     #[test]
     fn lexical_normalization_handles_unicode_case_punctuation_and_apostrophes() {

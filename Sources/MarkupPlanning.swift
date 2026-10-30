@@ -218,8 +218,12 @@ enum MarkupSummary {
         let elapsed: TimeInterval
         let wasClick: Bool
         let targetName: String?
+        /// What the mark points at, e.g. "“Save” button".
+        var elementLabel: String? = nil
         let transcript: String
     }
+
+    static let openImagesInstruction = "Open the contact sheet before answering; each numbered mark on it matches the list below."
 
     static func timestamp(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded(.down)))
@@ -232,12 +236,17 @@ enum MarkupSummary {
         duration: TimeInterval,
         preamble: String,
         items: [Item],
-        failedSegmentCount: Int
+        failedSegmentCount: Int,
+        tileCount: Int? = nil
     ) -> String {
         let markWord = items.count == 1 ? "mark" : "marks"
         var lines = ["[Speakeasy markup · \(timestamp(duration)) · \(items.count) \(markWord) · \(bundlePath)]"]
         if let contactSheetPath {
             lines.append("Contact sheet: \(contactSheetPath) (numbered marks match the list below; full frames in frames/)")
+            lines.append(openImagesInstruction)
+            if let tileCount, tileCount < items.count {
+                lines.append("The sheet shows \(tileCount) tiles for \(items.count) marks: marks on an unchanged screen share a tile, and every mark has its own frame in frames/.")
+            }
         }
         if !preamble.isEmpty {
             lines.append("\"\(preamble)\"")
@@ -245,7 +254,11 @@ enum MarkupSummary {
         for item in items {
             var label = "#\(item.number) (\(timestamp(item.elapsed)))"
             if item.wasClick { label += " [pin]" }
-            if let targetName = item.targetName, !targetName.isEmpty { label += " \(targetName):" }
+            let target = [item.targetName, item.elementLabel.map { "over \($0)" }]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            if !target.isEmpty { label += " \(target):" }
             let speech = item.transcript.isEmpty ? "(no speech)" : "\"\(item.transcript)\""
             lines.append("- \(label) \(speech)")
         }

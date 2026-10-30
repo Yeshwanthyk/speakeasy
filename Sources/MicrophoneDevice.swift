@@ -9,11 +9,66 @@ struct MicrophoneDevice: Equatable, Identifiable, Sendable {
     var id: String { uid }
 }
 
+/// How a device connects, from `kAudioDevicePropertyTransportType`.
+enum AudioInputTransport: Equatable, Sendable {
+    case builtIn
+    case bluetooth
+    case bluetoothLE
+    case usb
+    case virtual
+    case aggregate
+    case other
+
+    init(coreAudio transport: UInt32) {
+        switch transport {
+        case kAudioDeviceTransportTypeBuiltIn: self = .builtIn
+        case kAudioDeviceTransportTypeBluetooth: self = .bluetooth
+        case kAudioDeviceTransportTypeBluetoothLE: self = .bluetoothLE
+        case kAudioDeviceTransportTypeUSB: self = .usb
+        case kAudioDeviceTransportTypeVirtual: self = .virtual
+        case kAudioDeviceTransportTypeAggregate, kAudioDeviceTransportTypeAutoAggregate: self = .aggregate
+        default: self = .other
+        }
+    }
+
+    var isBluetooth: Bool { self == .bluetooth || self == .bluetoothLE }
+}
+
 struct AudioInputDeviceDescriptor: Equatable, Sendable {
     let deviceID: AudioDeviceID
     let uid: String
     let name: String
     let inputChannelCount: Int
+    var transport: AudioInputTransport = .other
+}
+
+/// Opening a Bluetooth headset's microphone switches it to the hands-free
+/// profile: input drops to narrowband and the user's audio sounds like a
+/// phone call for as long as the engine runs. When the user has not picked a
+/// microphone, the system route uses the built-in one instead.
+enum InputRoutePolicy {
+    static func systemRouteSubstitute(
+        defaultUID: String?,
+        devices: [AudioInputDeviceDescriptor],
+        avoidBluetooth: Bool
+    ) -> String? {
+        guard avoidBluetooth,
+              let defaultUID,
+              let current = devices.first(where: { $0.uid == defaultUID }),
+              current.transport.isBluetooth else {
+            return nil
+        }
+        // Never stand in with virtual or aggregate inputs; they may be silent.
+        return devices.first { $0.transport == .builtIn && $0.inputChannelCount > 0 }?.uid
+    }
+}
+
+enum BluetoothMicrophonePreference {
+    static let key = "avoidBluetoothMicrophone"
+
+    static func isAvoidingBluetooth(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? true
+    }
 }
 
 protocol CoreAudioHardwareProviding: AnyObject {
@@ -52,9 +107,24 @@ enum MicrophoneDeviceError: Error, Equatable {
 
 final class CoreAudioInputDeviceProvider: AudioInputDeviceProviding {
     private let hardware: CoreAudioHardwareProviding
+    private let avoidBluetooth: () -> Bool
 
-    init(hardware: CoreAudioHardwareProviding = SystemCoreAudioHardware()) {
+    init(
+        hardware: CoreAudioHardwareProviding = SystemCoreAudioHardware(),
+        avoidBluetooth: @escaping () -> Bool = { BluetoothMicrophonePreference.isAvoidingBluetooth() }
+    ) {
         self.hardware = hardware
+        self.avoidBluetooth = avoidBluetooth
+    }
+
+    /// The device "System Default" records from after the Bluetooth policy.
+    func systemRouteUID() -> String? {
+        let defaultUID = hardware.defaultInputDeviceUID()
+        return InputRoutePolicy.systemRouteSubstitute(
+            defaultUID: defaultUID,
+            devices: hardware.inputDeviceDescriptors(),
+            avoidBluetooth: avoidBluetooth()
+        ) ?? defaultUID
     }
 
     func enumerateInputDevices() -> [MicrophoneDevice] {
@@ -80,6 +150,14 @@ final class CoreAudioInputDeviceProvider: AudioInputDeviceProviding {
 
     func setDefaultInputDevice(on audioUnit: AudioUnit?) throws {
         guard audioUnit != nil else { return } // Test input nodes have no CoreAudio unit.
+        if let substitute = InputRoutePolicy.systemRouteSubstitute(
+            defaultUID: hardware.defaultInputDeviceUID(),
+            devices: hardware.inputDeviceDescriptors(),
+            avoidBluetooth: avoidBluetooth()
+        ) {
+            try hardware.setInputDevice(uid: substitute, on: audioUnit)
+            return
+        }
         try hardware.setDefaultInputDevice(on: audioUnit)
     }
 }
@@ -134,7 +212,8 @@ private final class SystemCoreAudioHardware: CoreAudioHardwareProviding {
                 deviceID: deviceID,
                 uid: uid,
                 name: name,
-                inputChannelCount: inputChannelCount(for: deviceID)
+                inputChannelCount: inputChannelCount(for: deviceID),
+                transport: AudioInputTransport(coreAudio: transportType(for: deviceID))
             )
         }
     }
@@ -224,6 +303,20 @@ private final class SystemCoreAudioHardware: CoreAudioHardwareProviding {
         )
         guard status == noErr, let value else { return nil }
         return value.takeUnretainedValue() as String
+    }
+
+    private func transportType(for deviceID: AudioDeviceID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &transport) == noErr else {
+            return 0
+        }
+        return transport
     }
 
     private func inputChannelCount(for deviceID: AudioDeviceID) -> Int {

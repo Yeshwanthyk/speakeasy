@@ -188,6 +188,57 @@ final class PasteboardPasterTests: XCTestCase {
         XCTAssertEqual(access.restoreAttemptCount, 1)
     }
 
+    func testPasteMarksTheTemporaryWriteForClipboardManagers() {
+        let access = FakePasteboardAccess(snapshot: PasteboardSnapshot(items: []))
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            targetProvider: TestDeliveryTargetProvider(target: .external(Self.application)),
+            settleDelay: 0,
+            createPasteEvents: { PasteEvents {} }
+        )
+
+        XCTAssertEqual(paster.paste("secret", target: .external(Self.application)), .eventsPosted)
+        XCTAssertEqual(access.writes.first?.transient, true)
+        XCTAssertEqual(access.writes.count, 1)
+    }
+
+    func testExplicitCopyIsNotMarkedTransient() {
+        let access = FakePasteboardAccess(snapshot: PasteboardSnapshot(items: []))
+        let paster = PasteboardPaster(pasteboard: access)
+
+        XCTAssertEqual(paster.copy("keep me"), .clipboardUpdated)
+        XCTAssertEqual(access.writes.map(\.transient), [false])
+    }
+
+    func testTranscriptLeftOnClipboardIsRewrittenWithoutTransientMarkers() {
+        let access = FakePasteboardAccess(snapshot: PasteboardSnapshot(items: []))
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            targetProvider: TestDeliveryTargetProvider(target: .unavailable),
+            createPasteEvents: { PasteEvents {} }
+        )
+
+        XCTAssertEqual(paster.paste("text", target: .unavailable), .clipboardUpdated)
+        XCTAssertEqual(access.writes.map(\.transient), [true, false])
+        XCTAssertEqual(access.writtenString, "text")
+    }
+
+    func testDefaultRestoreWaitsLongEnoughForSlowPasteTargets() {
+        XCTAssertGreaterThanOrEqual(PasteboardPaster.defaultSettleDelay, 0.5)
+        XCTAssertGreaterThanOrEqual(PasteboardPaster.maximumSettleDelay, PasteboardPaster.defaultSettleDelay)
+    }
+
+    func testPasteEventsUseTheResolvedLayoutKeyCode() {
+        var requestedKeyCodes: [CGKeyCode] = []
+        let events = PasteboardPaster.makePasteEvents(keyCode: 47) { keyCode, _ in
+            requestedKeyCodes.append(keyCode)
+            return CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
+        }
+
+        XCTAssertNotNil(events)
+        XCTAssertEqual(requestedKeyCodes, [47, 47])
+    }
+
     private static let application = TranscriptDeliveryApplication(
         processIdentifier: 101,
         bundleIdentifier: "com.example.editor"
@@ -213,6 +264,7 @@ private final class FakePasteboardAccess: PasteboardAccess {
     let initialSnapshot: PasteboardSnapshot
     private(set) var restoredSnapshot: PasteboardSnapshot?
     private(set) var writtenString: String?
+    private(set) var writes: [(text: String, transient: Bool)] = []
     private(set) var restoreAttemptCount = 0
     private(set) var changeCountReadCount = 0
     private var currentChangeCount = 10
@@ -230,7 +282,8 @@ private final class FakePasteboardAccess: PasteboardAccess {
 
     func snapshot() -> PasteboardSnapshot? { initialSnapshot }
 
-    func write(string: String) -> Bool {
+    func write(string: String, transient: Bool) -> Bool {
+        writes.append((string, transient))
         writtenString = string
         currentChangeCount += 1
         return true

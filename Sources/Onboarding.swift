@@ -81,10 +81,17 @@ final class OnboardingModel: ObservableObject {
         var changeShortcut: @MainActor () -> Void
         var finish: @MainActor () -> Void
         var relaunch: @MainActor () -> Void
+        /// How the latest dictation ended, so practice failures explain themselves.
+        var latestAttempt: @MainActor () -> DictationAttempt? = { nil }
+        var microphoneLevel: () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) }
+        var microphoneName: @MainActor () -> String? = { nil }
     }
 
     @Published var step: OnboardingStep = .welcome {
-        didSet { if step == .tryIt, oldValue != .tryIt { armTranscriptTest() } }
+        didSet {
+            if step == .tryIt, oldValue != .tryIt { armTranscriptTest() }
+            if step == .tryIt { microphoneMeter.start() } else { microphoneMeter.stop() }
+        }
     }
     @Published private(set) var selectedModel: ASRModelKind
     @Published private(set) var modelPhase: OnboardingModelPhase = .checking
@@ -94,6 +101,9 @@ final class OnboardingModel: ObservableObject {
     @Published private(set) var inputMonitoring: PermissionState = .denied
     @Published private(set) var shortcut: DictationShortcut = .defaultShortcut
     @Published private(set) var testTranscript: String?
+    /// Why the last practice dictation produced no transcript.
+    @Published private(set) var practiceHint: String?
+    let microphoneMeter: SettingsMicrophoneMeter
     /// Set when a permission was requested in System Settings, so the UI can
     /// offer a relaunch if macOS does not report the grant to this process.
     @Published private(set) var visitedSystemSettings = false
@@ -103,11 +113,13 @@ final class OnboardingModel: ObservableObject {
     private var pollTimer: Timer?
     private var activationObserver: NSObjectProtocol?
     private var testBaselineID: UUID?
+    private var attemptBaseline: UInt64?
     private var testArmed = false
 
     init(actions: Actions, initialModel: ASRModelKind = (try? ModelPathResolver.configuredASRModelKind()) ?? .parakeet110M) {
         self.actions = actions
         self.selectedModel = initialModel
+        self.microphoneMeter = SettingsMicrophoneMeter(snapshot: actions.microphoneLevel)
     }
 
     var permissionsGranted: Bool {
@@ -150,6 +162,7 @@ final class OnboardingModel: ObservableObject {
     }
 
     func stop() {
+        microphoneMeter.stop()
         pollTimer?.invalidate()
         pollTimer = nil
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
@@ -302,6 +315,8 @@ final class OnboardingModel: ObservableObject {
     private func armTranscriptTest() {
         guard enginePhase.isReady, testTranscript == nil else { return }
         testBaselineID = actions.latestTranscript()?.id
+        attemptBaseline = actions.latestAttempt()?.sequence
+        practiceHint = nil
         testArmed = true
     }
 
@@ -315,7 +330,15 @@ final class OnboardingModel: ObservableObject {
         if testArmed, testTranscript == nil,
            let latest = actions.latestTranscript(), latest.id != testBaselineID {
             let text = latest.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty { testTranscript = text }
+            if !text.isEmpty {
+                testTranscript = text
+                practiceHint = nil
+            }
+        }
+        if testArmed, testTranscript == nil,
+           let attempt = actions.latestAttempt(), attempt.sequence != attemptBaseline {
+            let hint = PracticeHint.message(for: attempt.result, microphoneName: actions.microphoneName())
+            if practiceHint != hint { practiceHint = hint }
         }
     }
 

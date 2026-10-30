@@ -5,6 +5,17 @@ import XCTest
 
 @MainActor
 final class MenuBarControllerTests: XCTestCase {
+    nonisolated override class func setUp() {
+        super.setUp()
+        // NSStatusBar asserts without a window-server connection, which
+        // NSApplication opens. Headless runners have no session at all.
+        MainActor.assumeIsolated { _ = NSApplication.shared }
+    }
+
+    nonisolated override func setUpWithError() throws {
+        try XCTSkipIf(CGSessionCopyCurrentDictionary() == nil, "No window-server session")
+    }
+
     private func makeStore() -> TranscriptStore {
         TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-menu-\(UUID().uuidString)/history.json"))

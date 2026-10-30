@@ -7,8 +7,11 @@
 
 ## What it does
 
-- **Dictate anywhere.** Tap **fn** to start and stop, or hold it to talk. The text is pasted into the app you were using.
-- **Local.** Speech is transcribed on your Mac. Audio is not saved to disk or sent anywhere. The only network use is downloading the model. Markup screenshots stay in Application Support; only the 20 most recent are kept.
+- **Dictate anywhere.** Tap **fn** to start and stop, or hold it to talk. In hold-to-talk mode, double-tap **fn** to keep dictating hands-free until the next press. The text is pasted into the app you were using, on any keyboard layout.
+- **Local.** Speech is transcribed on your Mac and nothing is sent anywhere; the only network use is downloading the model (and update checks in builds that include the updater). Dictation audio is never written to disk. Meeting recordings, which you turn on yourself, keep their audio in Application Support for as long as you choose. Markup screenshots stay in Application Support; only the 20 most recent are kept.
+- **AirPods stay in high quality.** When the system input is a Bluetooth headset, Speakeasy records from the Mac's built-in microphone so your headphones don't drop into call mode. Turn this off in Settings → Microphone.
+- **Undo and learn.** **Undo Last Dictation** in the menu removes the paste in the app that received it. Fix a transcript in History; fix the same words twice and Speakeasy offers to make it a correction.
+- **Meetings.** Turn on Settings → Meetings, then choose **Record Meeting**, or accept the offer when Zoom, Teams, FaceTime, Slack, or a browser call starts using the microphone (macOS 14.2+). Speakeasy records your microphone and, with Screen Recording access, the other side, for as long as the call runs. It transcribes as you go and saves a transcript labeled You/Them with talk time, likely action items, and, on macOS 26 with Apple Intelligence, a short summary.
 - **Fast.** On an M4 Pro, the default model transcribes a short clip in about 20 ms once loaded.
 - **Recoverable.** Each transcript is saved before it is pasted. If a paste fails, copy or paste it again from the menu bar.
 - **Corrections.** Add replacements like "cube control → kubectl". They apply to every dictation after you save them.
@@ -31,7 +34,7 @@ Requires an Apple Silicon Mac running macOS 12 or later.
 
 1. Download the latest `Speakeasy-*.zip` from [Releases](https://github.com/Yeshwanthyk/speakeasy/releases), unzip it, and move **Speakeasy** to Applications.
 2. Open it. macOS blocks the first launch because the app is not notarized. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
-3. Allow **Microphone** access. Allow **Accessibility** access so Speakeasy can paste.
+3. Allow **Microphone** access, **Accessibility** access so Speakeasy can paste, and **Input Monitoring** so it can see the fn key in every app. Setup walks through all three, then has you try a dictation and explains anything that went wrong (too short, a silent microphone, no speech heard).
 
 > **After updating:** macOS may forget the Accessibility permission. If paste stops working, remove Speakeasy from **Privacy & Security → Accessibility** and add it again.
 

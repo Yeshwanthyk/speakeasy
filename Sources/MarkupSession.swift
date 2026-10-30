@@ -47,6 +47,8 @@ final class MarkupSessionController: AnnotationRecordingObserving {
     private var annotations: [MarkupAnnotation] = []
     /// Keyed by `sampleOffset`, which stays fixed when marks are renumbered.
     private var captures: [Int: Task<CGImage?, Never>] = [:]
+    /// Accessibility label under each mark, keyed by sample offset.
+    private var elementLabels: [Int: Task<String?, Never>] = [:]
     /// Sample offsets of marks faded off screen by a scroll.
     private var scrolledAway: Set<Int> = []
     private var liveStroke: [CGPoint] = []
@@ -97,18 +99,28 @@ final class MarkupSessionController: AnnotationRecordingObserving {
         phase = .finishing
         let marks = annotations
         let pending = captures
+        let pendingLabels = elementLabels
         let duration = Date().timeIntervalSince(recordingStartedAt)
         closeOverlay()
         actions.notify(.status("Building markup…"))
 
         Task { [weak self] in
             var images: [Int: CGImage] = [:]
+            var labels: [Int: String] = [:]
             for mark in marks {
                 if let image = await pending[mark.sampleOffset]?.value { images[mark.number] = image }
+                if let label = await pendingLabels[mark.sampleOffset]?.value { labels[mark.number] = label }
             }
             let captured = images
+            let described = labels
             let output = await Task.detached(priority: .userInitiated) {
-                MarkupBundleWriter.write(marks: marks, images: captured, result: result, duration: duration)
+                MarkupBundleWriter.write(
+                    marks: marks,
+                    images: captured,
+                    elementLabels: described,
+                    result: result,
+                    duration: duration
+                )
             }.value
             self?.deliver(output)
         }
@@ -232,6 +244,7 @@ final class MarkupSessionController: AnnotationRecordingObserving {
         let removed = annotations.remove(at: index)
         actions.removeMark(removed.sampleOffset)
         captures.removeValue(forKey: removed.sampleOffset)?.cancel()
+        elementLabels.removeValue(forKey: removed.sampleOffset)?.cancel()
         scrolledAway.remove(removed.sampleOffset)
         for position in annotations.indices {
             annotations[position].number = position + 1
@@ -241,6 +254,13 @@ final class MarkupSessionController: AnnotationRecordingObserving {
     }
 
     private func capture(_ annotation: MarkupAnnotation, on screen: NSScreen) {
+        let point = annotation.kind == .click
+            ? annotation.strokes.first?.first ?? center(of: annotation.bounds)
+            : center(of: annotation.bounds)
+        elementLabels[annotation.sampleOffset]?.cancel()
+        elementLabels[annotation.sampleOffset] = Task.detached(priority: .userInitiated) {
+            MarkupElementLocator.label(at: point)
+        }
         guard #available(macOS 14.0, *), let displayID = screen.markupDisplayID else { return }
         captures[annotation.sampleOffset]?.cancel()
         let logger = logger
@@ -313,6 +333,7 @@ final class MarkupSessionController: AnnotationRecordingObserving {
     private func tearDown() {
         closeOverlay()
         captures.values.forEach { $0.cancel() }
+        elementLabels.values.forEach { $0.cancel() }
         phase = .idle
         reset()
     }
@@ -320,6 +341,7 @@ final class MarkupSessionController: AnnotationRecordingObserving {
     private func reset() {
         annotations = []
         captures = [:]
+        elementLabels = [:]
         scrolledAway = []
         liveStroke = []
         liveStrokeOffset = nil
@@ -361,6 +383,7 @@ enum MarkupBundleWriter {
     static func write(
         marks: [MarkupAnnotation],
         images: [Int: CGImage],
+        elementLabels: [Int: String] = [:],
         result: Result<AnnotationTranscript, AnnotationCaptureError>,
         duration: TimeInterval
     ) -> Output {
@@ -394,27 +417,49 @@ enum MarkupBundleWriter {
                     elapsed: mark.elapsed,
                     wasClick: mark.kind == .click,
                     targetName: mark.target?.ownerName,
+                    elementLabel: elementLabels[mark.number],
                     transcript: segment
                 ))
                 guard let image = images[mark.number],
-                      let annotated = MarkupRenderer.annotate(image, annotation: mark) else {
+                      let annotated = MarkupRenderer.annotate(image, annotation: mark),
+                      let png = MarkupRenderer.pngData(annotated) else {
                     continue
                 }
-                if let png = MarkupRenderer.pngData(annotated) {
-                    let name = String(format: "frame-%02d.png", mark.number)
-                    try png.write(to: framesDirectory.appendingPathComponent(name), options: .atomic)
-                }
-                let container = mark.target.map { $0.frame.intersection(mark.displayFrame) } ?? mark.displayFrame
-                let crop = MarkupCropPlanner.crop(
-                    mark: mark.bounds,
-                    container: container.isNull || container.isEmpty ? mark.displayFrame : container
-                )
-                if let tile = MarkupRenderer.crop(annotated, displayFrame: mark.displayFrame, to: crop) {
-                    tiles.append(tile)
-                }
+                let name = String(format: "frame-%02d.png", mark.number)
+                try png.write(to: framesDirectory.appendingPathComponent(name), options: .atomic)
             }
         } catch {
             return .failure("Markup frames could not be saved")
+        }
+
+        // Marks made on an unchanged screen share one tile, drawn together
+        // on the newest still; the sheet keeps at most a dozen tiles.
+        let entries = marks.map { mark in
+            MarkupFrameGrouper.Entry(
+                displayFrame: mark.displayFrame,
+                signature: images[mark.number].flatMap(LumaSignature.init(image:))
+            )
+        }
+        for group in MarkupFrameGrouper.capped(MarkupFrameGrouper.groups(entries)) {
+            let members = group.map { marks[$0] }
+            guard let newest = members.last(where: { images[$0.number] != nil }),
+                  let base = images[newest.number] else {
+                continue
+            }
+            var annotated: CGImage? = base
+            for mark in members {
+                annotated = annotated.flatMap { MarkupRenderer.annotate($0, annotation: mark) }
+            }
+            guard let annotated, let first = members.first else { continue }
+            let bounds = members.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
+            let container = first.target.map { $0.frame.intersection(first.displayFrame) } ?? first.displayFrame
+            let crop = MarkupCropPlanner.crop(
+                mark: bounds,
+                container: container.isNull || container.isEmpty ? first.displayFrame : container
+            )
+            if let tile = MarkupRenderer.crop(annotated, displayFrame: first.displayFrame, to: crop) {
+                tiles.append(tile)
+            }
         }
 
         var contactSheetPath: String?
@@ -431,7 +476,8 @@ enum MarkupBundleWriter {
             duration: duration,
             preamble: transcript.segments.first ?? "",
             items: items,
-            failedSegmentCount: transcript.failedSegmentCount
+            failedSegmentCount: transcript.failedSegmentCount,
+            tileCount: tiles.count
         )
         try? Data(text.utf8).write(to: directory.appendingPathComponent("summary.md"), options: .atomic)
         pruneOldBundles(in: directory.deletingLastPathComponent())

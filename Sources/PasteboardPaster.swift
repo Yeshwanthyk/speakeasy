@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import Foundation
 import os
 
@@ -8,7 +7,10 @@ struct PasteEvents {
 }
 
 final class PasteboardPaster: Pasting {
-    private static let maximumSettleDelay: TimeInterval = 0.25
+    /// Slow Electron and Chromium targets read the clipboard well after
+    /// Command-V is posted; restoring sooner can paste the previous contents.
+    static let defaultSettleDelay: TimeInterval = 0.5
+    static let maximumSettleDelay: TimeInterval = 1.0
 
     private let logger = Logger(subsystem: "com.speakeasy.app", category: "paste")
     private let pasteboard: PasteboardAccess
@@ -27,7 +29,8 @@ final class PasteboardPaster: Pasting {
             label: "com.speakeasy.app.pasteboard.settle",
             qos: .utility
         ),
-        settleDelay: TimeInterval = 0.1,
+        settleDelay: TimeInterval = PasteboardPaster.defaultSettleDelay,
+        pasteKeyCode: @escaping () -> CGKeyCode = { PasteKeyCodeCache.shared.current() },
         createPasteEvents: (() -> PasteEvents?)? = nil,
         writeClipboard: ((String) -> Bool)? = nil,
         postPasteEvents: (() -> Bool)? = nil
@@ -42,7 +45,11 @@ final class PasteboardPaster: Pasting {
             self.createPasteEvents = createPasteEvents
         } else {
             self.createPasteEvents = { [logger] in
-                Self.makePasteEvents(logger: logger)
+                let events = Self.makePasteEvents(keyCode: pasteKeyCode())
+                if events == nil {
+                    logger.error("Could not create Command-V events")
+                }
+                return events
             }
         }
     }
@@ -53,7 +60,7 @@ final class PasteboardPaster: Pasting {
 
         let snapshot = pasteboard.snapshot()
         let changeCount = pasteboard.changeCount
-        guard writeAndVerify(text) else {
+        guard writeAndVerify(text, transient: false) else {
             restoreAfterFailedWrite(snapshot: snapshot, previousChangeCount: changeCount)
             return .clipboardWriteFailed
         }
@@ -75,7 +82,9 @@ final class PasteboardPaster: Pasting {
 
         let snapshot = pasteboard.snapshot()
         let previousChangeCount = pasteboard.changeCount
-        guard writeAndVerify(text) else {
+        // Clipboard managers skip the temporary write; any path that leaves
+        // the transcript on the clipboard rewrites it as an ordinary copy.
+        guard writeAndVerify(text, transient: true) else {
             restoreAfterFailedWrite(snapshot: snapshot, previousChangeCount: previousChangeCount)
             return .clipboardWriteFailed
         }
@@ -85,16 +94,19 @@ final class PasteboardPaster: Pasting {
         // the clipboard than to post a paste that cannot be restored safely.
         guard let snapshot else {
             logger.error("Could not snapshot the existing clipboard; leaving transcript available")
+            keepOnClipboard(text, writeChangeCount: writeChangeCount)
             return .clipboardUpdated
         }
 
         guard targetCanReceivePaste(target) else {
             logger.info("No stable external paste target; leaving transcript on the clipboard")
+            keepOnClipboard(text, writeChangeCount: writeChangeCount)
             return .clipboardUpdated
         }
 
         if let postPasteEvents {
             guard postPasteEvents() else {
+                keepOnClipboard(text, writeChangeCount: writeChangeCount)
                 return .clipboardUpdated
             }
             if writeClipboard == nil {
@@ -105,6 +117,7 @@ final class PasteboardPaster: Pasting {
 
         guard let events = createPasteEvents() else {
             logger.error("Could not create both paste events")
+            keepOnClipboard(text, writeChangeCount: writeChangeCount)
             return .clipboardUpdated
         }
 
@@ -114,15 +127,22 @@ final class PasteboardPaster: Pasting {
         return .eventsPosted
     }
 
-    private func writeAndVerify(_ text: String) -> Bool {
+    private func writeAndVerify(_ text: String, transient: Bool) -> Bool {
         if let writeClipboard {
             return writeClipboard(text)
         }
 
-        guard pasteboard.write(string: text) else {
+        guard pasteboard.write(string: text, transient: transient) else {
             return false
         }
         return pasteboard.string() == text
+    }
+
+    private func keepOnClipboard(_ text: String, writeChangeCount: Int) {
+        guard writeClipboard == nil, pasteboard.changeCount == writeChangeCount else { return }
+        if !pasteboard.write(string: text, transient: false) {
+            logger.error("Could not rewrite the transcript as an ordinary clipboard item")
+        }
     }
 
     private func restoreAfterFailedWrite(
@@ -182,32 +202,27 @@ final class PasteboardPaster: Pasting {
         }
     }
 
-    private static func makePasteEvents(logger: Logger) -> PasteEvents? {
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
-            logger.error("Failed to create CGEventSource")
+    /// Command plus the given key, e.g. Command-Z for undo.
+    static func makeShortcutEvents(keyCode: CGKeyCode) -> PasteEvents? {
+        makePasteEvents(keyCode: keyCode)
+    }
+
+    /// Builds Command-V for the key that types "v" on the active layout.
+    /// Both events are constructed before either can be posted.
+    static func makePasteEvents(
+        keyCode: CGKeyCode,
+        makeEvent: (CGKeyCode, Bool) -> CGEvent? = { keyCode, keyDown in
+            CGEvent(
+                keyboardEventSource: CGEventSource(stateID: .combinedSessionState),
+                virtualKey: keyCode,
+                keyDown: keyDown
+            )
+        }
+    ) -> PasteEvents? {
+        guard let keyDown = makeEvent(keyCode, true),
+              let keyUp = makeEvent(keyCode, false) else {
             return nil
         }
-
-        // Construct both events before returning the pair. This prevents a
-        // partially-created Command-V sequence from being posted.
-        guard let keyDown = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: CGKeyCode(kVK_ANSI_V),
-            keyDown: true
-        ) else {
-            logger.error("Failed to create keyDown event")
-            return nil
-        }
-
-        guard let keyUp = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: CGKeyCode(kVK_ANSI_V),
-            keyDown: false
-        ) else {
-            logger.error("Failed to create keyUp event")
-            return nil
-        }
-
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
         return PasteEvents {

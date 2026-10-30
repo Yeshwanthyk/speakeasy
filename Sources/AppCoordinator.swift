@@ -28,6 +28,9 @@ protocol AudioCapturing {
 }
 
 extension AudioCapturing {
+    /// Re-resolves "System Default" after a routing preference changes.
+    func refreshSystemRoute() {}
+    func setSampleObserver(_ observer: ((UnsafeBufferPointer<Float>) -> Void)?) {}
     func recordingSampleCount() -> Int { 0 }
     func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float> { [] }
 }
@@ -222,6 +225,14 @@ final class AppCoordinator: @unchecked Sendable {
     private var annotationCuts: [Int] = []
     /// Main-actor observer that draws marks and builds the markup bundle.
     weak var annotationObserver: AnnotationRecordingObserving?
+    /// The most recent automatic paste, undoable with the target's Command-Z.
+    private var pasteUndoWindow = PasteUndoWindow()
+    /// How the latest dictation ended, for setup's practice step.
+    private var lastAttempt: DictationAttempt?
+    private var attemptSequence: UInt64 = 0
+    /// Hand fixes made in History, counted to suggest correction rules.
+    /// Loaded on first use and only touched on the main actor.
+    private var loadedCorrectionTally: CorrectionTally?
 
     var isRecording: Bool {
         stateLock.withLock {
@@ -408,6 +419,17 @@ final class AppCoordinator: @unchecked Sendable {
         }
     }
 
+    func latestAttempt() -> DictationAttempt? {
+        stateLock.withLock { lastAttempt }
+    }
+
+    private func noteAttempt(_ result: DictationAttemptResult) {
+        stateLock.withLock {
+            attemptSequence &+= 1
+            lastAttempt = DictationAttempt(sequence: attemptSequence, result: result)
+        }
+    }
+
     func selectedASRModelKind() -> ASRModelKind {
         stateLock.withLock { currentASRModelKind }
     }
@@ -474,6 +496,44 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
         audioCapture.selectInputDevice(uid: uid)
+    }
+
+    // MARK: - Meetings
+
+    /// Meeting segments take run IDs from their own high-bit space so a
+    /// dictation cancel can never hit them.
+    private static let meetingRunIDFlag: UInt64 = 1 << 62
+    private var meetingRunSequence: UInt64 = 0
+
+    func setMeetingSampleObserver(_ observer: ((UnsafeBufferPointer<Float>) -> Void)?) {
+        audioCapture.setSampleObserver(observer)
+    }
+
+    /// Transcribes one meeting segment through the speech gate, the shared
+    /// model, the hallucination filter, and the user's corrections. Runs on
+    /// the caller's thread; the native session serializes it with dictation.
+    func transcribeMeetingSegment(_ samples: ContiguousArray<Float>) -> String? {
+        guard samples.count >= Self.minActiveSamples, SpeechGate.analyze(samples).hasSpeech else { return nil }
+        let (transcriber, postProcessor, runID) = stateLock.withLock { () -> (Transcriber, TranscriptPostProcessor, UInt64) in
+            meetingRunSequence &+= 1
+            return (transcriber, transcriptPostProcessor, Self.meetingRunIDFlag | meetingRunSequence)
+        }
+        guard let raw = try? transcriber.transcribe(samples: samples, runID: runID) else { return nil }
+        stateLock.withLock { lastNativeInferenceAt = nativeClock() }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let verdict = hallucinationFilter.verdict(
+            for: trimmed,
+            activeDurationSeconds: Double(samples.count) / Self.transcriptionSampleRate,
+            activeRMS: Self.rms(of: samples)
+        )
+        guard !trimmed.isEmpty, verdict == .accepted else { return nil }
+        return postProcessor.process(trimmed).finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Applies a changed Bluetooth preference when no microphone is pinned.
+    func refreshSystemMicrophoneRoute() {
+        guard canSelectInputDevice(), audioCapture.selectedInputDeviceUID() == nil else { return }
+        audioCapture.refreshSystemRoute()
     }
 
     func canSelectInputDevice() -> Bool {
@@ -1014,6 +1074,7 @@ final class AppCoordinator: @unchecked Sendable {
             if let trace {
                 recordTerminal(trace: trace, outcome: .cancelled)
             }
+            noteAttempt(.cancelled)
             if notify {
                 feedback.notify(event: .error("Recording cancelled"))
             }
@@ -1083,7 +1144,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriptStore?.update(id: record.id, outcome: outcome.traceOutcome, timings: nil)
         guard outcome == .eventsPosted else { return false }
         // Runs after the paster restores the previous clipboard.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [paster] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + PasteboardPaster.maximumSettleDelay + 0.25) { [paster] in
             _ = paster.copy(text)
         }
         return true
@@ -1358,6 +1419,7 @@ final class AppCoordinator: @unchecked Sendable {
 
         guard !captureResult.wasInterrupted else {
             commit?.cancel()
+            noteAttempt(.interrupted)
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .captureInterrupted)
                 feedback.notify(event: .error("Recording interrupted by microphone change"))
@@ -1378,8 +1440,9 @@ final class AppCoordinator: @unchecked Sendable {
         )
 
         guard activeSampleCount >= Self.minActiveSamples else {
+            // Accidental taps are discarded silently; the outcome is still traced.
+            noteAttempt(.tooShort)
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
-            feedback.notify(event: .error("Recording too short"))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
@@ -1390,7 +1453,8 @@ final class AppCoordinator: @unchecked Sendable {
             logger.debug(
                 "Speech gate rejected audio: rms=\(rms, format: .fixed(precision: 4)) floor=\(speech.noiseFloorRMS, format: .fixed(precision: 4)) voiced=\(speech.voicedFrameCount)/\(speech.analyzedFrameCount) longestRun=\(speech.longestVoicedRun)"
             )
-            feedback.notify(event: .error("No speech detected"))
+            feedback.notify(event: .status("No speech detected"))
+            noteAttempt(.rejectedSpeech(rms: rms))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
@@ -1516,6 +1580,7 @@ final class AppCoordinator: @unchecked Sendable {
                     case .failure(let error):
                         self.retainFailedCapture(samples: samples, reason: .transcriptionFailed)
                         self.recordTerminal(trace: settledTrace, outcome: .transcriptionFailed)
+                        self.noteAttempt(.failed)
                         self.logger.error("Transcription failed: \(String(describing: error))")
                         self.feedback.notify(event: .error("Transcription failed"))
                         self.recordingFeedback.showError("Transcription failed")
@@ -1541,7 +1606,8 @@ final class AppCoordinator: @unchecked Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            noteAttempt(.noSpeech)
+            feedback.notify(event: .status("No speech detected"))
             return
         }
 
@@ -1554,7 +1620,8 @@ final class AppCoordinator: @unchecked Sendable {
             logger.notice("Filtered transcript (\(String(describing: reason), privacy: .public))")
             trace.stageChanges = [StageChange(stage: "hallucinationFilter", count: 1)]
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            noteAttempt(.noSpeech)
+            feedback.notify(event: .status("No speech detected"))
             return
         }
 
@@ -1563,7 +1630,8 @@ final class AppCoordinator: @unchecked Sendable {
         let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            noteAttempt(.noSpeech)
+            feedback.notify(event: .status("No speech detected"))
             return
         }
         trace.stageChanges = processedTranscript.stageChanges
@@ -1625,6 +1693,7 @@ final class AppCoordinator: @unchecked Sendable {
         let text = transcript.finalText
         guard accessibilityChecker.hasAccessibilityAccess() else {
             recordTerminal(trace: trace, outcome: .accessibilityDenied, text: text)
+            noteAttempt(.accessibilityDenied)
             if let recordID {
                 MainActor.assumeIsolated {
                     _ = transcriptStore?.update(
@@ -1642,7 +1711,15 @@ final class AppCoordinator: @unchecked Sendable {
         var trace = trace
         trace.markPasteRequested()
         let outcome = paster.paste(text, target: target)
+        stateLock.withLock {
+            if outcome == .eventsPosted, case .external(let application) = target {
+                pasteUndoWindow.record(target: application, at: ProcessInfo.processInfo.systemUptime)
+            } else {
+                pasteUndoWindow.clear()
+            }
+        }
         recordTerminal(trace: trace, outcome: outcome.traceOutcome, text: text)
+        noteAttempt(.delivered)
         if let recordID {
             MainActor.assumeIsolated {
                 _ = transcriptStore?.update(
@@ -1681,6 +1758,90 @@ final class AppCoordinator: @unchecked Sendable {
         let target = deliveryTargetProvider.currentTarget()
         let outcome = pasteTranscript(record.rawText, operation: .pasteLast, target: target)
         if outcome == .eventsPosted { _ = transcriptStore?.markCorrectionsUndone(id: record.id) }
+    }
+
+    /// Whether the last automatic paste can still be undone in the front app.
+    func canUndoLastPaste() -> Bool {
+        let current = deliveryTargetProvider.currentTarget()
+        return stateLock.withLock {
+            pasteUndoWindow.canUndo(current: current, now: ProcessInfo.processInfo.systemUptime)
+        }
+    }
+
+    /// Sends Command-Z to the app that received the last dictation, only
+    /// while it is still in front and the paste is recent. The app's own
+    /// undo removes the pasted text; macOS gives no confirmation.
+    @MainActor
+    func undoLastPaste() {
+        let current = deliveryTargetProvider.currentTarget()
+        let allowed = stateLock.withLock {
+            pasteUndoWindow.consume(current: current, now: ProcessInfo.processInfo.systemUptime)
+        }
+        guard allowed else {
+            feedback.notify(event: .error("Nothing to undo in this app"))
+            return
+        }
+        guard accessibilityChecker.hasAccessibilityAccess(),
+              let events = PasteboardPaster.makeShortcutEvents(
+                keyCode: PasteKeyCodeCache.shared.keyCode(for: "z", fallback: PasteKeyResolver.undoFallbackKeyCode)
+              ) else {
+            feedback.notify(event: .error("Could not send Undo"))
+            return
+        }
+        events.post()
+        feedback.notify(event: .status("Undo sent"))
+    }
+
+    /// Saves the user's fixed transcript and learns short word swaps.
+    /// Returns the correction rules now worth offering.
+    @MainActor
+    @discardableResult
+    func fixTranscript(id: UUID, fixedText: String) -> [LearnedSubstitution] {
+        let fixed = fixedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !fixed.isEmpty,
+              let record = transcriptStore?.allRecords().first(where: { $0.id == id }),
+              record.finalText != fixed else {
+            return correctionSuggestions()
+        }
+        transcriptStore?.replaceFinalText(id: id, with: fixed)
+        updateCorrectionTally { $0.record(CorrectionDiff.substitutions(from: record.finalText, to: fixed)) }
+        return correctionSuggestions()
+    }
+
+    @MainActor
+    func correctionSuggestions() -> [LearnedSubstitution] {
+        let tally = loadedCorrectionTally ?? CorrectionTallyStore.load()
+        loadedCorrectionTally = tally
+        return tally.suggestions(existing: transcriptCorrections())
+    }
+
+    @MainActor
+    func dismissCorrectionSuggestion(_ suggestion: LearnedSubstitution) {
+        updateCorrectionTally { $0.dismiss(suggestion) }
+    }
+
+    @MainActor
+    private func updateCorrectionTally(_ change: (inout CorrectionTally) -> Void) {
+        var tally = loadedCorrectionTally ?? CorrectionTallyStore.load()
+        change(&tally)
+        loadedCorrectionTally = tally
+        CorrectionTallyStore.save(tally)
+    }
+
+    /// Adds a suggested rule to the user's corrections.
+    @MainActor
+    func acceptCorrectionSuggestion(_ suggestion: LearnedSubstitution) async -> Bool {
+        var corrections = transcriptCorrections()
+        corrections.append(TranscriptCorrection(heard: suggestion.heard, written: suggestion.written))
+        do {
+            guard try await replaceTranscriptCorrections(corrections).value else { return false }
+        } catch {
+            feedback.notify(event: .error("Could not add the correction"))
+            return false
+        }
+        updateCorrectionTally { $0.accept(suggestion) }
+        feedback.notify(event: .status("Correction added: \(suggestion.heard) → \(suggestion.written)"))
+        return true
     }
 
     /// Post a new paste request for the newest transcript without retranscribing it.
@@ -1856,6 +2017,7 @@ final class AppCoordinator: @unchecked Sendable {
         transcriber.cancel(runID: cancellation.runID)
         stateLock.withLock { segmentCommit?.cancel(excluding: cancellation.runID) }
         recordTerminal(trace: trace, outcome: .timedOut)
+        noteAttempt(.failed)
         logger.error("Transcription timed out after \(timeout)s")
         feedback.notify(event: .error("Transcription timed out"))
     }

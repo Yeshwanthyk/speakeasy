@@ -33,7 +33,7 @@ struct TranscriptRecord: Codable, Equatable, Identifiable, Sendable {
     let id: UUID
     let createdAt: Date
     let rawText: String
-    let finalText: String
+    var finalText: String
     let backend: String
     var outcome: TranscriptionTrace.Outcome
     var timings: TimingSnapshot?
@@ -131,6 +131,14 @@ final class TranscriptStore {
         }
         records[index].outcome = outcome
         records[index].timings = timings
+        return scheduleWrite()
+    }
+
+    /// Replaces a transcript with the user's hand-fixed version.
+    @discardableResult
+    func replaceFinalText(id: UUID, with text: String) -> Task<Bool, Never> {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return Task { false } }
+        records[index].finalText = text
         return scheduleWrite()
     }
 

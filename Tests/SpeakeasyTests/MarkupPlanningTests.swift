@@ -115,6 +115,7 @@ final class MarkupPlanningTests: XCTestCase {
         XCTAssertEqual(text, """
         [Speakeasy markup · 1:23 · 2 marks · /tmp/markup-1]
         Contact sheet: /tmp/markup-1/contact-sheet.png (numbered marks match the list below; full frames in frames/)
+        Open the contact sheet before answering; each numbered mark on it matches the list below.
         "Looking at the landing page."
         - #1 (0:05) Safari: "We don't need this footer."
         - #2 (0:16) [pin] (no speech)

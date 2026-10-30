@@ -379,6 +379,11 @@ private struct TryItStep: View {
                 }
             }
             SettingsCard { TestResult(model: model) }
+            if model.enginePhase.isReady, model.testTranscript == nil {
+                SettingsCard(title: "Microphone") {
+                    SettingsMicrophoneLevelView(meter: model.microphoneMeter, shortcut: model.shortcut.displayName)
+                }
+            }
             if model.functionKeyMayConflict {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "globe").foregroundStyle(.blue)
@@ -436,6 +441,11 @@ private struct TestResult: View {
                     if !warmedUp {
                         Text("The model's warm-up check failed. Dictation may be slow or fail the first time.")
                             .font(.caption).foregroundStyle(.orange)
+                    }
+                    if let hint = model.practiceHint {
+                        Label(hint, systemImage: "exclamationmark.bubble.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             case .failed(let message):

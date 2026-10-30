@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var unlockObserver: NSObjectProtocol?
     private var onboardingController: OnboardingWindowController?
     private var markupController: MarkupSessionController?
+    private var meetingController: MeetingController?
+    private var meetingOfferPresenter: MeetingOfferPresenter?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
@@ -74,6 +76,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ))
         coordinator.annotationObserver = markupController
         self.markupController = markupController
+
+        let meetingController = MeetingController(dependencies: .init(
+            setMicrophoneObserver: { [weak coordinator] observer in coordinator?.setMeetingSampleObserver(observer) },
+            transcribe: { [weak coordinator] samples in coordinator?.transcribeMeetingSegment(samples) },
+            notify: { [feedback] event in feedback.notify(event: event) }
+        ))
+        self.meetingController = meetingController
+        meetingOfferPresenter = MeetingOfferPresenter(controller: meetingController)
 
             if let store = coordinator.transcriptStore {
                 let menuBarController = MenuBarController(
@@ -161,6 +171,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menuBarController?.showFeedback(event)
                 }
                 menuBarController.openSetupGuide = { [weak self] in self?.showOnboarding() }
+                menuBarController.meetingController = meetingController
+                menuBarController.softwareUpdater = SoftwareUpdater()
+                menuBarController.refreshMicrophoneRoute = { [weak coordinator] in
+                    coordinator?.refreshSystemMicrophoneRoute()
+                }
+                menuBarController.canUndoLastPaste = { [weak coordinator] in
+                    coordinator?.canUndoLastPaste() ?? false
+                }
+                menuBarController.undoLastPaste = { [weak coordinator] in coordinator?.undoLastPaste() }
+                menuBarController.fixTranscript = { [weak coordinator] id, text in
+                    coordinator?.fixTranscript(id: id, fixedText: text) ?? []
+                }
+                menuBarController.correctionSuggestions = { [weak coordinator] in
+                    coordinator?.correctionSuggestions() ?? []
+                }
+                menuBarController.acceptCorrectionSuggestion = { [weak coordinator] suggestion in
+                    await coordinator?.acceptCorrectionSuggestion(suggestion) ?? false
+                }
+                menuBarController.dismissCorrectionSuggestion = { [weak coordinator] suggestion in
+                    coordinator?.dismissCorrectionSuggestion(suggestion)
+                }
                 menuBarController.isMarkupEnabled = { MarkupSessionController.isAvailable }
                 menuBarController.enableMarkup = { [feedback] in
                     guard #available(macOS 14.0, *) else {
@@ -202,6 +233,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             relaunch: { [weak self] in
                 self?.relaunch()
+            },
+            latestAttempt: { [weak self] in
+                self?.coordinator?.latestAttempt()
+            },
+            microphoneLevel: { [weak self] in
+                self?.coordinator?.microphoneLevelSnapshot() ?? MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0)
+            },
+            microphoneName: { [weak self] in
+                guard let coordinator = self?.coordinator else { return nil }
+                let uid = coordinator.selectedInputDeviceUID()
+                return coordinator.availableInputDevices().first { $0.uid == uid }?.name
             }
         ))
         let controller = OnboardingWindowController(model: model)
@@ -237,6 +279,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
         if let unlockObserver { DistributedNotificationCenter.default().removeObserver(unlockObserver) }
+        // A recording in progress keeps its chunks and segments on disk; the
+        // next launch marks it interrupted and writes its transcript.
+        coordinator?.setMeetingSampleObserver(nil)
         coordinator?.shutdown()
     }
 
