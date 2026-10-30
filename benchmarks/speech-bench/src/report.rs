@@ -80,6 +80,33 @@ pub fn markdown(
             .map(|value| format!("{:.2}%", value * 100.0))
             .unwrap_or_else(|| "n/a".into()),
     );
+    row(
+        &mut output,
+        "Term recall",
+        metrics
+            .corpus_term_recall
+            .map(|value| {
+                format!(
+                    "{:.1}% ({}/{})",
+                    value * 100.0,
+                    metrics.corpus_terms_recalled,
+                    metrics.corpus_terms_expected
+                )
+            })
+            .unwrap_or_else(|| "n/a".into()),
+    );
+    row(
+        &mut output,
+        "False replacements",
+        if metrics.corpus_distractors > 0 {
+            format!(
+                "{} of {} distractors",
+                metrics.corpus_false_replacements, metrics.corpus_distractors
+            )
+        } else {
+            "n/a".into()
+        },
+    );
 
     if let Some(comparison) = comparison {
         writeln!(output, "\n## Baseline comparison\n").expect("write string");

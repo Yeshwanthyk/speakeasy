@@ -10,7 +10,7 @@ use speech_bench::protocol::{
     write_jsonl, CorpusIdentity, Record, RunEnd, RunStart, RunStatus, SampleRecord, SampleStatus,
     HARNESS_VERSION, PROTOCOL_SCHEMA,
 };
-use speech_bench::score::score_transcript;
+use speech_bench::score::score_transcript_with_terms;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -156,10 +156,14 @@ fn run() -> Result<(), String> {
                         detected_language: output.detected_language,
                         actual_timestamp_kind: Some(output.actual_timestamp_kind),
                         text_sha256: Some(text_sha256(&output.text)),
-                        score: fixture
-                            .definition
-                            .include_in_wer
-                            .then(|| score_transcript(&fixture.definition.reference, &output.text)),
+                        score: fixture.definition.include_in_wer.then(|| {
+                            score_transcript_with_terms(
+                                &fixture.definition.reference,
+                                &output.text,
+                                &fixture.definition.terms,
+                                &fixture.definition.distractors,
+                            )
+                        }),
                         truncated: output.truncated,
                         error: output
                             .truncated

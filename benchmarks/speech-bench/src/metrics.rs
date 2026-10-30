@@ -28,6 +28,16 @@ pub struct AggregateMetrics {
     pub corpus_micro_wer: Option<f64>,
     pub corpus_reference_words: u64,
     pub corpus_word_errors: u64,
+    #[serde(default)]
+    pub corpus_terms_expected: u64,
+    #[serde(default)]
+    pub corpus_terms_recalled: u64,
+    #[serde(default)]
+    pub corpus_term_recall: Option<f64>,
+    #[serde(default)]
+    pub corpus_distractors: u64,
+    #[serde(default)]
+    pub corpus_false_replacements: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -86,6 +96,12 @@ pub fn aggregate(records: &[Record]) -> AggregateMetrics {
                 if let Some(score) = &sample.score {
                     metrics.corpus_reference_words += score.lexical.reference_words;
                     metrics.corpus_word_errors += score.lexical.edits.errors();
+                    if let Some(terms) = score.terms {
+                        metrics.corpus_terms_expected += terms.expected;
+                        metrics.corpus_terms_recalled += terms.recalled;
+                        metrics.corpus_distractors += terms.distractors;
+                        metrics.corpus_false_replacements += terms.false_replacements;
+                    }
                 }
             }
             Record::RunEnd(end) => {
@@ -110,6 +126,8 @@ pub fn aggregate(records: &[Record]) -> AggregateMetrics {
     metrics.peak_rss_bytes = peak_rss;
     metrics.corpus_micro_wer = (metrics.corpus_reference_words > 0)
         .then(|| metrics.corpus_word_errors as f64 / metrics.corpus_reference_words as f64);
+    metrics.corpus_term_recall = (metrics.corpus_terms_expected > 0)
+        .then(|| metrics.corpus_terms_recalled as f64 / metrics.corpus_terms_expected as f64);
     metrics
 }
 
@@ -231,6 +249,7 @@ pub fn compare_with_allowed_changes(
             ));
         }
     }
+    check_vocabulary(&candidate, &baseline, &mut failures);
 
     Comparison {
         comparable: true,
@@ -238,6 +257,30 @@ pub fn compare_with_allowed_changes(
         baseline_key,
         passed: failures.is_empty(),
         failures,
+    }
+}
+
+fn check_vocabulary(
+    candidate: &AggregateMetrics,
+    baseline: &AggregateMetrics,
+    failures: &mut Vec<String>,
+) {
+    if let (Some(candidate), Some(baseline)) =
+        (candidate.corpus_term_recall, baseline.corpus_term_recall)
+    {
+        if candidate + 1e-9 < baseline {
+            failures.push(format!(
+                "term recall regressed: candidate {candidate:.4}, baseline {baseline:.4}"
+            ));
+        }
+    }
+    // Any new false replacement is a regression: it changes words the user
+    // actually said.
+    if candidate.corpus_false_replacements > baseline.corpus_false_replacements {
+        failures.push(format!(
+            "false replacements increased: candidate {}, baseline {}",
+            candidate.corpus_false_replacements, baseline.corpus_false_replacements
+        ));
     }
 }
 
@@ -594,6 +637,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_false_replacements_fail_the_comparison() {
+        let baseline = AggregateMetrics {
+            corpus_term_recall: Some(0.5),
+            corpus_false_replacements: 0,
+            ..AggregateMetrics::default()
+        };
+        let worse = AggregateMetrics {
+            corpus_term_recall: Some(0.75),
+            corpus_false_replacements: 1,
+            ..AggregateMetrics::default()
+        };
+        let mut failures = Vec::new();
+        check_vocabulary(&worse, &baseline, &mut failures);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("false replacements"));
+
+        let lower_recall = AggregateMetrics {
+            corpus_term_recall: Some(0.25),
+            ..AggregateMetrics::default()
+        };
+        let mut failures = Vec::new();
+        check_vocabulary(&lower_recall, &baseline, &mut failures);
+        assert!(failures[0].contains("term recall"));
+    }
+
+    #[test]
+    fn older_aggregates_without_vocabulary_fields_still_decode() {
+        let json = serde_json::to_value(AggregateMetrics::default()).expect("encode");
+        let mut object = json.as_object().expect("object").clone();
+        for key in [
+            "corpus_terms_expected",
+            "corpus_terms_recalled",
+            "corpus_term_recall",
+            "corpus_distractors",
+            "corpus_false_replacements",
+        ] {
+            object.remove(key);
+        }
+        let decoded: AggregateMetrics =
+            serde_json::from_value(serde_json::Value::Object(object)).expect("decode");
+        assert_eq!(decoded.corpus_false_replacements, 0);
+    }
+
+    #[test]
     fn incomplete_evidence_cannot_pass_comparison() {
         let comparison = compare(&[], &[]);
 
@@ -632,6 +719,8 @@ mod tests {
                 conditions: vec![],
                 tags: vec![],
                 include_in_wer: true,
+                terms: Vec::new(),
+                distractors: Vec::new(),
             }
         }
 
