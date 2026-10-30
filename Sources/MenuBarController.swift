@@ -147,6 +147,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Undo of the last automatic paste; the menu row shows only while possible.
     var canUndoLastPaste: (() -> Bool)?
     var undoLastPaste: (() -> Void)?
+    /// Pastes the last transcript as heard, before corrections; hidden when nil.
+    var undoLastCorrections: (() -> Void)?
     /// History fixes and the correction rules they suggest.
     var fixTranscript: ((UUID, String) -> [LearnedSubstitution])?
     var correctionSuggestions: (() -> [LearnedSubstitution])?
@@ -482,6 +484,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         copyLast.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(copyLast)
 
+        if undoLastCorrections != nil {
+            menu.addItem(actionItem(
+                title: "Paste Last Without Corrections",
+                action: #selector(undoLastCorrectionsAction),
+                symbol: "text.badge.minus"
+            ))
+        }
+
     }
 
     private func addSectionTitle(_ title: String, to menu: NSMenu) {
@@ -531,6 +541,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func undoLastPasteAction() {
         undoLastPaste?()
+    }
+
+    @objc private func undoLastCorrectionsAction() {
+        undoLastCorrections?()
     }
 
     @objc private func copyLastTranscriptAction() {
