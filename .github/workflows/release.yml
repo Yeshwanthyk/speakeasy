@@ -10,6 +10,8 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Run from main to release the Info.plist version; the release creates the tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,13 +34,23 @@ jobs:
         with:
           fetch-depth: 0 # build.sh derives the build number from the commit count
 
-      - name: Check tag matches Info.plist
+      - name: Resolve release tag
         run: |
           version="$(plutil -extract CFBundleShortVersionString raw -o - Info.plist)"
-          if [[ "v$version" != "$GITHUB_REF_NAME" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match Info.plist version $version" >&2
-            exit 1
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+              echo "Manual releases run from main, not $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+            tag="v$version"
+          else
+            tag="$GITHUB_REF_NAME"
+            if [[ "v$version" != "$tag" ]]; then
+              echo "Tag $tag does not match Info.plist version $version" >&2
+              exit 1
+            fi
           fi
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Import Developer ID certificate
         if: env.HAS_CERTIFICATE == 'true'
@@ -75,19 +87,19 @@ jobs:
 
       - name: Package
         run: |
-          ditto -c -k --keepParent build/Speakeasy.app "Speakeasy-$GITHUB_REF_NAME.zip"
-          shasum -a 256 "Speakeasy-$GITHUB_REF_NAME.zip" > "Speakeasy-$GITHUB_REF_NAME.zip.sha256"
+          ditto -c -k --keepParent build/Speakeasy.app "Speakeasy-$RELEASE_TAG.zip"
+          shasum -a 256 "Speakeasy-$RELEASE_TAG.zip" > "Speakeasy-$RELEASE_TAG.zip.sha256"
 
       - name: Sign appcast
         if: env.HAS_SPARKLE == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          zip="Speakeasy-$GITHUB_REF_NAME.zip"
+          zip="Speakeasy-$RELEASE_TAG.zip"
           signature="$(echo "$SPARKLE_PRIVATE_KEY" | build/vendor/sparkle/bin/sign_update --ed-key-file - "$zip")"
           version="$(plutil -extract CFBundleVersion raw -o - build/Speakeasy.app/Contents/Info.plist)"
           short="$(plutil -extract CFBundleShortVersionString raw -o - build/Speakeasy.app/Contents/Info.plist)"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$zip"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$zip"
           cat > appcast.xml <<XML
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -109,14 +121,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=("Speakeasy-$GITHUB_REF_NAME.zip" "Speakeasy-$GITHUB_REF_NAME.zip.sha256")
+          assets=("Speakeasy-$RELEASE_TAG.zip" "Speakeasy-$RELEASE_TAG.zip.sha256")
           if [[ -f appcast.xml ]]; then assets+=(appcast.xml); fi
           if [[ "$HAS_CERTIFICATE" == "true" && "$HAS_NOTARY" == "true" ]]; then
             notes="Apple Silicon only. Signed with Developer ID and notarized."
           else
             notes="Apple Silicon only. This build is not notarized: see the README's Install section for the one-time Open Anyway step."
           fi
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --title "Speakeasy $GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "Speakeasy $RELEASE_TAG" \
             --generate-notes \
             --notes "$notes"
