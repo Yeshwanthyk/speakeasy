@@ -228,6 +228,14 @@ private struct GeneralPage: View {
                     isSelected: model.mode == .pushToTalk
                 ) { model.chooseMode(.pushToTalk) }
             }
+            if model.mode == .pushToTalk && model.shortcut == .functionKey {
+                Divider()
+                ToggleRow(
+                    title: "Double-tap fn to lock",
+                    detail: "Tap fn twice quickly to keep dictating without holding it. Press fn again to finish.",
+                    isOn: $model.doubleTapLockEnabled
+                )
+            }
         }
 
         SettingsCard(title: "Recording overlay") {

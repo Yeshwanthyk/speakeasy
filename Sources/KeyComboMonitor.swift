@@ -45,24 +45,58 @@ struct PushToTalkKeyState: Sendable {
     }
 }
 
+/// What a fn press asks for: a delayed push-to-talk start and/or an
+/// immediate intent (a double-tap latch or the press that ends one).
+struct FunctionKeyPress: Equatable, Sendable {
+    var pushToTalkGeneration: UInt64?
+    var intent: DictationIntent?
+}
+
 struct FunctionKeyGestureState: Sendable {
+    /// Second tap must start within this long after the first tap ends.
+    static let doubleTapWindow: TimeInterval = 0.3
+
+    /// In push-to-talk, two quick taps latch hands-free dictation until the
+    /// next press. Toggle mode already latches on a single tap.
+    var doubleTapLockEnabled = true
     private(set) var isPressed = false
     private(set) var wasUsedAsModifier = false
     private(set) var didBeginPushToTalk = false
+    private(set) var isLatched = false
+    private var consumesRelease = false
+    private var lastQuickTapEnd: TimeInterval?
     private var generation: UInt64 = 0
 
-    mutating func press(mode: DictationInvocationMode) -> UInt64? {
-        guard !isPressed else { return nil }
+    mutating func press(mode: DictationInvocationMode, now: TimeInterval = 0) -> FunctionKeyPress {
+        guard !isPressed else { return FunctionKeyPress() }
         isPressed = true
         wasUsedAsModifier = false
         didBeginPushToTalk = false
+        consumesRelease = false
         generation &+= 1
-        return mode == .pushToTalk ? generation : nil
+        guard mode == .pushToTalk else { return FunctionKeyPress() }
+
+        if isLatched {
+            isLatched = false
+            consumesRelease = true
+            return FunctionKeyPress(intent: .pushToTalkEnded)
+        }
+        if doubleTapLockEnabled,
+           let lastQuickTapEnd,
+           now >= lastQuickTapEnd,
+           now - lastQuickTapEnd <= Self.doubleTapWindow {
+            self.lastQuickTapEnd = nil
+            isLatched = true
+            consumesRelease = true
+            return FunctionKeyPress(intent: .toggle)
+        }
+        return FunctionKeyPress(pushToTalkGeneration: generation)
     }
 
     mutating func markUsedAsModifier() -> DictationIntent? {
         guard isPressed else { return nil }
         wasUsedAsModifier = true
+        lastQuickTapEnd = nil
         generation &+= 1
         guard didBeginPushToTalk else { return nil }
         didBeginPushToTalk = false
@@ -73,6 +107,7 @@ struct FunctionKeyGestureState: Sendable {
         guard isPressed,
               !wasUsedAsModifier,
               !didBeginPushToTalk,
+              !consumesRelease,
               generation == expectedGeneration else {
             return false
         }
@@ -80,23 +115,43 @@ struct FunctionKeyGestureState: Sendable {
         return true
     }
 
-    mutating func release(mode: DictationInvocationMode) -> DictationIntent? {
+    mutating func release(mode: DictationInvocationMode, now: TimeInterval = 0) -> DictationIntent? {
         guard isPressed else { return nil }
         defer { reset() }
+        guard !consumesRelease else { return nil }
 
         switch mode {
         case .toggle:
             return wasUsedAsModifier ? nil : .toggle
         case .pushToTalk:
-            return didBeginPushToTalk ? .pushToTalkEnded : nil
+            if didBeginPushToTalk { return .pushToTalkEnded }
+            lastQuickTapEnd = wasUsedAsModifier ? nil : now
+            return nil
         }
     }
 
+    /// Ends a press without touching the latch, which outlives key presses.
     mutating func reset() {
         isPressed = false
         wasUsedAsModifier = false
         didBeginPushToTalk = false
+        consumesRelease = false
         generation &+= 1
+    }
+
+    /// Forgets a latch the coordinator may already have ended (Escape,
+    /// mode or shortcut changes).
+    mutating func clearLatch() {
+        isLatched = false
+        lastQuickTapEnd = nil
+    }
+}
+
+enum DoubleTapLockPreference {
+    static let key = "doubleTapLockEnabled"
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? true
     }
 }
 
@@ -143,6 +198,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
     private var eventHandlerRef: EventHandlerRef?
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    private let chordBreaker = FunctionChordBreaker()
 
     init?(
         shortcut: DictationShortcut,
@@ -243,6 +299,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
             carbonRegistration = candidate
             pushToTalkState.reset()
             functionKeyState.reset()
+            functionKeyState.clearLatch()
             escapeIsPressed = false
             return previous
         }
@@ -270,6 +327,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
             carbonRegistration = candidate
             pushToTalkState.reset()
             functionKeyState.reset()
+            functionKeyState.clearLatch()
             escapeIsPressed = false
             return previous
         }
@@ -284,6 +342,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
             self.isSuspended = isSuspended
             pushToTalkState.reset()
             functionKeyState.reset()
+            functionKeyState.clearLatch()
             escapeIsPressed = false
         }
     }
@@ -327,6 +386,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
                 switch event.type {
                 case .keyDown where !event.isARepeat && !escapeIsPressed:
                     escapeIsPressed = true
+                    functionKeyState.clearLatch()
                     return .cancel
                 case .keyUp:
                     escapeIsPressed = false
@@ -365,6 +425,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
         let functionIsDown = event.cgEvent?.flags.contains(.maskSecondaryFn)
             ?? event.modifierFlags.contains(.function)
         var scheduledGeneration: UInt64?
+        let now = event.timestamp
         let intent = inputLock.withLock { () -> DictationIntent? in
             guard !isSuspended, shortcut == .functionKey else { return nil }
 
@@ -372,10 +433,12 @@ final class KeyComboMonitor: DictationKeyMonitoring {
                 if !ShortcutModifiers(eventFlags: event.modifierFlags).isEmpty {
                     return functionKeyState.markUsedAsModifier()
                 }
-                scheduledGeneration = functionKeyState.press(mode: invocationMode)
-                return nil
+                functionKeyState.doubleTapLockEnabled = DoubleTapLockPreference.isEnabled()
+                let press = functionKeyState.press(mode: invocationMode, now: now)
+                scheduledGeneration = press.pushToTalkGeneration
+                return press.intent
             }
-            return functionKeyState.release(mode: invocationMode)
+            return functionKeyState.release(mode: invocationMode, now: now)
         }
 
         if let scheduledGeneration {
@@ -399,6 +462,7 @@ final class KeyComboMonitor: DictationKeyMonitoring {
             }
             if shouldBegin {
                 self.emit(.pushToTalkBegan)
+                self.chordBreaker.post()
             }
         }
     }

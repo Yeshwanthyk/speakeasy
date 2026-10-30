@@ -1386,8 +1386,8 @@ final class AppCoordinator: @unchecked Sendable {
         )
 
         guard activeSampleCount >= Self.minActiveSamples else {
+            // Accidental taps are discarded silently; the outcome is still traced.
             logger.debug("Recording too short: \(activeSampleCount) active samples < \(Self.minActiveSamples) minimum")
-            feedback.notify(event: .error("Recording too short"))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
@@ -1398,7 +1398,7 @@ final class AppCoordinator: @unchecked Sendable {
             logger.debug(
                 "Speech gate rejected audio: rms=\(rms, format: .fixed(precision: 4)) floor=\(speech.noiseFloorRMS, format: .fixed(precision: 4)) voiced=\(speech.voicedFrameCount)/\(speech.analyzedFrameCount) longestRun=\(speech.longestVoicedRun)"
             )
-            feedback.notify(event: .error("No speech detected"))
+            feedback.notify(event: .status("No speech detected"))
             if case .eligible = finishTranscription(token: token) {
                 recordTerminal(trace: trace, outcome: .noSpeech)
             }
@@ -1549,7 +1549,7 @@ final class AppCoordinator: @unchecked Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            feedback.notify(event: .status("No speech detected"))
             return
         }
 
@@ -1562,7 +1562,7 @@ final class AppCoordinator: @unchecked Sendable {
             logger.notice("Filtered transcript (\(String(describing: reason), privacy: .public))")
             trace.stageChanges = [StageChange(stage: "hallucinationFilter", count: 1)]
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            feedback.notify(event: .status("No speech detected"))
             return
         }
 
@@ -1571,7 +1571,7 @@ final class AppCoordinator: @unchecked Sendable {
         let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else {
             recordTerminal(trace: trace, outcome: .noSpeech)
-            feedback.notify(event: .error("No speech detected"))
+            feedback.notify(event: .status("No speech detected"))
             return
         }
         trace.stageChanges = processedTranscript.stageChanges

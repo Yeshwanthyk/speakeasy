@@ -69,6 +69,9 @@ final class SettingsModel: ObservableObject {
     @Published var fuzzyCorrectionsEnabled = FuzzyCorrectionPreference.isEnabled {
         didSet { UserDefaults.standard.set(fuzzyCorrectionsEnabled, forKey: FuzzyCorrectionPreference.key) }
     }
+    @Published var doubleTapLockEnabled = DoubleTapLockPreference.isEnabled() {
+        didSet { UserDefaults.standard.set(doubleTapLockEnabled, forKey: DoubleTapLockPreference.key) }
+    }
     @Published var avoidsBluetoothMicrophone = BluetoothMicrophonePreference.isAvoidingBluetooth() {
         didSet {
             UserDefaults.standard.set(avoidsBluetoothMicrophone, forKey: BluetoothMicrophonePreference.key)
