@@ -39,9 +39,14 @@ protocol Pasting {
     func copy(_ text: String) -> TranscriptDeliveryOutcome
     func paste(_ text: String) -> TranscriptDeliveryOutcome
     func paste(_ text: String, target: TranscriptDeliveryTarget?) -> TranscriptDeliveryOutcome
+    /// Called at key-up, while inference runs, so a paste moments later can
+    /// skip work it would otherwise do on its critical path.
+    func preparePaste()
 }
 
 extension Pasting {
+    func preparePaste() {}
+
     func paste(
         _ text: String,
         target: TranscriptDeliveryTarget?
@@ -825,12 +830,8 @@ final class AppCoordinator: @unchecked Sendable {
             livePreviewController: LivePreviewController(),
             transcriptCorrectionStore: correctionStore
         )
-        recordingFeedback.configureBottom(
-            mode: { [weak self] in self?.selectedInvocationMode() ?? .toggle },
-            selectMode: { [weak self] in self?.setInvocationMode($0) },
-            copyLast: { [weak self] in _ = self?.copyLastTranscript() },
-            pasteLast: { [weak self] in _ = self?.pasteLastTranscript() },
-            undoLast: { [weak self] in self?.undoLastCorrections() }
+        recordingFeedback.configure(
+            invocationMode: { [weak self] in self?.selectedInvocationMode() ?? .toggle }
         )
         onLivePreviewTextChange = { [weak recordingFeedback] in recordingFeedback?.updatePreview($0) }
     }
@@ -1048,6 +1049,7 @@ final class AppCoordinator: @unchecked Sendable {
                 stateLock.withLock { transcriber }.cancel(runID: rewarm)
             }
             stopLivePreviewLoop()
+            paster.preparePaste()
             transitionRecordingFeedback(to: .processing)
             stateLock.withLock { segmentCommit?.beginStopping() }
             segmentQueue.sync {}
@@ -1557,6 +1559,19 @@ final class AppCoordinator: @unchecked Sendable {
             trace.markTranscriptionEnded()
             // Immutable snapshot for the async hop below.
             let settledTrace = trace
+            let activeDurationSeconds = Double(activeSampleCount) / Self.transcriptionSampleRate
+            // Filtering and corrections are pure; finish them here so the
+            // main-actor hop below only applies the decision and pastes.
+            let decision = result.map { text -> DictationTextDecision in
+                let postProcessor = self.stateLock.withLock { self.transcriptPostProcessor }
+                return DictationTextDecision.evaluate(
+                    text,
+                    filter: self.hallucinationFilter,
+                    postProcessor: postProcessor,
+                    activeDurationSeconds: activeDurationSeconds,
+                    activeRMS: rms
+                )
+            }
 
             // One main-actor task keeps settlement and delivery in the same
             // sequential order the previous main-queue hop provided.
@@ -1567,14 +1582,12 @@ final class AppCoordinator: @unchecked Sendable {
 
                 switch settlement {
                 case .eligible:
-                    switch result {
-                    case .success(let text):
+                    switch decision {
+                    case .success(let textDecision):
                         self.failedCaptureReplayBuffer.clear()
-                        await self.handleTranscriptionResult(
-                            text,
+                        self.handleTranscriptionResult(
+                            textDecision,
                             trace: settledTrace,
-                            activeDurationSeconds: Double(activeSampleCount) / Self.transcriptionSampleRate,
-                            activeRMS: rms,
                             target: target
                         )
                     case .failure(let error):
@@ -1596,50 +1609,40 @@ final class AppCoordinator: @unchecked Sendable {
 
     @MainActor
     private func handleTranscriptionResult(
-        _ text: String,
+        _ decision: DictationTextDecision,
         trace: TranscriptionTrace,
-        activeDurationSeconds: TimeInterval? = nil,
-        activeRMS: Float? = nil,
         target: TranscriptDeliveryTarget = .unavailable
-    ) async {
+    ) {
         var trace = trace
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
+        let settledTranscript: ProcessedTranscript
+        switch decision {
+        case .empty:
             recordTerminal(trace: trace, outcome: .noSpeech)
             noteAttempt(.noSpeech)
             feedback.notify(event: .status("No speech detected"))
             return
-        }
-
-        let hallucinationVerdict = hallucinationFilter.verdict(
-            for: trimmed,
-            activeDurationSeconds: activeDurationSeconds,
-            activeRMS: activeRMS
-        )
-        if case .rejected(let reason) = hallucinationVerdict {
+        case .hallucination(let reason):
             logger.notice("Filtered transcript (\(String(describing: reason), privacy: .public))")
             trace.stageChanges = [StageChange(stage: "hallucinationFilter", count: 1)]
             recordTerminal(trace: trace, outcome: .noSpeech)
             noteAttempt(.noSpeech)
             feedback.notify(event: .status("No speech detected"))
             return
+        case .accepted(let transcript):
+            settledTranscript = transcript
         }
+        trace.stageChanges = settledTranscript.stageChanges
 
-        let postProcessor = stateLock.withLock { transcriptPostProcessor }
-        let processedTranscript = postProcessor.process(trimmed)
-        let finalText = processedTranscript.finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !finalText.isEmpty else {
-            recordTerminal(trace: trace, outcome: .noSpeech)
-            noteAttempt(.noSpeech)
-            feedback.notify(event: .status("No speech detected"))
+        guard let transcriptStore else {
+            deliverTranscript(
+                settledTranscript,
+                trace: trace,
+                recordID: nil,
+                target: target
+            )
             return
         }
-        trace.stageChanges = processedTranscript.stageChanges
-        let settledTranscript = ProcessedTranscript(
-            rawText: processedTranscript.rawText,
-            finalText: finalText,
-            stageChanges: processedTranscript.stageChanges
-        )
+
         let record = TranscriptRecord(
             id: trace.id,
             rawText: settledTranscript.rawText,
@@ -1649,42 +1652,27 @@ final class AppCoordinator: @unchecked Sendable {
             timings: trace.timingSnapshot,
             stageChanges: settledTranscript.stageChanges
         )
-
-        guard let transcriptStore else {
-            deliverPersistedTranscript(
-                settledTranscript,
-                trace: trace,
-                recordID: nil,
-                target: target
-            )
-            return
-        }
-
+        // The record is in memory and its snapshot write is already enqueued
+        // on the store's serial writer, ahead of the outcome update that
+        // delivery schedules. Pasting does not wait for the disk: a crash in
+        // the few milliseconds before the write lands leaves the text in the
+        // target app or on the clipboard, whereas waiting delayed every paste.
         let persistence = transcriptStore.append(record)
+        deliverTranscript(
+            settledTranscript,
+            trace: trace,
+            recordID: record.id,
+            target: target
+        )
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard await persistence.value else {
-                self.logger.error("Transcript could not be persisted; skipping paste")
-                self.recordTerminal(
-                    trace: trace,
-                    outcome: .transcriptPersistenceFailed,
-                    text: settledTranscript.finalText
-                )
-                self.feedback.notify(event: .error("Transcript could not be saved"))
-                self.recordingFeedback.showError("Transcript could not be saved")
-                return
-            }
-            self.deliverPersistedTranscript(
-                settledTranscript,
-                trace: trace,
-                recordID: record.id,
-                target: target
-            )
+            guard !(await persistence.value), let self else { return }
+            self.logger.error("Transcript could not be saved to history")
+            self.feedback.notify(event: .error("Transcript could not be saved to history"))
         }
     }
 
     @discardableResult
-    private func deliverPersistedTranscript(
+    private func deliverTranscript(
         _ transcript: ProcessedTranscript,
         trace: TranscriptionTrace,
         recordID: UUID?,
@@ -2028,6 +2016,9 @@ final class AppCoordinator: @unchecked Sendable {
     /// can never hit an in-flight preview or vice versa.
     private static let previewRunIDFlag: UInt64 = 1 << 63
     private var previewRunSequence: UInt64 = 0
+    /// The preview pass dispatched to `previewQueue` and not yet settled.
+    /// Guarded by `stateLock`.
+    private var previewRunInFlight: UInt64?
 
     private func startLivePreviewLoop() {
         livePreviewController?.reset()
@@ -2054,6 +2045,19 @@ final class AppCoordinator: @unchecked Sendable {
         stateLock.withLock { self.segmentTimer = segmentTimer }
     }
 
+    /// A preview pass holds the native session mutex, so final inference
+    /// would otherwise wait for a pass whose text is about to be discarded.
+    /// Late or queued cancels are inert: preview run IDs are never reused.
+    private func cancelInFlightPreview() {
+        let pending = stateLock.withLock { () -> (UInt64, Transcriber)? in
+            guard let runID = previewRunInFlight else { return nil }
+            previewRunInFlight = nil
+            return (runID, transcriber)
+        }
+        guard let (runID, transcriber) = pending else { return }
+        transcriber.cancel(runID: runID)
+    }
+
     private func stopLivePreviewLoop() {
         let timer = stateLock.withLock { () -> DispatchSourceTimer? in
             let timer = previewTimer
@@ -2061,6 +2065,7 @@ final class AppCoordinator: @unchecked Sendable {
             return timer
         }
         timer?.cancel()
+        cancelInFlightPreview()
         let segmentTimer = stateLock.withLock { () -> DispatchSourceTimer? in
             defer { self.segmentTimer = nil }
             return self.segmentTimer
@@ -2134,13 +2139,27 @@ final class AppCoordinator: @unchecked Sendable {
             return previewRunSequence
         }
         let previewRunID = Self.previewRunIDFlag | sequence
+        stateLock.withLock { previewRunInFlight = previewRunID }
 
         previewQueue.async { [weak self] in
             guard let self else { return }
-            let transcriber = self.stateLock.withLock { self.transcriber }
+            // Key-up may have landed between scheduling and now; a pass that
+            // starts after it would only delay final inference.
+            let transcriber = self.stateLock.withLock { () -> Transcriber? in
+                guard case .recording = self.state, self.previewRunInFlight == previewRunID else {
+                    return nil
+                }
+                return self.transcriber
+            }
+            guard let transcriber else { return }
             let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Speakeasy live preview inference")
             let text = try? transcriber.transcribe(samples: samples, runID: previewRunID)
             ProcessInfo.processInfo.endActivity(activity)
+            self.stateLock.withLock {
+                if self.previewRunInFlight == previewRunID {
+                    self.previewRunInFlight = nil
+                }
+            }
             if text != nil {
                 self.stateLock.withLock { self.lastNativeInferenceAt = self.nativeClock() }
             }

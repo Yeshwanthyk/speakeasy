@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startEngine() async throws -> AppCoordinator {
         if let coordinator { return coordinator }
 
+        // Resolve the paste and undo keys now, not on the first paste.
+        PasteKeyCodeCache.shared.startMonitoring()
         let feedback = SystemFeedback()
         let coordinator = try await AppCoordinator(feedback: feedback)
         try coordinator.prepareCapture()
@@ -180,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     coordinator?.canUndoLastPaste() ?? false
                 }
                 menuBarController.undoLastPaste = { [weak coordinator] in coordinator?.undoLastPaste() }
+                menuBarController.undoLastCorrections = { [weak coordinator] in coordinator?.undoLastCorrections() }
                 menuBarController.fixTranscript = { [weak coordinator] id, text in
                     coordinator?.fixTranscript(id: id, fixedText: text) ?? []
                 }

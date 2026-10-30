@@ -98,7 +98,9 @@ final class TranscriptStore {
         }
     }
 
-    /// Adds a durable-before-delivery record snapshot.
+    /// Adds a record in memory and enqueues its snapshot write before
+    /// returning, so later updates land after it. Dictation delivery does not
+    /// await the returned task; it only reports a failed write.
     @discardableResult
     func append(_ record: TranscriptRecord) -> Task<Bool, Never> {
         records.append(record)

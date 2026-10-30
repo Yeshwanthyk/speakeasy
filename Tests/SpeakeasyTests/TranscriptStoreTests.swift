@@ -67,6 +67,26 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(TranscriptStore(fileURL: url).allEntries(), ["alpha", "beta"])
     }
 
+    /// Delivery pastes right after `append` and then records the outcome
+    /// without awaiting either write; the outcome must still land last.
+    func testUnawaitedAppendThenUpdatePersistsTheDeliveredOutcome() async {
+        let url = temporaryHistoryURL()
+        let store = TranscriptStore(fileURL: url)
+        let record = TranscriptRecord(
+            rawText: "raw",
+            finalText: "final",
+            backend: "test",
+            outcome: .transcriptPersisted
+        )
+
+        _ = store.append(record)
+        XCTAssertEqual(store.allRecords().last?.id, record.id)
+        let updated = await store.update(id: record.id, outcome: .eventsPosted, timings: nil).value
+
+        XCTAssertTrue(updated)
+        XCTAssertEqual(decodedHistory(at: url)?.map(\.outcome), [.eventsPosted])
+    }
+
     func testAppendResultCompletesAfterDiskWrite() async {
         let url = temporaryHistoryURL()
         let store = TranscriptStore(fileURL: url)

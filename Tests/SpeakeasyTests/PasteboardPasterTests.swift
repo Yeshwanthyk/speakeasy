@@ -239,6 +239,95 @@ final class PasteboardPasterTests: XCTestCase {
         XCTAssertEqual(requestedKeyCodes, [47, 47])
     }
 
+    func testPreparedSnapshotIsReusedWhenTheClipboardIsUnchanged() {
+        let access = FakePasteboardAccess(snapshot: Self.oldClipboard)
+        let prepareQueue = DispatchQueue(label: "com.speakeasy.tests.paste.prepare")
+        var keyRefreshCount = 0
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            targetProvider: TestDeliveryTargetProvider(target: .external(Self.application)),
+            prepareQueue: prepareQueue,
+            settleDelay: 0,
+            refreshPasteKey: { keyRefreshCount += 1 },
+            createPasteEvents: { PasteEvents {} }
+        )
+
+        paster.preparePaste()
+        prepareQueue.sync {}
+        XCTAssertEqual(access.snapshotCallCount, 1)
+        XCTAssertEqual(keyRefreshCount, 1)
+
+        XCTAssertEqual(paster.paste("new", target: .external(Self.application)), .eventsPosted)
+        XCTAssertEqual(access.snapshotCallCount, 1, "the paste must not snapshot again")
+        XCTAssertTrue(waitUntil { access.restoredSnapshot != nil })
+        XCTAssertEqual(access.restoredSnapshot, Self.oldClipboard)
+    }
+
+    func testPreparedSnapshotIsIgnoredAfterTheClipboardChanges() {
+        let access = FakePasteboardAccess(snapshot: Self.oldClipboard)
+        let prepareQueue = DispatchQueue(label: "com.speakeasy.tests.paste.prepare.stale")
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            targetProvider: TestDeliveryTargetProvider(target: .external(Self.application)),
+            prepareQueue: prepareQueue,
+            settleDelay: 0,
+            refreshPasteKey: {},
+            createPasteEvents: { PasteEvents {} }
+        )
+        let newer = PasteboardSnapshot(items: [
+            PasteboardItemSnapshot(representations: [
+                PasteboardRepresentationSnapshot(type: "public.utf8-plain-text", data: Data("copied later".utf8))
+            ])
+        ])
+
+        paster.preparePaste()
+        prepareQueue.sync {}
+        access.externalChange(to: newer)
+
+        XCTAssertEqual(paster.paste("new", target: .external(Self.application)), .eventsPosted)
+        XCTAssertEqual(access.snapshotCallCount, 2)
+        XCTAssertTrue(waitUntil { access.restoredSnapshot != nil })
+        XCTAssertEqual(access.restoredSnapshot, newer)
+    }
+
+    func testRepeatedPrepareWithoutChangesSnapshotsOnce() {
+        let access = FakePasteboardAccess(snapshot: Self.oldClipboard)
+        let prepareQueue = DispatchQueue(label: "com.speakeasy.tests.paste.prepare.repeat")
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            prepareQueue: prepareQueue,
+            refreshPasteKey: {}
+        )
+
+        paster.preparePaste()
+        paster.preparePaste()
+        prepareQueue.sync {}
+
+        XCTAssertEqual(access.snapshotCallCount, 1)
+    }
+
+    func testPasteWithoutPreparationStillSnapshots() {
+        let access = FakePasteboardAccess(snapshot: Self.oldClipboard)
+        let paster = PasteboardPaster(
+            pasteboard: access,
+            targetProvider: TestDeliveryTargetProvider(target: .external(Self.application)),
+            settleDelay: 0,
+            createPasteEvents: { PasteEvents {} }
+        )
+
+        XCTAssertEqual(paster.paste("new", target: .external(Self.application)), .eventsPosted)
+        XCTAssertEqual(access.snapshotCallCount, 1)
+        XCTAssertTrue(waitUntil { access.restoredSnapshot != nil })
+        XCTAssertEqual(access.restoredSnapshot, Self.oldClipboard)
+    }
+
+    private static let oldClipboard = PasteboardSnapshot(items: [
+        PasteboardItemSnapshot(representations: [
+            PasteboardRepresentationSnapshot(type: "public.utf8-plain-text", data: Data("old".utf8)),
+            PasteboardRepresentationSnapshot(type: "public.png", data: Data([1, 2, 3]))
+        ])
+    ])
+
     private static let application = TranscriptDeliveryApplication(
         processIdentifier: 101,
         bundleIdentifier: "com.example.editor"
@@ -267,11 +356,15 @@ private final class FakePasteboardAccess: PasteboardAccess {
     private(set) var writes: [(text: String, transient: Bool)] = []
     private(set) var restoreAttemptCount = 0
     private(set) var changeCountReadCount = 0
+    private(set) var snapshotCallCount = 0
     private var currentChangeCount = 10
+    private var lastWriteChangeCount = 11
+    private var currentSnapshot: PasteboardSnapshot
     private let verifiedString: String?
 
     init(snapshot: PasteboardSnapshot, verifiedString: String? = nil) {
         self.initialSnapshot = snapshot
+        self.currentSnapshot = snapshot
         self.verifiedString = verifiedString
     }
 
@@ -280,12 +373,16 @@ private final class FakePasteboardAccess: PasteboardAccess {
         return currentChangeCount
     }
 
-    func snapshot() -> PasteboardSnapshot? { initialSnapshot }
+    func snapshot() -> PasteboardSnapshot? {
+        snapshotCallCount += 1
+        return currentSnapshot
+    }
 
     func write(string: String, transient: Bool) -> Bool {
         writes.append((string, transient))
         writtenString = string
         currentChangeCount += 1
+        lastWriteChangeCount = currentChangeCount
         return true
     }
 
@@ -293,16 +390,20 @@ private final class FakePasteboardAccess: PasteboardAccess {
         verifiedString ?? writtenString
     }
 
+    /// Succeeds only while Speakeasy's own write is still the newest change.
     func restore(_ snapshot: PasteboardSnapshot) -> Bool {
         restoreAttemptCount += 1
-        guard changeCount == 11 else { return false }
+        guard changeCount == lastWriteChangeCount else { return false }
         restoredSnapshot = snapshot
         currentChangeCount += 1
         return true
     }
 
-    func externalChange() {
+    func externalChange(to snapshot: PasteboardSnapshot? = nil) {
         currentChangeCount += 1
+        if let snapshot {
+            currentSnapshot = snapshot
+        }
     }
 }
 
