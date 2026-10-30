@@ -99,7 +99,7 @@ private struct StepHeader: View {
         HStack(spacing: 14) {
             IconTile(symbol: symbol, tint: tint, size: 44)
             VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 22, weight: .bold))
+                Text(title).font(SettingsType.pageTitle).accessibilityAddTraits(.isHeader)
                 Text(subtitle).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

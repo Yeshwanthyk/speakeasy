@@ -15,7 +15,7 @@ struct MeetingsPage: View {
 
     var body: some View {
         SettingsCard {
-            MeetingToggleRow(
+            ToggleRow(
                 title: "Record meetings",
                 detail: "Adds Record Meeting to the menu. Speakeasy saves the audio and a transcript of you and the other side on this Mac; nothing is uploaded.",
                 isOn: $enabled
@@ -26,7 +26,7 @@ struct MeetingsPage: View {
             }
             if enabled {
                 Divider()
-                MeetingToggleRow(
+                ToggleRow(
                     title: "Offer to record calls",
                     detail: MicrophoneClientMonitor.isSupported
                         ? "When Zoom, Teams, FaceTime, Slack, or a browser call uses the microphone, ask whether to record. Never records on its own."
@@ -39,7 +39,7 @@ struct MeetingsPage: View {
                     controller.updateDetection()
                 }
                 Divider()
-                MeetingToggleRow(
+                ToggleRow(
                     title: "Include the other side",
                     detail: "Records system audio (needs Screen Recording access). Off records only your microphone.",
                     isOn: $capturesSystemAudio
@@ -48,13 +48,10 @@ struct MeetingsPage: View {
                     UserDefaults.standard.set(value, forKey: MeetingPreferences.systemAudioKey)
                 }
                 Divider()
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Keep meeting audio").font(.system(size: 13, weight: .semibold))
-                        Text("About 230 MB per hour with system audio. Transcripts are always kept.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
+                SettingsRow(
+                    "Keep meeting audio",
+                    detail: "About 230 MB per hour with system audio. Transcripts are always kept."
+                ) {
                     Picker("Keep meeting audio", selection: $keepAudioDays) {
                         ForEach(MeetingPreferences.keepAudioChoices, id: \.self) { days in
                             Text(Self.label(forKeepDays: days)).tag(days)
@@ -72,11 +69,17 @@ struct MeetingsPage: View {
         }
 
         if controller.meetings.isEmpty {
-            Text(enabled ? "No meetings yet. Choose Record Meeting from the menu bar." : "")
-                .foregroundStyle(.secondary)
+            if enabled {
+                SettingsEmptyState(
+                    symbol: "person.2",
+                    title: "No meetings yet",
+                    detail: "Choose Record Meeting from the menu bar."
+                )
+            }
         } else {
-            LazyVStack(spacing: 8) {
+            SettingsCard(title: "Recordings") {
                 ForEach(controller.meetings) { meeting in
+                    if meeting.id != controller.meetings.first?.id { Divider() }
                     MeetingRow(
                         meeting: meeting,
                         isRecording: controller.recording?.id == meeting.id,
@@ -111,24 +114,6 @@ struct MeetingsPage: View {
     }
 }
 
-private struct MeetingToggleRow: View {
-    let title: String
-    let detail: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        Toggle(isOn: $isOn) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .toggleStyle(.switch)
-    }
-}
-
 private struct MeetingRow: View {
     let meeting: MeetingManifest
     let isRecording: Bool
@@ -138,28 +123,31 @@ private struct MeetingRow: View {
     let delete: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(meeting.title).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                HStack(spacing: 10) {
-                    Label(SettingsFormat.historyDate.string(from: meeting.startedAt), systemImage: "calendar")
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(meeting.title).font(SettingsType.rowTitleEmphasis).lineLimit(2)
+                HStack(spacing: 6) {
+                    Text(SettingsFormat.historyDate.string(from: meeting.startedAt))
                     if let duration = meeting.duration {
-                        Label(MeetingFormat.clock(duration), systemImage: "clock")
-                    }
-                    if isRecording {
-                        Label("Recording", systemImage: "record.circle").foregroundStyle(.red)
-                    } else if meeting.state == .interrupted {
-                        Label("Interrupted", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                        Text("·")
+                        Text(MeetingFormat.clock(duration))
                     }
                     if !meeting.hasAudio {
-                        Label("Transcript only", systemImage: "text.alignleft")
+                        Text("·")
+                        Text("Transcript only")
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(SettingsType.meta)
+                .foregroundColor(.secondary)
             }
-            Spacer(minLength: 8)
-            Button("Open", action: open).controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            if isRecording {
+                StatusPill(text: "Recording", tint: .red)
+            } else if meeting.state == .interrupted {
+                StatusPill(text: "Interrupted", tint: .orange)
+            }
+            Button("Open", action: open)
             Menu {
                 Button("Show in Finder", action: reveal)
                 if meeting.hasAudio && !isRecording {
@@ -174,9 +162,8 @@ private struct MeetingRow: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .accessibilityLabel("More actions for \(meeting.title)")
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.04)))
     }
 }
 
@@ -188,7 +175,7 @@ private struct MeetingTranscriptSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(title).font(.headline).lineLimit(1)
+                Text(title).font(SettingsType.rowTitleEmphasis).lineLimit(1)
                 Spacer()
                 Button("Copy") {
                     NSPasteboard.general.clearContents()
@@ -217,12 +204,15 @@ struct MeetingLiveView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 if let recording = controller.recording {
-                    Image(systemName: "record.circle.fill").foregroundStyle(.red)
-                    Text(recording.title).font(.headline).lineLimit(1)
+                    Image(systemName: "record.circle.fill")
+                        .foregroundStyle(.red)
+                        .accessibilityLabel("Recording")
+                    Text(recording.title).font(SettingsType.rowTitleEmphasis).lineLimit(1)
                     Spacer()
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         Text(MeetingFormat.clock(context.date.timeIntervalSince(recording.startedAt)))
-                            .font(.system(.body, design: .monospaced))
+                            .font(SettingsType.meta)
+                            .foregroundColor(.secondary)
                     }
                     Button("Stop") { controller.stop() }
                 } else {
@@ -235,7 +225,7 @@ struct MeetingLiveView: View {
             }
             if controller.recording?.capturesSystemAudio == false {
                 Text("Microphone only — the other side is not being recorded.")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(SettingsType.rowDetail).foregroundStyle(.orange)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -243,12 +233,15 @@ struct MeetingLiveView: View {
                         ForEach(Array(MeetingFormat.turns(controller.liveSegments).enumerated()), id: \.offset) { index, turn in
                             HStack(alignment: .top, spacing: 8) {
                                 Text(turn.track.label)
-                                    .font(.caption.weight(.semibold))
+                                    .font(SettingsType.rowDetail.weight(.semibold))
                                     .foregroundStyle(turn.track == .you ? Color.accentColor : Color.secondary)
                                     .frame(width: 40, alignment: .leading)
-                                Text(turn.text).textSelection(.enabled)
+                                Text(turn.text)
+                                    .font(SettingsType.rowTitle)
+                                    .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
+                            .accessibilityElement(children: .combine)
                             .id(index)
                         }
                     }
@@ -260,7 +253,7 @@ struct MeetingLiveView: View {
             }
             if controller.liveSegments.isEmpty && controller.recording != nil {
                 Text("Speech appears here a few seconds after each pause.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(SettingsType.rowDetail).foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -305,18 +298,22 @@ private struct MeetingOfferView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: "phone.fill").foregroundStyle(.green)
+            Image(systemName: "phone.fill")
+                .foregroundStyle(.green)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(offer.appName) call detected").font(.system(size: 13, weight: .semibold))
-                Text("Record and transcribe it on this Mac?").font(.caption).foregroundStyle(.secondary)
+                Text("\(offer.appName) call detected").font(SettingsType.rowTitleEmphasis)
+                Text("Record and transcribe it on this Mac?").font(SettingsType.rowDetail).foregroundStyle(.secondary)
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 8)
             Button("Not Now", action: dismiss)
             Button("Record", action: record).keyboardShortcut(.defaultAction)
         }
-        .padding(14)
+        .padding(.horizontal, SettingsMetrics.rowInset)
+        .padding(.vertical, SettingsMetrics.cardPaddingY)
         .frame(width: 400)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: SettingsMetrics.cardRadius + 2, style: .continuous))
     }
 }
 

@@ -112,9 +112,10 @@ struct CorrectionEditorView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Personal corrections")
-                    .font(.title2.weight(.semibold))
+                    .font(SettingsType.pageTitle)
+                    .accessibilityAddTraits(.isHeader)
                 Text("Replace exact words or phrases after local transcription. Rules stay on this Mac and do not change speech-model inference.")
-                    .font(.callout)
+                    .font(SettingsType.pageSubtitle)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -135,7 +136,7 @@ struct CorrectionEditorView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if let errorMessage = model.errorMessage {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                        .font(.callout)
+                        .font(SettingsType.rowDetail)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Error: \(errorMessage)")
@@ -150,7 +151,7 @@ struct CorrectionEditorView: View {
                     .disabled(!model.canAddCorrection)
 
                     Text("\(model.corrections.count) of \(TranscriptPostProcessor.maxCorrections)")
-                        .font(.caption.monospacedDigit())
+                        .font(SettingsType.meta)
                         .foregroundStyle(.secondary)
 
                     Spacer()
@@ -185,16 +186,12 @@ struct CorrectionEditorView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "text.badge.checkmark")
-                .font(.system(size: 30, weight: .regular))
-                .foregroundStyle(.secondary)
-            Text("No personal corrections yet")
-                .font(.headline)
-            Text("Add the phrase Speakeasy hears and the text you want written instead.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(spacing: 12) {
+            SettingsEmptyState(
+                symbol: "text.badge.checkmark",
+                title: "No personal corrections yet",
+                detail: "Add the phrase Speakeasy hears and the text you want written instead."
+            )
             Button("Add Your First Correction") {
                 model.addCorrection()
             }
@@ -207,15 +204,16 @@ struct CorrectionEditorView: View {
     private var correctionList: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("ON")
+                Text("On")
                     .frame(width: 28)
-                Text("WHEN SPEAKEASY HEARS")
+                Text("When Speakeasy hears")
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("WRITE")
+                Text("Write")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Color.clear.frame(width: 28)
             }
-            .font(.caption2.weight(.semibold))
+            .font(SettingsType.sectionLabel)
+            .accessibilityHidden(true)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
