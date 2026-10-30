@@ -14,12 +14,14 @@ protocol KeyboardLayoutTranslating {
 /// the ASCII-capable layout for non-Latin layouts, then ANSI V.
 enum PasteKeyResolver {
     static let fallbackKeyCode = UInt16(kVK_ANSI_V)
+    static let undoFallbackKeyCode = UInt16(kVK_ANSI_Z)
     private static let keyCodes: Range<UInt16> = 0..<128
 
     static func keyCode(
         for character: Character,
         current: KeyboardLayoutTranslating?,
-        asciiCapable: KeyboardLayoutTranslating?
+        asciiCapable: KeyboardLayoutTranslating?,
+        fallback: UInt16 = fallbackKeyCode
     ) -> UInt16 {
         let target = String(character).lowercased()
         func find(_ layout: KeyboardLayoutTranslating?, command: Bool) -> UInt16? {
@@ -29,7 +31,7 @@ enum PasteKeyResolver {
         return find(current, command: true)
             ?? find(current, command: false)
             ?? find(asciiCapable, command: false)
-            ?? fallbackKeyCode
+            ?? fallback
     }
 }
 
@@ -78,24 +80,29 @@ struct SystemKeyboardLayout: KeyboardLayoutTranslating {
     }
 }
 
-/// Text Input Sources must be read on the main thread. Paste requests on the
-/// main thread refresh the cached key; other threads reuse the last value.
+/// Text Input Sources must be read on the main thread. Requests on the main
+/// thread refresh the cached key; other threads reuse the last value.
 final class PasteKeyCodeCache: @unchecked Sendable {
     static let shared = PasteKeyCodeCache()
 
     private let lock = UnfairLock()
-    private var cached = PasteKeyResolver.fallbackKeyCode
+    private var cached: [Character: CGKeyCode] = [:]
 
     func current() -> CGKeyCode {
+        keyCode(for: "v", fallback: PasteKeyResolver.fallbackKeyCode)
+    }
+
+    func keyCode(for character: Character, fallback: CGKeyCode) -> CGKeyCode {
         if Thread.isMainThread {
             let resolved = PasteKeyResolver.keyCode(
-                for: "v",
+                for: character,
                 current: SystemKeyboardLayout.current(),
-                asciiCapable: SystemKeyboardLayout.asciiCapable()
+                asciiCapable: SystemKeyboardLayout.asciiCapable(),
+                fallback: fallback
             )
-            lock.withLock { cached = resolved }
+            lock.withLock { cached[character] = resolved }
             return resolved
         }
-        return lock.withLock { cached }
+        return lock.withLock { cached[character] ?? fallback }
     }
 }

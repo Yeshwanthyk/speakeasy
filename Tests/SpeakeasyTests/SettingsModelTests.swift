@@ -56,6 +56,57 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(pasted, "Hello")
     }
 
+    func testFixingHistoryPublishesSuggestionsAndAcceptingClearsThem() async {
+        let store = TranscriptStore(fileURL: testScratchDirectory
+            .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))
+        store.append("run cube control")
+        let suggestion = LearnedSubstitution(heard: "cube control", written: "kubectl")
+        var pending: [LearnedSubstitution] = []
+        var fixes: [String] = []
+        let model = SettingsModel(
+            store: store,
+            diagnosticsStore: nil,
+            currentMode: { .toggle },
+            setMode: { _ in },
+            currentShortcut: { .defaultShortcut },
+            changeShortcut: {},
+            resetShortcut: {},
+            shortcutEnabled: { true },
+            availableDevices: { [] },
+            selectedDevice: { nil },
+            selectDevice: { _ in },
+            deviceEnabled: { true },
+            currentModel: { .parakeet110M },
+            selectModel: { _ in },
+            openCorrections: {},
+            pasteTranscript: { _ in },
+            corrections: SettingsCorrectionActions(
+                fix: { _, text in
+                    fixes.append(text)
+                    pending = [suggestion]
+                    return pending
+                },
+                suggestions: { pending },
+                accept: { _ in
+                    pending = []
+                    return true
+                },
+                dismiss: { _ in pending = [] }
+            )
+        )
+
+        XCTAssertEqual(model.correctionSuggestions, [])
+        model.fixTranscript(model.records[0], text: "run kubectl")
+        XCTAssertEqual(fixes, ["run kubectl"])
+        XCTAssertEqual(model.correctionSuggestions, [suggestion])
+
+        model.acceptSuggestion(suggestion)
+        for _ in 0..<50 where !model.correctionSuggestions.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertEqual(model.correctionSuggestions, [])
+    }
+
     func testDisabledActionsAndRejectedModelRequestClearsPendingState() {
         let store = TranscriptStore(fileURL: testScratchDirectory
             .appendingPathComponent("speakeasy-settings-\(UUID().uuidString)/history.json"))

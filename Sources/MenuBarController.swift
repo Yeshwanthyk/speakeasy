@@ -144,6 +144,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var enableMarkup: (() -> Void)?
     /// Re-applies the Bluetooth microphone preference to the system route.
     var refreshMicrophoneRoute: (() -> Void)?
+    /// Undo of the last automatic paste; the menu row shows only while possible.
+    var canUndoLastPaste: (() -> Bool)?
+    var undoLastPaste: (() -> Void)?
+    /// History fixes and the correction rules they suggest.
+    var fixTranscript: ((UUID, String) -> [LearnedSubstitution])?
+    var correctionSuggestions: (() -> [LearnedSubstitution])?
+    var acceptCorrectionSuggestion: ((LearnedSubstitution) async -> Bool)?
+    var dismissCorrectionSuggestion: ((LearnedSubstitution) -> Void)?
 
     init(
         store: TranscriptStore,
@@ -425,6 +433,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func addHistoryActions(to menu: NSMenu) {
+        if canUndoLastPaste?() == true {
+            menu.addItem(actionItem(
+                title: "Undo Last Dictation",
+                action: #selector(undoLastPasteAction),
+                symbol: "arrow.uturn.backward"
+            ))
+        }
+
         let pasteLast = actionItem(
             title: "Paste Last Transcript",
             action: #selector(pasteLastTranscriptAction),
@@ -463,6 +479,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func pasteHistoryItem(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
         pasteTranscript(text)
+    }
+
+    @objc private func undoLastPasteAction() {
+        undoLastPaste?()
     }
 
     @objc private func copyLastTranscriptAction() {
@@ -536,7 +556,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 openCorrections: { [weak self] in self?.showCorrections() },
                 pasteTranscript: pasteTranscript,
                 levelSnapshot: microphoneLevelSnapshot,
-                refreshMicrophoneRoute: { [weak self] in self?.refreshMicrophoneRoute?() }
+                refreshMicrophoneRoute: { [weak self] in self?.refreshMicrophoneRoute?() },
+                corrections: SettingsCorrectionActions(
+                    fix: { [weak self] id, text in self?.fixTranscript?(id, text) ?? [] },
+                    suggestions: { [weak self] in self?.correctionSuggestions?() ?? [] },
+                    accept: { [weak self] suggestion in await self?.acceptCorrectionSuggestion?(suggestion) ?? false },
+                    dismiss: { [weak self] suggestion in self?.dismissCorrectionSuggestion?(suggestion) }
+                )
             )
             settingsController = SettingsWindowController(model: model)
         }

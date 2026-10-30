@@ -202,6 +202,11 @@ final class PasteboardPaster: Pasting {
         }
     }
 
+    /// Command plus the given key, e.g. Command-Z for undo.
+    static func makeShortcutEvents(keyCode: CGKeyCode) -> PasteEvents? {
+        makePasteEvents(keyCode: keyCode)
+    }
+
     /// Builds Command-V for the key that types "v" on the active layout.
     /// Both events are constructed before either can be posted.
     static func makePasteEvents(

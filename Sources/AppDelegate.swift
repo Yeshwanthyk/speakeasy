@@ -164,6 +164,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 menuBarController.refreshMicrophoneRoute = { [weak coordinator] in
                     coordinator?.refreshSystemMicrophoneRoute()
                 }
+                menuBarController.canUndoLastPaste = { [weak coordinator] in
+                    coordinator?.canUndoLastPaste() ?? false
+                }
+                menuBarController.undoLastPaste = { [weak coordinator] in coordinator?.undoLastPaste() }
+                menuBarController.fixTranscript = { [weak coordinator] id, text in
+                    coordinator?.fixTranscript(id: id, fixedText: text) ?? []
+                }
+                menuBarController.correctionSuggestions = { [weak coordinator] in
+                    coordinator?.correctionSuggestions() ?? []
+                }
+                menuBarController.acceptCorrectionSuggestion = { [weak coordinator] suggestion in
+                    await coordinator?.acceptCorrectionSuggestion(suggestion) ?? false
+                }
+                menuBarController.dismissCorrectionSuggestion = { [weak coordinator] suggestion in
+                    coordinator?.dismissCorrectionSuggestion(suggestion)
+                }
                 menuBarController.isMarkupEnabled = { MarkupSessionController.isAvailable }
                 menuBarController.enableMarkup = { [feedback] in
                     guard #available(macOS 14.0, *) else {

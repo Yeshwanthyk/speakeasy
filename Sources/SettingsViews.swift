@@ -677,10 +677,73 @@ struct RatingDots: View {
 
 // MARK: - Corrections
 
+/// Offers a correction rule for fixes the user has made by hand twice.
+private struct CorrectionSuggestionsCard: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        if !model.correctionSuggestions.isEmpty {
+            SettingsCard(title: "Suggested corrections") {
+                ForEach(model.correctionSuggestions, id: \.self) { suggestion in
+                    HStack(spacing: 10) {
+                        Text("“\(suggestion.heard)” → “\(suggestion.written)”")
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Always Replace") { model.acceptSuggestion(suggestion) }
+                            .controlSize(.small)
+                        Button("Dismiss") { model.dismissSuggestion(suggestion) }
+                            .controlSize(.small)
+                    }
+                }
+                Text("You fixed these by hand at least twice.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct FixTranscriptSheet: View {
+    let original: String
+    let save: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+
+    init(original: String, save: @escaping (String) -> Void) {
+        self.original = original
+        self.save = save
+        _text = State(initialValue: original)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Fix transcript").font(.headline)
+            TextEditor(text: $text)
+                .font(.body)
+                .frame(minWidth: 420, minHeight: 140)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.15)))
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    save(text)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || text == original)
+            }
+        }
+        .padding(20)
+    }
+}
+
 private struct CorrectionsPage: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
+        CorrectionSuggestionsCard(model: model)
+
         SettingsCard {
             HStack(alignment: .top, spacing: 12) {
                 IconTile(symbol: "character.book.closed.fill", tint: .green, size: 32)
@@ -748,6 +811,7 @@ private struct HistoryPage: View {
     @ObservedObject var model: SettingsModel
     @Binding var confirmClear: Bool
     @State private var query = ""
+    @State private var editing: TranscriptRecord?
 
     private var filtered: [TranscriptRecord] {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
@@ -782,11 +846,20 @@ private struct HistoryPage: View {
             if filtered.isEmpty {
                 Text("No transcripts match “\(query)”.").foregroundStyle(.secondary)
             }
+            CorrectionSuggestionsCard(model: model)
             LazyVStack(spacing: 8) {
                 ForEach(filtered) { record in
-                    HistoryRow(record: record, actionTitle: model.hasPasteTarget ? "Paste" : "Copy") {
-                        model.pasteHistory(record.finalText)
-                    }
+                    HistoryRow(
+                        record: record,
+                        actionTitle: model.hasPasteTarget ? "Paste" : "Copy",
+                        action: { model.pasteHistory(record.finalText) },
+                        fix: { editing = record }
+                    )
+                }
+            }
+            .sheet(item: $editing) { record in
+                FixTranscriptSheet(original: record.finalText) { fixed in
+                    model.fixTranscript(record, text: fixed)
                 }
             }
         }
@@ -797,6 +870,7 @@ private struct HistoryRow: View {
     let record: TranscriptRecord
     let actionTitle: String
     let action: () -> Void
+    let fix: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -814,6 +888,10 @@ private struct HistoryRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
+            Button("Fix…", action: fix)
+                .controlSize(.small)
+                .opacity(hovering ? 1 : 0.55)
+                .help("Correct this transcript. Fix the same words twice and Speakeasy offers a correction rule.")
             Button(actionTitle, action: action)
                 .controlSize(.small)
                 .opacity(hovering ? 1 : 0.55)
