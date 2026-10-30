@@ -142,6 +142,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     /// Draw-while-dictating state; the markup menu row is hidden when nil.
     var isMarkupEnabled: (() -> Bool)?
     var enableMarkup: (() -> Void)?
+    /// Re-applies the Bluetooth microphone preference to the system route.
+    var refreshMicrophoneRoute: (() -> Void)?
 
     init(
         store: TranscriptStore,
@@ -533,7 +535,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 selectModel: selectASRModel,
                 openCorrections: { [weak self] in self?.showCorrections() },
                 pasteTranscript: pasteTranscript,
-                levelSnapshot: microphoneLevelSnapshot
+                levelSnapshot: microphoneLevelSnapshot,
+                refreshMicrophoneRoute: { [weak self] in self?.refreshMicrophoneRoute?() }
             )
             settingsController = SettingsWindowController(model: model)
         }

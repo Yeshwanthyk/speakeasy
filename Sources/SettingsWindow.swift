@@ -69,6 +69,12 @@ final class SettingsModel: ObservableObject {
     @Published var fuzzyCorrectionsEnabled = FuzzyCorrectionPreference.isEnabled {
         didSet { UserDefaults.standard.set(fuzzyCorrectionsEnabled, forKey: FuzzyCorrectionPreference.key) }
     }
+    @Published var avoidsBluetoothMicrophone = BluetoothMicrophonePreference.isAvoidingBluetooth() {
+        didSet {
+            UserDefaults.standard.set(avoidsBluetoothMicrophone, forKey: BluetoothMicrophonePreference.key)
+            refreshMicrophoneRoute()
+        }
+    }
     @Published private(set) var summary: ProductivitySummary = DiagnosticsFormatter.summary(document: DiagnosticsDocument(), today: "")
     @Published private(set) var insights: SettingsInsights = .empty
 
@@ -94,6 +100,7 @@ final class SettingsModel: ObservableObject {
     private(set) var isVisible = false
     let openCorrections: () -> Void
     let pasteTranscript: (String) -> Void
+    private let refreshMicrophoneRoute: () -> Void
 
     init(
         store: TranscriptStore,
@@ -114,8 +121,10 @@ final class SettingsModel: ObservableObject {
         pasteTranscript: @escaping (String) -> Void,
         levelSnapshot: @escaping () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) },
         frontmostApp: @escaping () -> NSRunningApplication? = { NSWorkspace.shared.frontmostApplication },
-        activateTarget: @escaping (NSRunningApplication) -> Bool = { $0.activate(options: [.activateIgnoringOtherApps]) }
+        activateTarget: @escaping (NSRunningApplication) -> Bool = { $0.activate(options: [.activateIgnoringOtherApps]) },
+        refreshMicrophoneRoute: @escaping () -> Void = {}
     ) {
+        self.refreshMicrophoneRoute = refreshMicrophoneRoute
         self.store = store
         self.diagnosticsStore = diagnosticsStore
         self.currentMode = currentMode

@@ -438,6 +438,14 @@ private struct MicrophonePage: View {
             }
         }
 
+        SettingsCard {
+            ToggleRow(
+                title: "Keep AirPods out of call mode",
+                detail: "When the system input is a Bluetooth headset, record from the Mac's built-in microphone so your headphones keep full audio quality. Only applies to System Default.",
+                isOn: $model.avoidsBluetoothMicrophone
+            )
+        }
+
         SettingsCard(title: "Input level") {
             SettingsMicrophoneLevelView(meter: model.microphoneMeter, shortcut: model.shortcut.displayName)
         }

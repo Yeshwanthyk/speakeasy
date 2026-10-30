@@ -28,6 +28,8 @@ protocol AudioCapturing {
 }
 
 extension AudioCapturing {
+    /// Re-resolves "System Default" after a routing preference changes.
+    func refreshSystemRoute() {}
     func recordingSampleCount() -> Int { 0 }
     func recordingSamples(in range: Range<Int>) -> ContiguousArray<Float> { [] }
 }
@@ -474,6 +476,12 @@ final class AppCoordinator: @unchecked Sendable {
             return
         }
         audioCapture.selectInputDevice(uid: uid)
+    }
+
+    /// Applies a changed Bluetooth preference when no microphone is pinned.
+    func refreshSystemMicrophoneRoute() {
+        guard canSelectInputDevice(), audioCapture.selectedInputDeviceUID() == nil else { return }
+        audioCapture.refreshSystemRoute()
     }
 
     func canSelectInputDevice() -> Bool {

@@ -161,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     menuBarController?.showFeedback(event)
                 }
                 menuBarController.openSetupGuide = { [weak self] in self?.showOnboarding() }
+                menuBarController.refreshMicrophoneRoute = { [weak coordinator] in
+                    coordinator?.refreshSystemMicrophoneRoute()
+                }
                 menuBarController.isMarkupEnabled = { MarkupSessionController.isAvailable }
                 menuBarController.enableMarkup = { [feedback] in
                     guard #available(macOS 14.0, *) else {

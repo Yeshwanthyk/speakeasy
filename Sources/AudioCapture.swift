@@ -376,6 +376,13 @@ final class AudioCapture: @unchecked Sendable {
         levelPreview.latest()
     }
 
+    /// Rebuilds the graph on the system route so a changed Bluetooth
+    /// preference applies without a restart. A pinned microphone is kept.
+    func refreshSystemRoute() {
+        guard stateLock.withLock({ activeInputDeviceUID == nil && !isRecording }) else { return }
+        requestRecovery(trigger: .configurationChange)
+    }
+
     func selectInputDevice(uid: String) {
         lifecycleQueue.async { [weak self] in
             self?.beginInputDeviceSwitch(to: uid)
