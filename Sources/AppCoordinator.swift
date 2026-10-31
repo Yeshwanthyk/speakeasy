@@ -521,7 +521,7 @@ final class AppCoordinator: @unchecked Sendable {
         guard samples.count >= Self.minActiveSamples, SpeechGate.analyze(samples).hasSpeech else { return nil }
         let (transcriber, postProcessor, runID) = stateLock.withLock { () -> (Transcriber, TranscriptPostProcessor, UInt64) in
             meetingRunSequence &+= 1
-            return (transcriber, transcriptPostProcessor, Self.meetingRunIDFlag | meetingRunSequence)
+            return (self.transcriber, self.transcriptPostProcessor, Self.meetingRunIDFlag | meetingRunSequence)
         }
         guard let raw = try? transcriber.transcribe(samples: samples, runID: runID) else { return nil }
         stateLock.withLock { lastNativeInferenceAt = nativeClock() }

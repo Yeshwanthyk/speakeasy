@@ -3,12 +3,34 @@ import SwiftUI
 
 struct OnboardingView: View {
     @ObservedObject var model: OnboardingModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
-            OnboardingProgress(current: model.step)
-                .padding(.top, 38)
-                .padding(.bottom, 8)
+            topBar
+            page
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            OnboardingFooter(model: model)
+                .frame(width: OnboardingMetrics.columnWidth)
+                .padding(.bottom, OnboardingMetrics.footerBottom)
+        }
+        .frame(
+            width: OnboardingWindowController.contentSize.width,
+            height: OnboardingWindowController.contentSize.height
+        )
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var topBar: some View {
+        OnboardingModelPill(phase: model.modelPhase, retry: model.retryInstall)
+            .opacity(model.step == .model ? 0 : 1)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(height: OnboardingMetrics.topBarHeight)
+    }
+
+    private var page: some View {
+        ZStack {
             Group {
                 switch model.step {
                 case .welcome: WelcomeStep()
@@ -18,94 +40,87 @@ struct OnboardingView: View {
                 case .done: DoneStep(model: model)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.horizontal, 44)
-            .padding(.top, 16)
-            Divider()
-            OnboardingFooter(model: model)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 14)
+            .frame(width: OnboardingMetrics.columnWidth)
+            .id(model.step)
+            .transition(pageTransition)
         }
-        .frame(minWidth: 640, minHeight: 540)
+        .animation(OnboardingMotion.response, value: model.step)
+    }
+
+    /// Pages slide a few points in the direction of travel; opacity only
+    /// under Reduce Motion.
+    private var pageTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        let offset: CGFloat = model.movingForward ? 10 : -10
+        return .asymmetric(
+            insertion: .opacity.combined(with: .offset(x: offset)),
+            removal: .opacity.combined(with: .offset(x: -offset / 2))
+        )
     }
 }
 
-// MARK: - Chrome
-
-private struct OnboardingProgress: View {
-    let current: OnboardingStep
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(OnboardingStep.allCases) { step in
-                Capsule()
-                    .fill(step.rawValue <= current.rawValue ? Color.accentColor : Color.primary.opacity(0.12))
-                    .frame(width: step == current ? 26 : 8, height: 8)
-                    .accessibilityHidden(true)
-            }
-        }
-        .animation(.easeOut(duration: 0.2), value: current)
-        .accessibilityElement()
-        .accessibilityLabel("Step \(current.rawValue + 1) of \(OnboardingStep.allCases.count): \(current.title)")
-    }
-}
+// MARK: - Footer
 
 private struct OnboardingFooter: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        HStack {
-            if model.step != .welcome {
-                Button("Back") { move(-1) }
-            }
-            Spacer()
-            if let hint { Text(hint).font(.caption).foregroundStyle(.secondary) }
+        ZStack {
             if model.step == .done {
-                Button("Start Dictating") { model.finish() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!model.canFinish)
+                primary
             } else {
-                Button(model.step == .welcome ? "Get Started" : "Continue") { move(1) }
-                    .keyboardShortcut(.defaultAction)
+                OnboardingPageDots(current: model.step)
+                HStack(spacing: 0) {
+                    slot(alignment: .leading) { back }
+                    Color.clear
+                    slot(alignment: .trailing) { primary }
+                }
             }
         }
-        .controlSize(.large)
+        .frame(height: 32)
     }
 
-    private var hint: String? {
+    /// Fixed-width slot so an empty Back still holds its space.
+    private func slot<Content: View>(alignment: Alignment, @ViewBuilder content: () -> Content) -> some View {
+        Color.clear
+            .frame(width: OnboardingMetrics.footerSlot)
+            .overlay(content(), alignment: alignment)
+    }
+
+    @ViewBuilder private var back: some View {
+        if model.step != .welcome, model.step != .done {
+            Button("Back", action: model.goBack)
+                .buttonStyle(OnboardingButtonStyle(kind: .secondary))
+        }
+    }
+
+    @ViewBuilder private var primary: some View {
         switch model.step {
-        case .model where !model.modelPhase.isInstalled:
-            return "The download keeps going while you continue."
-        case .done where !model.canFinish:
-            return "Finish the remaining steps to continue."
-        default:
-            return nil
-        }
-    }
-
-    private func move(_ delta: Int) {
-        guard let next = OnboardingStep(rawValue: model.step.rawValue + delta) else { return }
-        model.step = next
-    }
-}
-
-private struct StepHeader: View {
-    let symbol: String
-    let tint: Color
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        HStack(spacing: 14) {
-            IconTile(symbol: symbol, tint: tint, size: 44)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(SettingsType.pageTitle).accessibilityAddTraits(.isHeader)
-                Text(subtitle).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        case .welcome:
+            forward("Get started")
+        case .model:
+            forward("Continue")
+        case .permissions:
+            forward("Continue").disabled(!model.permissionsGranted)
+        case .tryIt:
+            if model.testTranscript == nil {
+                Button("Skip", action: model.advance)
+                    .buttonStyle(OnboardingButtonStyle(kind: .secondary))
+            } else {
+                forward("Continue")
             }
-            Spacer(minLength: 0)
+        case .done:
+            Button("Start dictating", action: model.finish)
+                .buttonStyle(OnboardingButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(!model.canFinish)
         }
-        .padding(.bottom, 8)
+    }
+
+    private func forward(_ title: String) -> some View {
+        Button(title, action: model.advance)
+            .buttonStyle(OnboardingButtonStyle(showsArrow: true))
+            .keyboardShortcut(.defaultAction)
     }
 }
 
@@ -113,48 +128,14 @@ private struct StepHeader: View {
 
 private struct WelcomeStep: View {
     var body: some View {
-        VStack(spacing: 18) {
-            Image(nsImage: SpeakeasyBrand.appIcon)
-                .resizable()
-                .frame(width: 104, height: 104)
-                .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-                .padding(.top, 12)
-                .accessibilityHidden(true)
-            VStack(spacing: 6) {
-                Text("Welcome to Speakeasy").font(.system(size: 28, weight: .bold))
-                Text("Talk instead of type, in any app. Setup takes about a minute.")
-                    .foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                FeatureRow(symbol: "keyboard", tint: .indigo, title: "Press a key, speak, press again",
-                           detail: "Your words appear wherever the cursor is.")
-                FeatureRow(symbol: "lock.fill", tint: .green, title: "Private by design",
-                           detail: "Speech is transcribed on this Mac. Audio never leaves it.")
-                FeatureRow(symbol: "arrow.down.circle.fill", tint: .teal, title: "One-time model download",
-                           detail: "About 135 MB, verified before use. Works offline afterwards.")
-            }
-            .padding(18)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.primary.opacity(0.045)))
-            .frame(maxWidth: 460)
+        VStack(spacing: 36) {
+            OnboardingHero()
+            OnboardingHeading(
+                title: "Welcome to Speakeasy",
+                lead: "Press a key, say what you mean, and Speakeasy types it wherever your cursor is. Your voice is transcribed on this Mac."
+            )
         }
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct FeatureRow: View {
-    let symbol: String
-    let tint: Color
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack(spacing: 12) {
-            IconTile(symbol: symbol, tint: tint, size: 30)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-            }
-        }
+        .padding(.bottom, 24)
     }
 }
 
@@ -164,18 +145,23 @@ private struct ModelStep: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            StepHeader(symbol: "cpu", tint: .purple, title: "Speech model",
-                       subtitle: "Runs entirely on this Mac. You can switch later in Settings.")
-            ForEach(ASRModelKind.allCases, id: \.preferenceValue) { kind in
-                ModelChoice(
-                    kind: kind,
-                    isSelected: kind == model.selectedModel,
-                    isRecommended: kind == .parakeet110M,
-                    isEnabled: model.canChangeModel
-                ) { model.selectModel(kind) }
+        VStack(spacing: OnboardingMetrics.sectionGap) {
+            OnboardingHeading(
+                title: "Pick a speech model",
+                lead: "Both run entirely on this Mac. You can switch any time in Settings."
+            )
+            VStack(spacing: 10) {
+                ForEach(ASRModelKind.allCases, id: \.self) { kind in
+                    ModelChoice(
+                        kind: kind,
+                        isSelected: kind == model.selectedModel,
+                        isRecommended: kind == .parakeet110M,
+                        isEnabled: model.canChangeModel
+                    ) { model.selectModel(kind) }
+                }
+                ModelDownloadStatus(model: model)
+                    .frame(minHeight: 34)
             }
-            ModelProgressCard(model: model)
         }
     }
 }
@@ -189,80 +175,130 @@ private struct ModelChoice: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
-                IconTile(symbol: kind.settingsSymbol, tint: kind.settingsTint, size: 36)
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: kind.settingsSymbol)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 20)
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(kind.settingsTitle).font(.system(size: 14, weight: .semibold))
-                        if isRecommended { StatusPill(text: "Recommended", tint: .green) }
+                        if isRecommended { Tag(text: "Recommended") }
                     }
-                    Text(kind.settingsTagline).font(.caption).foregroundStyle(.secondary)
+                    Text(kind.settingsTagline)
+                        .font(OnboardingType.rowDetail)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 14) {
+                        Fact(label: "Size", value: SettingsFormat.bytes(kind.artifact.expectedByteCount))
+                        Fact(label: "Model", value: kind.settingsParameters)
+                    }
+                    .padding(.top, 2)
                 }
-                Spacer(minLength: 8)
-                Chip(text: SettingsFormat.bytes(kind.artifact.expectedByteCount), symbol: "arrow.down.circle")
+                .frame(maxWidth: .infinity, alignment: .leading)
                 SelectionMark(isSelected: isSelected)
             }
-            .padding(12)
-            .selectableTileBackground(isSelected: isSelected)
+            .padding(14)
+            .background(tileBackground)
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableTileStyle())
         .disabled(!isEnabled && !isSelected)
         .opacity(!isEnabled && !isSelected ? 0.5 : 1)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .animation(OnboardingMotion.response, value: isSelected)
+    }
+
+    private var tileBackground: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return shape.fill(SettingsColors.cardFill)
+            .overlay(shape.strokeBorder(isSelected ? Color.accentColor : SettingsColors.cardStroke,
+                                        lineWidth: isSelected ? 1.5 : 1))
+            .shadow(color: .black.opacity(isSelected ? 0.07 : 0.03), radius: 6, y: 2)
     }
 }
 
-private struct ModelProgressCard: View {
+/// Scales a whole tile down slightly while pressed.
+private struct PressableTileStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(OnboardingMotion.press, value: configuration.isPressed)
+    }
+}
+
+private struct Tag: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(SettingsColors.subtleFill))
+    }
+}
+
+private struct Fact: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(label).foregroundStyle(.secondary)
+            Text(value).fontWeight(.semibold)
+        }
+        .font(.system(size: 11))
+    }
+}
+
+private struct ModelDownloadStatus: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        SettingsCard {
+        Group {
             switch model.modelPhase {
             case .checking:
-                ProgressRow(title: "Checking for an existing copy…", fraction: nil)
+                progress("Checking for a saved copy…", detail: nil, fraction: nil)
             case .downloading(let received, let expected):
-                ProgressRow(
-                    title: "Downloading \(model.selectedModel.settingsTitle)",
+                progress(
+                    "Downloading \(model.selectedModel.settingsTitle)",
                     detail: "\(SettingsFormat.bytes(received)) of \(SettingsFormat.bytes(expected))",
                     fraction: expected > 0 ? Double(received) / Double(expected) : nil
                 )
             case .verifying:
-                ProgressRow(title: "Verifying checksum…", fraction: nil)
+                progress("Verifying the download…", detail: nil, fraction: 1)
             case .installed:
-                Label("\(model.selectedModel.settingsTitle) is downloaded and verified", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 13, weight: .semibold))
+                Label("\(model.selectedModel.settingsTitle) is ready", systemImage: "checkmark")
+                    .font(OnboardingType.caption)
+                    .foregroundStyle(OnboardingColors.success)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             case .failed(let message):
-                HStack {
+                HStack(spacing: 10) {
                     Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(OnboardingType.caption)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("Try Again") { model.retryInstall() }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Try again", action: model.retryInstall)
+                        .buttonStyle(OnboardingButtonStyle(kind: .secondary))
                 }
             }
         }
+        .padding(.horizontal, 4)
+        .padding(.top, 6)
     }
-}
 
-private struct ProgressRow: View {
-    let title: String
-    var detail: String?
-    let fraction: Double?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func progress(_ title: String, detail: String?, fraction: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
             HStack {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Spacer()
-                if let detail { Text(detail).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                Text(title).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let detail { Text(detail).monospacedDigit().foregroundStyle(.secondary) }
             }
-            if let fraction {
-                ProgressView(value: fraction)
-            } else {
-                ProgressView().progressViewStyle(.linear)
-            }
+            .font(OnboardingType.caption)
+            OnboardingProgressBar(fraction: fraction).frame(height: 4)
         }
     }
 }
@@ -273,83 +309,162 @@ private struct PermissionsStep: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            StepHeader(symbol: "hand.raised.fill", tint: .blue, title: "Permissions",
-                       subtitle: "Speakeasy needs three macOS permissions. You stay in control in System Settings.")
-            SettingsCard {
-                PermissionRow(
-                    symbol: "mic.fill", tint: .red, title: "Microphone",
-                    detail: "To hear you while you dictate. Nothing is recorded otherwise.",
-                    state: model.microphone,
-                    buttonTitle: model.microphone == .notDetermined ? "Allow" : "Open Settings",
-                    action: model.requestMicrophone
-                )
-                Divider()
-                PermissionRow(
-                    symbol: "accessibility", tint: .blue, title: "Accessibility",
-                    detail: "To paste text into the app you're using.",
-                    state: model.accessibility,
-                    buttonTitle: "Open Settings",
-                    action: model.requestAccessibility
-                )
-                Divider()
-                PermissionRow(
-                    symbol: "keyboard.fill", tint: .indigo, title: "Input Monitoring",
-                    detail: "To notice your dictation shortcut while other apps are in front.",
-                    state: model.inputMonitoring,
-                    buttonTitle: "Open Settings",
-                    action: model.requestInputMonitoring
-                )
-            }
-            if model.permissionsGranted {
-                Label("All set. Speakeasy has everything it needs.", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            } else {
-                Text("In System Settings → Privacy & Security, turn on **Speakeasy** in each list, then come back here.")
-                    .font(.caption).foregroundStyle(.secondary)
-                if model.visitedSystemSettings {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Turned it on but it still shows as off? The entry may belong to an older copy of Speakeasy. Reset it and allow again, or restart the app.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: 8) {
-                            if model.inputMonitoring != .granted {
-                                Button("Reset & Ask Again") { model.resetInputMonitoring() }
-                            }
-                            Button("Restart Speakeasy") { model.relaunch() }
-                        }
-                        .controlSize(.small)
-                    }
+        VStack(spacing: OnboardingMetrics.sectionGap) {
+            OnboardingHeading(title: "Let Speakeasy hear you and type for you")
+            OnboardingCard {
+                ForEach(Array(OnboardingPermission.allCases.enumerated()), id: \.element) { index, permission in
+                    if index > 0 { OnboardingRowDivider() }
+                    PermissionRow(
+                        permission: permission,
+                        copy: PermissionCopy(permission, state: model.state(of: permission),
+                                             status: model.status(of: permission)),
+                        status: model.status(of: permission),
+                        isNext: model.nextPermission == permission
+                    ) { model.request(permission) }
                 }
             }
+            recovery.frame(minHeight: 56, alignment: .top)
+        }
+        .padding(.top, 24)
+    }
+
+    /// Shown only after a trip to System Settings that did not stick.
+    @ViewBuilder private var recovery: some View {
+        if model.visitedSystemSettings, !model.permissionsGranted {
+            VStack(spacing: 8) {
+                Text("Switched it on but it still shows as off? The entry may belong to an older copy of Speakeasy.")
+                    .font(OnboardingType.rowDetail)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 14) {
+                    if model.inputMonitoring != .granted {
+                        Button("Reset Input Monitoring", action: model.resetInputMonitoring)
+                    }
+                    Button("Restart Speakeasy", action: model.relaunch)
+                }
+                .buttonStyle(.link)
+                .font(OnboardingType.rowDetail)
+            }
+            .frame(maxWidth: OnboardingMetrics.leadWidth)
+            .transition(.opacity)
+        }
+    }
+}
+
+/// Row wording, which shifts once Speakeasy has asked.
+private struct PermissionCopy {
+    let symbol: String
+    let title: String
+    let detail: String
+    let buttonTitle: String
+
+    init(_ permission: OnboardingPermission, state: PermissionState, status: OnboardingPermissionStatus) {
+        switch permission {
+        case .microphone:
+            symbol = "mic"
+            title = "Microphone"
+            detail = state == .denied
+                ? "Turned off earlier. Switch Speakeasy on in System Settings."
+                : "Hears you only while you dictate"
+            buttonTitle = state == .denied ? "Open Settings" : "Allow"
+        case .accessibility:
+            symbol = "character.cursor.ibeam"
+            title = "Accessibility"
+            detail = status == .waiting
+                ? "Drag Speakeasy into the list, or switch it on if it is there"
+                : "Pastes your words into the app you're using"
+            buttonTitle = "Allow"
+        case .inputMonitoring:
+            symbol = "keyboard"
+            title = "Input Monitoring"
+            detail = status == .waiting
+                ? "Switch Speakeasy on in the list"
+                : "Notices your shortcut while other apps are in front"
+            buttonTitle = "Allow"
         }
     }
 }
 
 private struct PermissionRow: View {
-    let symbol: String
-    let tint: Color
-    let title: String
-    let detail: String
-    let state: PermissionState
-    let buttonTitle: String
+    let permission: OnboardingPermission
+    let copy: PermissionCopy
+    let status: OnboardingPermissionStatus
+    let isNext: Bool
     let action: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
-            IconTile(symbol: symbol, tint: tint, size: 32)
+            Image(systemName: copy.symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(copy.title).font(OnboardingType.rowTitle)
+                Text(copy.detail)
+                    .font(OnboardingType.rowDetail)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .animation(nil, value: copy.detail)
             }
-            Spacer(minLength: 8)
-            if state == .granted {
-                StatusPill(text: "Allowed", tint: .green)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            PermissionControl(title: copy.buttonTitle, status: status, isNext: isNext, action: action)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(minHeight: OnboardingMetrics.rowMinHeight)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// Allow → (pulsing dot) → ✓ Allowed, in one slot so nothing shifts.
+private struct PermissionControl: View {
+    let title: String
+    let status: OnboardingPermissionStatus
+    let isNext: Bool
+    let action: () -> Void
+    @Environment(\.onboardingIsStatic) private var isStatic
+    @State private var checkProgress: CGFloat = 0
+
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            if status == .allowed {
+                allowed
+                    .transition(.asymmetric(insertion: .scale(scale: 0.94).combined(with: .opacity),
+                                            removal: .opacity))
             } else {
-                Button(buttonTitle, action: action)
+                HStack(spacing: 12) {
+                    if status == .waiting { OnboardingPulseDot().transition(.opacity) }
+                    Button(title, action: action)
+                        .buttonStyle(OnboardingButtonStyle(kind: isNext ? .primary : .secondary))
+                }
+                .transition(.opacity)
             }
         }
+        .frame(minWidth: 96, alignment: .trailing)
+        .animation(OnboardingMotion.settle, value: status)
+        .animation(OnboardingMotion.response, value: isNext)
+    }
+
+    private var allowed: some View {
+        HStack(spacing: 5) {
+            CheckmarkShape(progress: checkProgress)
+                .stroke(OnboardingColors.success, style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+                .frame(width: 12, height: 12)
+            Text("Allowed")
+                .font(OnboardingType.button)
+                .foregroundStyle(OnboardingColors.success)
+        }
+        .onAppear {
+            guard !isStatic else {
+                checkProgress = 1
+                return
+            }
+            withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.42).delay(0.08)) { checkProgress = 1 }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Allowed")
     }
 }
 
@@ -359,105 +474,118 @@ private struct TryItStep: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            StepHeader(symbol: "waveform", tint: .pink, title: "Try it",
-                       subtitle: "Dictate a sentence to make sure everything works end to end.")
-            SettingsCard {
-                HStack(spacing: 16) {
-                    HStack(spacing: 6) {
-                        ForEach(Array(model.shortcut.keycapLabels.enumerated()), id: \.offset) { item in
-                            Keycap(label: item.element)
-                        }
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(instructions).font(.system(size: 13, weight: .semibold))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Use a Different Shortcut…") { model.changeShortcut() }
-                            .buttonStyle(.link)
-                            .disabled(!model.enginePhase.isReady)
-                    }
-                }
-            }
-            SettingsCard { TestResult(model: model) }
-            if model.enginePhase.isReady, model.testTranscript == nil {
-                SettingsCard(title: "Microphone") {
-                    SettingsMicrophoneLevelView(meter: model.microphoneMeter, shortcut: model.shortcut.displayName)
-                }
-            }
-            if model.functionKeyMayConflict {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "globe").foregroundStyle(.blue)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("If pressing fn opens emoji or macOS Dictation, set “Press 🌐 key to” to “Do Nothing”.")
-                            .font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button("Open Keyboard Settings…") { model.openKeyboardSettings() }
-                            .buttonStyle(.link).font(.caption)
-                    }
-                }
-            }
+        VStack(spacing: 22) {
+            OnboardingHeading(title: model.enginePhase.isReady ? "Try it out" : "Almost ready", lead: lead)
+            TranscriptWell(model: model)
+            status.frame(minHeight: 40, alignment: .top)
         }
     }
 
-    private var instructions: String {
+    private var lead: String {
         let name = model.shortcut.displayName
-        return "Press \(name), say something like “Hello from Speakeasy”, then press \(name) again."
+        return "Press \(name), say something, then press \(name) again."
+    }
+
+    @ViewBuilder private var status: some View {
+        VStack(spacing: 10) {
+            switch model.enginePhase {
+            case .waiting:
+                Text("Waiting for \(ListFormatter.localizedString(byJoining: model.engineBlockers))…")
+                    .foregroundStyle(.secondary)
+            case .starting:
+                Text("Loading the model…").foregroundStyle(.secondary)
+            case .ready(let warmedUp):
+                if model.testTranscript != nil {
+                    Text("In other apps, the text lands where your cursor is.").foregroundStyle(.secondary)
+                } else if let hint = model.practiceHint {
+                    Label(hint, systemImage: "exclamationmark.bubble").foregroundStyle(.orange)
+                } else if !warmedUp {
+                    Text("The model's warm-up check failed. The first dictation may be slow.").foregroundStyle(.orange)
+                }
+            case .failed(let message):
+                HStack(spacing: 10) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Button("Try again", action: model.retryEngine).buttonStyle(.link)
+                }
+            }
+            if model.functionKeyMayConflict, model.testTranscript == nil {
+                HStack(spacing: 4) {
+                    Text("fn opens emoji instead?").foregroundStyle(.secondary)
+                    Button("Set “Press 🌐 key to” to Do Nothing", action: model.openKeyboardSettings)
+                        .buttonStyle(.link)
+                }
+            }
+        }
+        .font(OnboardingType.rowDetail)
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-private struct TestResult: View {
+/// The practice surface: keycaps and level while waiting, then the words.
+private struct TranscriptWell: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        if let transcript = model.testTranscript {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("It works!", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 14, weight: .semibold))
-                Text("“\(transcript)”")
-                    .font(.system(size: 15))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                Text("In other apps, this text is pasted where your cursor is.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-        } else {
-            switch model.enginePhase {
-            case .waiting:
-                Label("Waiting for \(ListFormatter.localizedString(byJoining: model.engineBlockers))", systemImage: "hourglass")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            case .starting:
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Loading the model…").foregroundStyle(.secondary)
-                }
-            case .ready(let warmedUp):
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 8) {
-                        StatusPill(text: "Listening for \(model.shortcut.displayName)", tint: .green)
-                        Text("Your transcript will show up here.").foregroundStyle(.secondary)
-                    }
-                    if !warmedUp {
-                        Text("The model's warm-up check failed. Dictation may be slow or fail the first time.")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                    if let hint = model.practiceHint {
-                        Label(hint, systemImage: "exclamationmark.bubble.fill")
-                            .foregroundStyle(.orange)
+        OnboardingCard {
+            VStack(spacing: 18) {
+                if let transcript = model.testTranscript {
+                    VStack(spacing: 10) {
+                        Label("It works", systemImage: "checkmark.circle.fill")
+                            .font(OnboardingType.rowTitle)
+                            .foregroundStyle(OnboardingColors.success)
+                        Text(transcript)
+                            .font(.system(size: 17))
+                            .multilineTextAlignment(.center)
+                            .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                }
-            case .failed(let message):
-                HStack {
-                    Label(message, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("Try Again") { model.retryEngine() }
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                } else {
+                    KeycapGroup(keys: model.shortcut.keycapLabels)
+                        .opacity(model.enginePhase.isReady ? 1 : 0.4)
+                    ListeningLevel(meter: model.microphoneMeter, isReady: model.enginePhase.isReady)
+                        .frame(width: 220)
                 }
             }
+            .frame(maxWidth: .infinity, minHeight: 190)
+            .padding(.horizontal, 28)
         }
+        .animation(OnboardingMotion.response, value: model.testTranscript)
+        .overlay(alignment: .topTrailing) {
+            if model.testTranscript == nil, model.enginePhase.isReady {
+                Button("Change shortcut…", action: model.changeShortcut)
+                    .buttonStyle(.link)
+                    .font(OnboardingType.caption)
+                    .padding(12)
+            }
+        }
+    }
+}
+
+/// A compact live level line under the keycaps.
+private struct ListeningLevel: View {
+    @ObservedObject var meter: SettingsMicrophoneMeter
+    let isReady: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            OnboardingProgressBar(fraction: isReady ? Double(meter.level) : 0)
+                .frame(height: 4)
+                .animation(.linear(duration: 0.08), value: meter.level)
+            HStack(spacing: 6) {
+                if meter.isLive { Circle().fill(Color.red).frame(width: 6, height: 6) }
+                Text(caption)
+            }
+            .font(OnboardingType.caption)
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var caption: String {
+        guard isReady else { return "Microphone level" }
+        return meter.isLive ? "Listening" : "Your words will appear here"
     }
 }
 
@@ -467,45 +595,98 @@ private struct DoneStep: View {
     @ObservedObject var model: OnboardingModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            StepHeader(symbol: "checkmark", tint: .green,
-                       title: model.canFinish ? "You're ready" : "Almost there",
-                       subtitle: "Speakeasy lives in your menu bar.")
-            SettingsCard {
-                ChecklistRow(title: "Speech model downloaded and verified", isDone: model.modelPhase.isInstalled)
-                ChecklistRow(title: "Microphone allowed", isDone: model.microphone == .granted)
-                ChecklistRow(title: "Accessibility allowed", isDone: model.accessibility == .granted)
-                ChecklistRow(title: "Input Monitoring allowed", isDone: model.inputMonitoring == .granted)
-                ChecklistRow(title: "Model loaded", isDone: model.enginePhase.isReady)
-                ChecklistRow(title: "Test dictation succeeded", isDone: model.testTranscript != nil)
+        VStack(spacing: 24) {
+            DoneBadge()
+            VStack(spacing: OnboardingMetrics.titleGap) {
+                OnboardingHeading(title: model.canFinish ? "You're all set" : "Finishing setup")
+                HStack(spacing: 6) {
+                    Text("Speakeasy waits in the menu bar. Press")
+                    KeycapGroup(keys: model.shortcut.keycapLabels, compact: true)
+                    Text("in any app to dictate.")
+                }
+                .font(OnboardingType.lead)
+                .foregroundStyle(.secondary)
             }
-            SettingsCard {
-                HStack(spacing: 14) {
-                    Image(nsImage: SpeakeasyBrand.statusBarImage)
-                        .renderingMode(.template)
-                        .foregroundStyle(.primary)
-                        .frame(width: 30, height: 24)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.08)))
-                        .accessibilityHidden(true)
-                    Text("Click this icon in the menu bar for recent transcripts, settings, and to reopen this guide.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("When you want more")
+                    .font(OnboardingType.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 16)
+                OnboardingCard {
+                    MoreRow(title: "Paste your last transcript",
+                            detail: "Missed the text field? Paste it again from the menu bar.") {
+                        MenuBarGlyph()
+                    }
+                    OnboardingRowDivider()
+                    MoreRow(title: "Models, shortcut, and paste style",
+                            detail: "Tune everything in Settings.") {
+                        KeycapGroup(keys: ["⌘", ","], compact: true)
+                    }
                 }
             }
+            .frame(maxWidth: 440)
         }
     }
 }
 
-private struct ChecklistRow: View {
+private struct MoreRow<Trailing: View>: View {
     let title: String
-    let isDone: Bool
+    let detail: String
+    @ViewBuilder let trailing: Trailing
 
     var body: some View {
-        Label {
-            Text(title).foregroundStyle(isDone ? .primary : .secondary)
-        } icon: {
-            Image(systemName: isDone ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isDone ? Color.green : Color.secondary)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(OnboardingType.rowTitle)
+                Text(detail).font(OnboardingType.rowDetail).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            trailing
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+    }
+}
+
+private struct MenuBarGlyph: View {
+    var body: some View {
+        Image(nsImage: SpeakeasyBrand.statusBarImage)
+            .renderingMode(.template)
+            .foregroundStyle(.primary)
+            .frame(width: 30, height: 22)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(SettingsColors.subtleFill))
+            .accessibilityLabel("Menu bar icon")
+    }
+}
+
+/// Green check in a soft ring; the check draws itself in on arrival.
+private struct DoneBadge: View {
+    @Environment(\.onboardingIsStatic) private var isStatic
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var progress: CGFloat = 0
+    @State private var shown = false
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(Color.primary.opacity(0.12))
+                .frame(width: 104, height: 104)
+            Circle().fill(OnboardingColors.success.opacity(0.12))
+                .frame(width: 72, height: 72)
+            CheckmarkShape(progress: progress)
+                .stroke(OnboardingColors.success, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                .frame(width: 32, height: 32)
+        }
+        .scaleEffect(shown ? 1 : 0.92)
+        .opacity(shown ? 1 : 0)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !isStatic, !reduceMotion else {
+                shown = true
+                progress = 1
+                return
+            }
+            withAnimation(OnboardingMotion.settle) { shown = true }
+            withAnimation(.timingCurve(0.23, 1, 0.32, 1, duration: 0.5).delay(0.15)) { progress = 1 }
         }
     }
 }
