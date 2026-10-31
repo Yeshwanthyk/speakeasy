@@ -12,10 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var markupController: MarkupSessionController?
     private var meetingController: MeetingController?
     private var meetingOfferPresenter: MeetingOfferPresenter?
+    private var permissionGuide: PermissionGuideController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+
+            if let directory = OnboardingSnapshot.outputDirectory(arguments: CommandLine.arguments) {
+                await renderOnboardingSnapshots(to: directory)
+                return
+            }
 
             guard await resolveDuplicateInstances() else {
                 return
@@ -247,6 +253,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let coordinator = self?.coordinator else { return nil }
                 let uid = coordinator.selectedInputDeviceUID()
                 return coordinator.availableInputDevices().first { $0.uid == uid }?.name
+            },
+            openPermissionSettings: { [weak self] permission in
+                guard let self else { return }
+                let guide = self.permissionGuide ?? PermissionGuideController()
+                self.permissionGuide = guide
+                guide.open(permission)
+            },
+            closePermissionGuide: { [weak self] in
+                self?.permissionGuide?.close()
+            },
+            playSuccessSound: {
+                NSSound(named: "Glass")?.play()
             }
         ))
         let controller = OnboardingWindowController(model: model)
@@ -262,6 +280,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingController = controller
         model.start()
         controller.present()
+    }
+
+    @MainActor
+    private func renderOnboardingSnapshots(to directory: URL) async {
+        do {
+            let files = try await OnboardingSnapshot.render(to: directory)
+            print("Wrote \(files.count) onboarding snapshots to \(directory.path)")
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("Onboarding snapshot failed: \(error)\n".utf8))
+            exit(1)
+        }
     }
 
     /// Relaunch so macOS applies permission grants that only take effect for

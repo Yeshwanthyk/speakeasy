@@ -35,6 +35,9 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
 
     var id: Int { rawValue }
 
+    /// Steps shown as page dots; Done is the destination, not a page.
+    static let paged: [OnboardingStep] = [.welcome, .model, .permissions, .tryIt]
+
     var title: String {
         switch self {
         case .welcome: return "Welcome"
@@ -69,6 +72,37 @@ enum OnboardingEnginePhase: Equatable {
     }
 }
 
+/// A permission the setup flow asks for.
+enum OnboardingPermission: CaseIterable, Hashable {
+    case microphone
+    case accessibility
+    case inputMonitoring
+}
+
+/// What a permission row shows. `waiting` means Speakeasy asked and is
+/// watching for the grant.
+enum OnboardingPermissionStatus: Equatable {
+    case needsRequest
+    case waiting
+    case allowed
+}
+
+/// Reads permission state. Injected so tests and snapshots can fake grants.
+struct OnboardingPermissionClient {
+    var microphone: @MainActor () -> PermissionState
+    var accessibility: @MainActor () -> PermissionState
+    var inputMonitoring: @MainActor () -> PermissionState
+    /// Adds Speakeasy to the Input Monitoring list (and prompts once).
+    var registerInputMonitoring: @MainActor () -> Void = {}
+
+    static let live = OnboardingPermissionClient(
+        microphone: { Permissions.microphoneState() },
+        accessibility: { Permissions.accessibilityState() },
+        inputMonitoring: { Permissions.inputMonitoringState() },
+        registerInputMonitoring: { Permissions.requestInputMonitoring() }
+    )
+}
+
 /// Owns first-run setup state. System APIs stay authoritative: permissions
 /// are re-read on a timer and whenever Speakeasy becomes active.
 @MainActor
@@ -85,14 +119,29 @@ final class OnboardingModel: ObservableObject {
         var latestAttempt: @MainActor () -> DictationAttempt? = { nil }
         var microphoneLevel: () -> MicrophoneLevelSnapshot = { MicrophoneLevelSnapshot(normalizedLevel: 0, sequence: 0) }
         var microphoneName: @MainActor () -> String? = { nil }
+        /// Opens System Settings for a permission and shows the drag guide.
+        var openPermissionSettings: @MainActor (OnboardingPermission) -> Void = { _ in }
+        var closePermissionGuide: @MainActor () -> Void = {}
+        var playSuccessSound: @MainActor () -> Void = {}
     }
+
+    /// Pause on the last green check before moving on, so the grant registers.
+    static let advanceBeatNanoseconds: UInt64 = 700_000_000
 
     @Published var step: OnboardingStep = .welcome {
         didSet {
-            if step == .tryIt, oldValue != .tryIt { armTranscriptTest() }
-            if step == .tryIt { microphoneMeter.start() } else { microphoneMeter.stop() }
+            guard step != oldValue else { return }
+            movingForward = step.rawValue > oldValue.rawValue
+            if step == .tryIt { armTranscriptTest() }
+            if step == .tryIt, isLive { microphoneMeter.start() } else { microphoneMeter.stop() }
+            if step == .done, isLive { actions.playSuccessSound() }
+            if step != .permissions { actions.closePermissionGuide() }
         }
     }
+    /// Direction of the last step change, for the page transition.
+    @Published private(set) var movingForward = true
+    /// Permissions asked for in this session that are not granted yet.
+    @Published private(set) var requested: Set<OnboardingPermission> = []
     @Published private(set) var selectedModel: ASRModelKind
     @Published private(set) var modelPhase: OnboardingModelPhase = .checking
     @Published private(set) var enginePhase: OnboardingEnginePhase = .waiting
@@ -109,16 +158,29 @@ final class OnboardingModel: ObservableObject {
     @Published private(set) var visitedSystemSettings = false
 
     private let actions: Actions
+    private let permissionClient: OnboardingPermissionClient
+    /// False for snapshot previews: no downloads, polling, or sounds.
+    private let isLive: Bool
+    /// The permission whose System Settings guide is showing.
+    private var guidedPermission: OnboardingPermission?
     private var installTask: Task<Void, Never>?
-    private var pollTimer: Timer?
+    private var pollTask: Task<Void, Never>?
+    private var advanceTask: Task<Void, Never>?
     private var activationObserver: NSObjectProtocol?
     private var testBaselineID: UUID?
     private var attemptBaseline: UInt64?
     private var testArmed = false
 
-    init(actions: Actions, initialModel: ASRModelKind = (try? ModelPathResolver.configuredASRModelKind()) ?? .parakeet110M) {
+    init(
+        actions: Actions,
+        initialModel: ASRModelKind = (try? ModelPathResolver.configuredASRModelKind()) ?? .parakeet110M,
+        permissionClient: OnboardingPermissionClient = .live,
+        isLive: Bool = true
+    ) {
         self.actions = actions
         self.selectedModel = initialModel
+        self.permissionClient = permissionClient
+        self.isLive = isLive
         self.microphoneMeter = SettingsMicrophoneMeter(snapshot: actions.microphoneLevel)
     }
 
@@ -126,8 +188,42 @@ final class OnboardingModel: ObservableObject {
         microphone == .granted && accessibility == .granted && inputMonitoring == .granted
     }
 
+    /// Dictation works once the model is loaded and every permission is on.
+    /// The practice dictation is encouraged, not required.
     var canFinish: Bool {
-        permissionsGranted && modelPhase.isInstalled && enginePhase.isReady && testTranscript != nil
+        permissionsGranted && modelPhase.isInstalled && enginePhase.isReady
+    }
+
+    func state(of permission: OnboardingPermission) -> PermissionState {
+        switch permission {
+        case .microphone: return microphone
+        case .accessibility: return accessibility
+        case .inputMonitoring: return inputMonitoring
+        }
+    }
+
+    func status(of permission: OnboardingPermission) -> OnboardingPermissionStatus {
+        if state(of: permission) == .granted { return .allowed }
+        return requested.contains(permission) ? .waiting : .needsRequest
+    }
+
+    /// The first permission still missing; its button gets the primary style.
+    var nextPermission: OnboardingPermission? {
+        OnboardingPermission.allCases.first { state(of: $0) != .granted }
+    }
+
+    /// Moves one page; refuses to leave Permissions until everything is on.
+    func advance() {
+        advanceTask?.cancel()
+        if step == .permissions, !permissionsGranted { return }
+        guard let next = OnboardingStep(rawValue: step.rawValue + 1) else { return }
+        step = next
+    }
+
+    func goBack() {
+        advanceTask?.cancel()
+        guard let previous = OnboardingStep(rawValue: step.rawValue - 1) else { return }
+        step = previous
     }
 
     /// Plain-language list of what still blocks the test dictation.
@@ -149,25 +245,31 @@ final class OnboardingModel: ObservableObject {
     }
 
     func start() {
+        guard isLive else { return }
         refresh()
         beginInstall()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                self?.refresh()
+            }
         }
         activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            Task { @MainActor in self?.refresh() }
         }
     }
 
     func stop() {
         microphoneMeter.stop()
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
+        advanceTask?.cancel()
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
         activationObserver = nil
         installTask?.cancel()
+        actions.closePermissionGuide()
     }
 
     // MARK: Model
@@ -230,35 +332,35 @@ final class OnboardingModel: ObservableObject {
 
     // MARK: Permissions
 
-    func requestMicrophone() {
-        switch microphone {
-        case .notDetermined:
+    func request(_ permission: OnboardingPermission) {
+        guard state(of: permission) != .granted else { return }
+        requested.insert(permission)
+        switch permission {
+        case .microphone where microphone == .notDetermined:
+            // The system prompt answers either way; a refusal falls back to
+            // System Settings on the next click.
             Task { [weak self] in
-                _ = try? await Permissions.requestMicrophoneAccess()
+                do {
+                    try await Permissions.requestMicrophoneAccess()
+                } catch {
+                    self?.requested.remove(.microphone)
+                }
                 self?.refresh()
             }
-        case .denied:
-            visitedSystemSettings = true
-            Permissions.openMicrophoneSettings()
-        case .granted:
-            break
-        }
-    }
-
-    func requestAccessibility() {
-        visitedSystemSettings = true
-        if !Permissions.ensureAccessibilityPrompted() {
-            Permissions.openAccessibilitySettings()
+        case .inputMonitoring where !visitedSystemSettings:
+            // Registers Speakeasy in the list so there is a switch to turn on.
+            permissionClient.registerInputMonitoring()
+            openSettings(for: permission)
+        default:
+            openSettings(for: permission)
         }
         refresh()
     }
 
-    func requestInputMonitoring() {
+    private func openSettings(for permission: OnboardingPermission) {
         visitedSystemSettings = true
-        if !Permissions.requestInputMonitoring() {
-            Permissions.openInputMonitoringSettings()
-        }
-        refresh()
+        guidedPermission = permission
+        actions.openPermissionSettings(permission)
     }
 
     /// Recovers from a stale grant: reset this app's entry, then ask again.
@@ -284,7 +386,7 @@ final class OnboardingModel: ObservableObject {
     }
 
     func finish() {
-        guard canFinish else { return }
+        guard canFinish, isLive else { return }
         OnboardingStore.markComplete()
         stop()
         actions.finish()
@@ -320,11 +422,18 @@ final class OnboardingModel: ObservableObject {
         testArmed = true
     }
 
-    private func refresh() {
-        microphone = Permissions.microphoneState()
-        accessibility = Permissions.accessibilityState()
-        inputMonitoring = Permissions.inputMonitoringState()
+    func refresh() {
+        let wasGranted = permissionsGranted
+        microphone = permissionClient.microphone()
+        accessibility = permissionClient.accessibility()
+        inputMonitoring = permissionClient.inputMonitoring()
         shortcut = actions.currentShortcut()
+        requested = requested.filter { state(of: $0) != .granted }
+        if let guided = guidedPermission, state(of: guided) == .granted {
+            guidedPermission = nil
+            actions.closePermissionGuide()
+        }
+        if !wasGranted, permissionsGranted, step == .permissions { scheduleAdvance() }
         startEngineIfPossible()
 
         if testArmed, testTranscript == nil,
@@ -339,6 +448,16 @@ final class OnboardingModel: ObservableObject {
            let attempt = actions.latestAttempt(), attempt.sequence != attemptBaseline {
             let hint = PracticeHint.message(for: attempt.result, microphoneName: actions.microphoneName())
             if practiceHint != hint { practiceHint = hint }
+        }
+    }
+
+    /// Lets the last check finish drawing, then moves on by itself.
+    private func scheduleAdvance() {
+        advanceTask?.cancel()
+        advanceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.advanceBeatNanoseconds)
+            guard !Task.isCancelled, let self, self.step == .permissions, self.permissionsGranted else { return }
+            self.step = .tryIt
         }
     }
 
@@ -360,6 +479,81 @@ final class OnboardingModel: ObservableObject {
     }
 }
 
+// MARK: - Preview states
+
+/// A fixed onboarding state for snapshots and visual review.
+struct OnboardingPreviewScenario {
+    let name: String
+    var step: OnboardingStep
+    var modelPhase: OnboardingModelPhase = .installed
+    var enginePhase: OnboardingEnginePhase = .ready(warmedUp: true)
+    var microphone: PermissionState = .granted
+    var accessibility: PermissionState = .granted
+    var inputMonitoring: PermissionState = .granted
+    var requested: Set<OnboardingPermission> = []
+    var visitedSystemSettings = false
+    var testTranscript: String?
+    var practiceHint: String?
+
+    static let all: [OnboardingPreviewScenario] = {
+        let downloading = OnboardingModelPhase.downloading(received: 58_000_000, expected: 135_000_000)
+        return [
+            .init(name: "01-welcome", step: .welcome, modelPhase: downloading, enginePhase: .waiting,
+                  microphone: .notDetermined, accessibility: .denied, inputMonitoring: .denied),
+            .init(name: "02-model-downloading", step: .model, modelPhase: downloading, enginePhase: .waiting,
+                  microphone: .notDetermined, accessibility: .denied, inputMonitoring: .denied),
+            .init(name: "03-model-failed", step: .model,
+                  modelPhase: .failed("You're offline. Connect to the internet and try again."), enginePhase: .waiting,
+                  microphone: .notDetermined, accessibility: .denied, inputMonitoring: .denied),
+            .init(name: "04-permissions-none", step: .permissions, modelPhase: downloading, enginePhase: .waiting,
+                  microphone: .notDetermined, accessibility: .denied, inputMonitoring: .denied),
+            .init(name: "05-permissions-waiting", step: .permissions, enginePhase: .waiting,
+                  microphone: .granted, accessibility: .denied, inputMonitoring: .denied,
+                  requested: [.accessibility], visitedSystemSettings: true),
+            .init(name: "06-permissions-all", step: .permissions),
+            .init(name: "07-try-loading", step: .tryIt, modelPhase: downloading, enginePhase: .waiting),
+            .init(name: "08-try-ready", step: .tryIt),
+            .init(name: "09-try-hint", step: .tryIt,
+                  practiceHint: "Nothing was heard. Check that MacBook Pro Microphone is the right input."),
+            .init(name: "10-try-success", step: .tryIt, testTranscript: "Hello from Speakeasy, this is my first dictation."),
+            .init(name: "11-done", step: .done, testTranscript: "Hello from Speakeasy."),
+        ]
+    }()
+}
+
+extension OnboardingModel {
+    /// A model frozen in `scenario`: nothing downloads, polls, or plays.
+    static func preview(_ scenario: OnboardingPreviewScenario) -> OnboardingModel {
+        let client = OnboardingPermissionClient(
+            microphone: { scenario.microphone },
+            accessibility: { scenario.accessibility },
+            inputMonitoring: { scenario.inputMonitoring }
+        )
+        let model = OnboardingModel(
+            actions: .init(
+                startEngine: { true },
+                latestTranscript: { nil },
+                currentShortcut: { .functionKey },
+                changeShortcut: {},
+                finish: {},
+                relaunch: {}
+            ),
+            initialModel: .parakeet110M,
+            permissionClient: client,
+            isLive: false
+        )
+        model.refresh()
+        model.step = scenario.step
+        model.modelPhase = scenario.modelPhase
+        model.enginePhase = scenario.enginePhase
+        model.requested = scenario.requested
+        model.visitedSystemSettings = scenario.visitedSystemSettings
+        model.testTranscript = scenario.testTranscript
+        model.practiceHint = scenario.practiceHint
+        return model
+    }
+}
+
 // MARK: - Window
 
 @MainActor
@@ -368,10 +562,12 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     /// Called when the user closes the window before finishing.
     var onClose: (() -> Void)?
 
+    static let contentSize = NSSize(width: 820, height: 640)
+
     init(model: OnboardingModel) {
         self.model = model
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 580),
+            contentRect: NSRect(origin: .zero, size: Self.contentSize),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -382,7 +578,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.contentViewController = NSHostingController(rootView: OnboardingView(model: model))
-        window.setContentSize(NSSize(width: 680, height: 580))
+        window.setContentSize(Self.contentSize)
         window.center()
         super.init(window: window)
         window.delegate = self
